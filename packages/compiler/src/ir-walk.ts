@@ -510,7 +510,7 @@ export function walkCallExpression(
               ctx.emitU16(id);
 
               // Walk the full component subtree for SSR content
-              const newVisited = new Set(walkCtx.visited || new Set());
+              const newVisited = new Set<string>(walkCtx.visited || new Set<string>());
               newVisited.add(componentName);
               const islandWalkCtx: WalkContext = {
                 ...walkCtx,
@@ -537,7 +537,7 @@ export function walkCallExpression(
       const resolved = walkCtx.resolveComponent(componentName);
       if (resolved) {
         // Cycle detection
-        const visited = walkCtx.visited || new Set();
+        const visited = walkCtx.visited || new Set<string>();
         if (visited.has(componentName)) {
           emitIsland(ctx, componentName);
           return;

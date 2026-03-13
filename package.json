@@ -4,6 +4,6 @@
   "workspaces": ["packages/*"],
   "scripts": {
     "test": "npm run test --workspaces",
-    "build": "npm run build --workspaces"
+    "build": "npm run build -w packages/compiler && npm run build -w packages/build"
   }
 }

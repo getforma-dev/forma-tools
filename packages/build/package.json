@@ -14,7 +14,7 @@
   },
   "files": ["dist/"],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts",
+    "build": "tsup src/index.ts --format esm --dts --external @getforma/compiler",
     "test": "vitest run"
   },
   "dependencies": {
@@ -22,6 +22,7 @@
     "@getforma/compiler": "^0.1.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "tsup": "^8.5.1",
     "typescript": "^5.7.3",
     "vitest": "^3.1.1"

@@ -7,7 +7,7 @@
  */
 
 import type { Plugin } from 'esbuild';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { parse } from '@babel/parser';
 import * as t from '@babel/types';
@@ -220,10 +220,9 @@ function resolveFilePath(fromDir: string, importPath: string): string | null {
 /**
  * Check if a path is a directory (to avoid accidentally reading dirs).
  */
-function isDirectory(path: string): boolean {
+function isDirectory(filePath: string): boolean {
   try {
-    const { statSync } = require('node:fs');
-    return statSync(path).isDirectory();
+    return statSync(filePath).isDirectory();
   } catch {
     return false;
   }
