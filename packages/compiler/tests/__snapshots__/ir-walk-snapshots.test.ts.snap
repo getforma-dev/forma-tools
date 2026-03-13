@@ -1,0 +1,21 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ir-walk snapshots > Rule 1: static div with class 1`] = `"01 00 00 00 00 01 00 01 00 00 00 02 00 00 00 02 00 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 2: h1 with text child 1`] = `"01 00 00 00 00 00 00 04 01 00 00 00 02 00 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 3: input void tag 1`] = `"03 00 00 00 00 02 00 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 4: ternary arrow child 1`] = `"01 00 00 00 00 00 00 07 00 00 05 00 00 00 05 00 00 00 04 01 00 00 00 08 04 02 00 00 00 02 00 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 5: dynamic text child 1`] = `"01 00 00 00 00 00 00 05 00 00 00 00 02 00 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 6: dynamic attr 1`] = `"03 00 00 00 00 00 00 06 01 00 00 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 7: event handler skipped 1`] = `"01 00 00 00 00 01 00 01 00 00 00 02 00 00 00 04 03 00 00 00 02 00 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 9: static map unroll 1`] = `"01 00 00 00 00 00 00 01 01 00 00 00 00 00 04 02 00 00 00 02 01 00 00 00 01 01 00 00 00 00 00 04 03 00 00 00 02 01 00 00 00 02 00 00 00 00"`;
+
+exports[`ir-walk snapshots > Rule 12: null child skipped 1`] = `"01 00 00 00 00 00 00 04 01 00 00 00 02 00 00 00 00"`;
+
+exports[`ir-walk snapshots > nested structure 1`] = `"01 00 00 00 00 01 00 01 00 00 00 02 00 00 00 01 03 00 00 00 00 00 04 04 00 00 00 02 03 00 00 00 01 05 00 00 00 00 00 04 06 00 00 00 02 05 00 00 00 02 00 00 00 00"`;
