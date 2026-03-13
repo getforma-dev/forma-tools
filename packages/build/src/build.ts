@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 import type {
   BuildConfig,
@@ -55,9 +55,10 @@ function generateCss(
     const outPath = join(config.outputDir, entry.outfile);
 
     if (entry.tailwind && inputs.length > 0) {
-      // Run @tailwindcss/cli on the first input
-      execSync(
-        `npx @tailwindcss/cli -i ${inputs[0]} -o ${outPath} --minify`,
+      // Run @tailwindcss/cli on the first input (use execFileSync to avoid shell injection)
+      execFileSync(
+        'npx',
+        ['@tailwindcss/cli', '-i', inputs[0], '-o', outPath, '--minify'],
         { stdio: 'inherit' },
       );
     } else {
@@ -149,11 +150,12 @@ function buildWasm(
   if (!config.wasm) return false;
 
   try {
-    execSync('wasm-pack --version', { stdio: 'pipe' });
+    execFileSync('wasm-pack', ['--version'], { stdio: 'pipe' });
 
     console.log('   Building WASM walker...');
-    execSync(
-      `wasm-pack build --target web --release ${config.wasm.crateDir} -- --features wasm`,
+    execFileSync(
+      'wasm-pack',
+      ['build', '--target', 'web', '--release', config.wasm.crateDir, '--', '--features', 'wasm'],
       { stdio: 'inherit' },
     );
 
