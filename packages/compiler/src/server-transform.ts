@@ -43,16 +43,19 @@ export interface ServerTransformOptions {
 
 /**
  * Hash a function name + its source for a unique, stable endpoint path.
+ * Uses FNV-1a (32-bit) for better distribution and fewer collisions
+ * than a simple shift-and-add hash.
  */
 function hashEndpoint(name: string, source: string): string {
-  // Simple hash: use the function name + first 6 chars of a simple hash
-  let hash = 0;
+  // FNV-1a 32-bit hash
+  let hash = 0x811c9dc5; // FNV offset basis
   for (let i = 0; i < source.length; i++) {
-    const char = source.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash |= 0; // Convert to 32bit integer
+    hash ^= source.charCodeAt(i);
+    // FNV prime 0x01000193 — multiply via bit shifts for performance:
+    // hash * 16777619 === hash * (16777216 + 256 + 128 + 16 + 8 + 2 + 1)
+    hash = (hash + (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24)) >>> 0;
   }
-  const hex = Math.abs(hash).toString(16).slice(0, 6);
+  const hex = hash.toString(16).padStart(8, '0');
   return `/rpc/${name}_${hex}`;
 }
 
