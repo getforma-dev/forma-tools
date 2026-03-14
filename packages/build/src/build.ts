@@ -472,6 +472,9 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
     minify: !config.watch,
     sourcemap: config.watch ? 'inline' : false,
     logLevel: 'info',
+    jsx: 'transform',
+    jsxFactory: 'h',
+    jsxFragment: 'Fragment',
   };
 
   // ── Lazy-load SSR plugin only when needed ─────────────────────────
