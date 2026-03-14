@@ -109,14 +109,6 @@ function nextVarId(ctx: CounterContext, prefix: string = '_el$'): string {
   return `${prefix}${ctx.varCounter++}`;
 }
 
-/**
- * Normalize legacy internal "forma/*" or deep "formajs/*" imports to the
- * public package entrypoint used by transformed output.
- */
-function normalizePublicFormaImport(source: string): string {
-  return source === 'formajs' ? 'formajs' : 'formajs';
-}
-
 // ---------------------------------------------------------------------------
 // Intermediate Representation
 // ---------------------------------------------------------------------------
@@ -954,10 +946,9 @@ export function compileFormaJSX(
 
   // Add template import
   if (needsTemplateImport) {
-    const templateSource = normalizePublicFormaImport(hImportSource ?? 'formajs');
     const templateImport = t.importDeclaration(
       [t.importSpecifier(t.identifier(compiledTemplateId), t.identifier('template'))],
-      t.stringLiteral(templateSource),
+      t.stringLiteral('formajs'),
     );
     ast.program.body.unshift(templateImport);
   }
@@ -965,10 +956,9 @@ export function compileFormaJSX(
   // Add createEffect import if needed and not already imported
   if (needsCreateEffectImport) {
     // Determine the source for createEffect import
-    const effectSource = normalizePublicFormaImport(createEffectImportSource ?? hImportSource ?? 'formajs');
     const effectImport = t.importDeclaration(
       [t.importSpecifier(t.identifier(compiledCreateEffectId), t.identifier('createEffect'))],
-      t.stringLiteral(effectSource),
+      t.stringLiteral('formajs'),
     );
     ast.program.body.unshift(effectImport);
   }
