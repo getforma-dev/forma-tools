@@ -41,18 +41,14 @@ export interface ServerTransformOptions {
   mode: 'client' | 'server';
 }
 
-/**
- * Hash a function name + its source for a unique, stable endpoint path.
- * Uses FNV-1a (32-bit) for better distribution and fewer collisions
- * than a simple shift-and-add hash.
- */
+/** Hash the function source for a stable endpoint path. The function name is used as a human-readable prefix. */
 function hashEndpoint(name: string, source: string): string {
   // FNV-1a 32-bit hash
   let hash = 0x811c9dc5; // FNV offset basis
   for (let i = 0; i < source.length; i++) {
     hash ^= source.charCodeAt(i);
     // FNV prime 0x01000193 — multiply via bit shifts for performance:
-    // hash * 16777619 === hash * (16777216 + 256 + 128 + 16 + 8 + 2 + 1)
+    // hash * 16777619 === hash * (1 + 2 + 16 + 128 + 256 + 16777216)
     hash = (hash + (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24)) >>> 0;
   }
   const hex = hash.toString(16).padStart(8, '0');
