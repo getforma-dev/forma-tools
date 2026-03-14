@@ -46,7 +46,7 @@ export interface SignalDefault {
 
 const PARSE_OPTS = {
   sourceType: 'module' as const,
-  plugins: ['typescript' as const],
+  plugins: ['typescript' as const, 'jsx' as const],
 };
 
 // ---------------------------------------------------------------------------

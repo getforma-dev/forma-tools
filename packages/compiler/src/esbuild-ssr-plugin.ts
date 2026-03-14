@@ -38,7 +38,7 @@ const SOURCE_CLIENT = 0x01;
 
 const PARSE_OPTS = {
   sourceType: 'module' as const,
-  plugins: ['typescript' as const],
+  plugins: ['typescript' as const, 'jsx' as const],
 };
 
 // ---------------------------------------------------------------------------
