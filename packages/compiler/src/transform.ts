@@ -809,8 +809,6 @@ export function compileFormaJSX(
 
   // Track the local binding name for h (could be renamed via `import { h as hh }`)
   let hBindingName: string | null = null;
-  let hImportSource: string | null = null;
-  let createEffectImportSource: string | null = null;
 
   for (const node of ast.program.body) {
     if (!t.isImportDeclaration(node)) continue;
@@ -827,10 +825,6 @@ export function compileFormaJSX(
 
       if (imported === 'h') {
         hBindingName = spec.local.name;
-        hImportSource = source;
-      }
-      if (imported === 'createEffect') {
-        createEffectImportSource = source;
       }
     }
   }

@@ -48,6 +48,49 @@ describe('compiler integration', () => {
     expect(out!.code).not.toContain('"use server"');
   });
 
+  it('per-call counter isolation: separate calls both start from _tmpl$0 / _root$0', () => {
+    // Use dynamic attributes so the compiler emits _root$ variables
+    const sourceA = `
+      import { h } from 'formajs';
+      const cls = () => 'a';
+      export const a = h('div', { class: cls }, 'A');
+    `;
+    const sourceB = `
+      import { h } from 'formajs';
+      const cls = () => 'b';
+      export const b = h('span', { class: cls }, 'B');
+    `;
+
+    const outA = compileFormaJSX(sourceA, '/tmp/a.ts');
+    const outB = compileFormaJSX(sourceB, '/tmp/b.ts');
+
+    expect(outA).not.toBeNull();
+    expect(outB).not.toBeNull();
+
+    // Both outputs must start template counter from 0
+    expect(outA!.code).toContain('_tmpl$0');
+    expect(outB!.code).toContain('_tmpl$0');
+
+    // Both outputs must start root var counter from 0
+    expect(outA!.code).toContain('_root$0');
+    expect(outB!.code).toContain('_root$0');
+  });
+
+  it('multiple h() calls in one file get sequential template IDs', () => {
+    const source = `
+      import { h } from 'formajs';
+      export const a = h('div', null, 'first');
+      export const b = h('span', null, 'second');
+    `;
+
+    const out = compileFormaJSX(source, '/tmp/multi.ts');
+    expect(out).not.toBeNull();
+
+    // Should have _tmpl$0 and _tmpl$1 for the two h() calls
+    expect(out!.code).toContain('_tmpl$0');
+    expect(out!.code).toContain('_tmpl$1');
+  });
+
   it('exposes vite plugins for compiler and server transforms', () => {
     const compilerPlugin = formaCompiler();
     const serverPlugin = formaServer({ mode: 'server' });
