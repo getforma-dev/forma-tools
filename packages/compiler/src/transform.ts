@@ -89,19 +89,24 @@ const VOID_TAGS = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
-// Template ID counter (per-file, reset for each compileFormaJSX call)
+// Per-call counter context (avoids module-level mutable state for concurrent SSR)
 // ---------------------------------------------------------------------------
 
-let templateCounter = 0;
-
-function nextTemplateId(): string {
-  return `_tmpl$${templateCounter++}`;
+interface CounterContext {
+  templateCounter: number;
+  varCounter: number;
 }
 
-let varCounter = 0;
+function createCounterContext(): CounterContext {
+  return { templateCounter: 0, varCounter: 0 };
+}
 
-function nextVarId(prefix: string = '_el$'): string {
-  return `${prefix}${varCounter++}`;
+function nextTemplateId(ctx: CounterContext): string {
+  return `_tmpl$${ctx.templateCounter++}`;
+}
+
+function nextVarId(ctx: CounterContext, prefix: string = '_el$'): string {
+  return `${prefix}${ctx.varCounter++}`;
 }
 
 /**
@@ -508,6 +513,7 @@ function generateBindingCode(
   bindings: DynamicBinding[],
   rootVar: string,
   createEffectId: string,
+  ctx: CounterContext,
 ): t.Statement[] {
   const statements: t.Statement[] = [];
 
@@ -521,7 +527,7 @@ function generateBindingCode(
       // Root element itself, use rootVar
       pathToVar.set(pathKey, rootVar);
     } else if (!pathToVar.has(pathKey)) {
-      const varName = nextVarId();
+      const varName = nextVarId(ctx);
       pathToVar.set(pathKey, varName);
 
       // Generate walker expression: _el$.firstChild.nextSibling...
@@ -587,7 +593,7 @@ function generateBindingCode(
 
       case 'dynamic-text': {
         // Replace the comment placeholder with a text node, then bind via createEffect.
-        const textVar = nextVarId('_t$');
+        const textVar = nextVarId(ctx, '_t$');
         const { expr } = binding.binding;
 
         statements.push(
@@ -797,9 +803,8 @@ export function compileFormaJSX(
   code: string,
   id: string,
 ): { code: string; map: any } | null {
-  // Reset counters for this file
-  templateCounter = 0;
-  varCounter = 0;
+  // Per-call counter context — safe for concurrent SSR
+  const ctx = createCounterContext();
 
   // Parse with @babel/parser
   const ast = parse(code, {
@@ -871,7 +876,7 @@ export function compileFormaJSX(
       if (!html) return;
 
       // Generate template variable at module scope
-      const tmplVar = nextTemplateId();
+      const tmplVar = nextTemplateId(ctx);
       needsTemplateImport = true;
 
       // const _tmpl$ = _$template('<div ...>');
@@ -911,7 +916,7 @@ export function compileFormaJSX(
         needsCreateEffectImport = true;
       }
 
-      const rootVar = nextVarId('_root$');
+      const rootVar = nextVarId(ctx, '_root$');
 
       // const _root$ = _tmpl$.cloneNode(true);
       const cloneStmt = t.variableDeclaration('const', [
@@ -924,7 +929,7 @@ export function compileFormaJSX(
         ),
       ]);
 
-      const bindingStatements = generateBindingCode(bindings, rootVar, compiledCreateEffectId);
+      const bindingStatements = generateBindingCode(bindings, rootVar, compiledCreateEffectId, ctx);
 
       // Build an IIFE: (() => { clone; walk; bind; return _root$; })()
       const iifeBody = [
