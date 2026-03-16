@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'compiler-v*'
+      - 'build-v*'
+
+permissions:
+  contents: read
+  id-token: write  # Required for npm trusted publishing (OIDC)
+
+jobs:
+  publish-compiler:
+    if: startsWith(github.ref_name, 'compiler-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm install
+      - run: npm run build -w packages/compiler
+      - run: npm test -w packages/compiler
+
+      - name: Verify version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./packages/compiler/package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#compiler-v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::compiler package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+
+      # Trusted publishing: uses OIDC, no npm token needed.
+      # Configure at: npmjs.com/package/@getforma/compiler → Settings → Trusted Publisher
+      - run: npm publish --access public -w packages/compiler
+
+  publish-build:
+    if: startsWith(github.ref_name, 'build-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm install
+      - run: npm run build --workspaces
+      - run: npm test -w packages/build
+
+      - name: Verify version matches tag
+        run: |
+          PKG_VERSION=$(node -p "require('./packages/build/package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#build-v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::build package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+
+      # Trusted publishing: uses OIDC, no npm token needed.
+      # Configure at: npmjs.com/package/@getforma/build → Settings → Trusted Publisher
+      - run: npm publish --access public -w packages/build
