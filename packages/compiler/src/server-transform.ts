@@ -14,11 +14,11 @@
  * }
  *
  * // Client output:
- * import { $$serverFunction } from "formajs";
+ * import { $$serverFunction } from "formajs/server";
  * const createTodo = $$serverFunction("/rpc/createTodo_a1b2c3");
  *
  * // Server output:
- * import { registerServerFunction } from "formajs";
+ * import { registerServerFunction } from "formajs/server";
  * async function createTodo(text: string) {
  *   return db.insert('todos', { text, done: false });
  * }
@@ -143,17 +143,17 @@ export function transformServerFunctions(
 
   // Add necessary imports
   if (options.mode === 'client' && serverFunctions.length > 0) {
-    // Add: import { $$serverFunction } from "formajs";
+    // Add: import { $$serverFunction } from "formajs/server";
     const importDecl = t.importDeclaration(
       [t.importSpecifier(t.identifier('$$serverFunction'), t.identifier('$$serverFunction'))],
-      t.stringLiteral('formajs'),
+      t.stringLiteral('formajs/server'),
     );
     ast.program.body.unshift(importDecl);
   } else if (options.mode === 'server' && serverFunctions.length > 0) {
-    // Add: import { registerServerFunction } from "formajs";
+    // Add: import { registerServerFunction } from "formajs/server";
     const importDecl = t.importDeclaration(
       [t.importSpecifier(t.identifier('registerServerFunction'), t.identifier('registerServerFunction'))],
-      t.stringLiteral('formajs'),
+      t.stringLiteral('formajs/server'),
     );
     ast.program.body.unshift(importDecl);
 
