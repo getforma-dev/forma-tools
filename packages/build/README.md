@@ -26,7 +26,7 @@ await build({
     { entry: "src/app.tsx", outfile: "app.js" },
   ],
   routes: {
-    "/": { js: ["app.js"], css: ["app.css"] },
+    "/": { js: ["app"], css: ["app"] },
   },
   outputDir: "dist",
 });
@@ -64,8 +64,8 @@ const config: BuildConfig = {
     { entry: "src/dashboard/app.tsx", outfile: "dashboard.js" },
   ],
   routes: {
-    "/": { js: ["home.js"], css: ["home.css"] },
-    "/dashboard": { js: ["dashboard.js"], css: ["dashboard.css"] },
+    "/": { js: ["home"], css: ["home"] },
+    "/dashboard": { js: ["dashboard"], css: ["dashboard"] },
   },
   outputDir: "dist",
 

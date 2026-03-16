@@ -20,8 +20,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "esbuild": "^0.25.0",
+    "esbuild": "^0.25.0"
+  },
+  "peerDependencies": {
     "@getforma/compiler": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@getforma/compiler": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -34,5 +41,8 @@
     "url": "https://github.com/getforma-dev/forma-tools.git",
     "directory": "packages/build"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
 }

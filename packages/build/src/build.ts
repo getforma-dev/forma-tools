@@ -109,7 +109,6 @@ function generateIslandRegistries(
     const registrySource = [
       `// Auto-generated island registry for ${pageName}`,
       `// Islands discovered: ${islands.map((i) => i.name).join(', ')}`,
-      `// TODO: Bundle this file with a second esbuild pass for production use`,
       `import { activateIslands } from '@getforma/core';`,
       `import PageComponent from '../${entry.entry}';`,
       ``,
@@ -450,138 +449,147 @@ self.addEventListener('fetch', (event) => {
  */
 export async function build(config: BuildConfig): Promise<BuildResult> {
   const distDir = config.outputDir;
+  const createdDir = !existsSync(distDir);
 
   // ── Clean output directory ────────────────────────────────────────
   rmSync(distDir, { recursive: true, force: true });
   mkdirSync(distDir, { recursive: true });
 
-  // ── CSS generation ────────────────────────────────────────────────
-  generateCss(config);
+  try {
+    // ── CSS generation ────────────────────────────────────────────────
+    generateCss(config);
 
-  // ── Font copying ──────────────────────────────────────────────────
-  copyFonts(config);
+    // ── Font copying ──────────────────────────────────────────────────
+    copyFonts(config);
 
-  // ── esbuild shared config ─────────────────────────────────────────
-  const shared: Partial<esbuild.BuildOptions> = {
-    bundle: true,
-    format: 'esm',
-    target: 'es2022',
-    alias: config.formaAlias
-      ? { '@getforma/core': config.formaAlias }
-      : {},
-    minify: !config.watch,
-    sourcemap: config.watch ? 'inline' : false,
-    logLevel: 'info',
-    jsx: 'transform',
-    jsxFactory: 'h',
-    jsxFragment: 'Fragment',
-  };
-
-  // ── Lazy-load SSR plugin only when needed ─────────────────────────
-  let formaSsrPlugin:
-    | ((opts: {
-        page: string;
-        outDir: string;
-        entryPoint?: string;
-      }) => esbuild.Plugin)
-    | undefined;
-
-  if (config.ssr) {
-    console.log('SSR mode enabled — emitting IR files');
-    try {
-      const mod = await import('@getforma/compiler');
-      formaSsrPlugin = mod.formaSsrPlugin;
-    } catch {
-      console.warn(
-        'Warning: @getforma/compiler not available for SSR. Skipping IR emission.',
-      );
-    }
-  }
-
-  // ── Build entries ─────────────────────────────────────────────────
-  if (config.watch) {
-    // Watch mode
-    for (const entry of config.entryPoints) {
-      const ctx = await esbuild.context({
-        ...shared,
-        entryPoints: [entry.entry],
-        outfile: join(distDir, entry.outfile),
-      });
-      await ctx.watch();
-    }
-
-    // In watch mode, return a minimal result
-    return {
-      manifest: {
-        version: 1,
-        build_hash: 'watch-mode',
-        assets: {},
-        routes: {},
-      },
-      buildHash: 'watch-mode',
-      warnings: [],
+    // ── esbuild shared config ─────────────────────────────────────────
+    const shared: Partial<esbuild.BuildOptions> = {
+      bundle: true,
+      format: 'esm',
+      target: 'es2022',
+      alias: config.formaAlias
+        ? { '@getforma/core': config.formaAlias }
+        : {},
+      minify: !config.watch,
+      sourcemap: config.watch ? 'inline' : false,
+      logLevel: 'info',
+      jsx: 'transform',
+      jsxFactory: 'h',
+      jsxFragment: 'Fragment',
     };
-  }
 
-  // ── Parallel production builds ────────────────────────────────────
-  await Promise.all(
-    config.entryPoints.map((entry) => {
-      const buildOptions: esbuild.BuildOptions = {
-        ...shared,
-        entryPoints: [entry.entry],
-        outfile: join(distDir, entry.outfile),
-      };
+    // ── Lazy-load SSR plugin only when needed ─────────────────────────
+    let formaSsrPlugin:
+      | ((opts: {
+          page: string;
+          outDir: string;
+          entryPoint?: string;
+        }) => esbuild.Plugin)
+      | undefined;
 
-      if (config.ssr && formaSsrPlugin) {
-        const pageName = basename(entry.outfile, '.js');
-        const ssrEntryPoint =
-          config.ssrEntryPoints?.[pageName] ?? entry.entry;
-        buildOptions.plugins = [
-          ...(buildOptions.plugins || []),
-          formaSsrPlugin({
-            page: pageName,
-            outDir: distDir,
-            entryPoint: ssrEntryPoint,
-          }),
-        ];
+    if (config.ssr) {
+      console.log('SSR mode enabled — emitting IR files');
+      try {
+        const mod = await import('@getforma/compiler');
+        formaSsrPlugin = mod.formaSsrPlugin;
+      } catch {
+        console.warn(
+          'Warning: @getforma/compiler not available for SSR. Skipping IR emission.',
+        );
+      }
+    }
+
+    // ── Build entries ─────────────────────────────────────────────────
+    if (config.watch) {
+      // Watch mode
+      for (const entry of config.entryPoints) {
+        const ctx = await esbuild.context({
+          ...shared,
+          entryPoints: [entry.entry],
+          outfile: join(distDir, entry.outfile),
+        });
+        await ctx.watch();
       }
 
-      return esbuild.build(buildOptions);
-    }),
-  );
+      // In watch mode, return a minimal result
+      return {
+        manifest: {
+          version: 1,
+          build_hash: 'watch-mode',
+          assets: {},
+          routes: {},
+        },
+        buildHash: 'watch-mode',
+        warnings: [],
+      };
+    }
 
-  // ── Island registry generation ────────────────────────────────────
-  if (config.ssr) {
-    generateIslandRegistries(config);
+    // ── Parallel production builds ────────────────────────────────────
+    await Promise.all(
+      config.entryPoints.map((entry) => {
+        const buildOptions: esbuild.BuildOptions = {
+          ...shared,
+          entryPoints: [entry.entry],
+          outfile: join(distDir, entry.outfile),
+        };
+
+        if (config.ssr && formaSsrPlugin) {
+          const pageName = basename(entry.outfile, '.js');
+          const ssrEntryPoint =
+            config.ssrEntryPoints?.[pageName] ?? entry.entry;
+          buildOptions.plugins = [
+            ...(buildOptions.plugins || []),
+            formaSsrPlugin({
+              page: pageName,
+              outDir: distDir,
+              entryPoint: ssrEntryPoint,
+            }),
+          ];
+        }
+
+        return esbuild.build(buildOptions);
+      }),
+    );
+
+    // ── Island registry generation ────────────────────────────────────
+    if (config.ssr) {
+      generateIslandRegistries(config);
+    }
+
+    // ── WASM build ────────────────────────────────────────────────────
+    const wasmBuilt = buildWasm(config);
+
+    // ── Content hashing ───────────────────────────────────────────────
+    const assets = hashAssets(config);
+    console.log(`   ${Object.keys(assets).length} assets hashed`);
+
+    // ── Compression ───────────────────────────────────────────────────
+    compressAssets(distDir);
+
+    // ── Manifest generation ───────────────────────────────────────────
+    const { manifest, warnings } = generateManifest(config, assets, wasmBuilt);
+
+    writeFileSync(
+      join(distDir, 'manifest.json'),
+      JSON.stringify(manifest, null, 2) + '\n',
+    );
+    console.log(
+      `\nManifest written: ${distDir}/manifest.json (build_hash: ${manifest.build_hash.slice(0, 12)}...)`,
+    );
+
+    // ── Service worker generation ─────────────────────────────────────
+    generateServiceWorker(config, assets, manifest.build_hash, wasmBuilt);
+
+    return {
+      manifest,
+      buildHash: manifest.build_hash,
+      warnings,
+    };
+  } catch (err) {
+    // Clean up output directory if we created it, to prevent stale partial output
+    if (createdDir && existsSync(distDir)) {
+      rmSync(distDir, { recursive: true, force: true });
+    }
+    throw err;
   }
-
-  // ── WASM build ────────────────────────────────────────────────────
-  const wasmBuilt = buildWasm(config);
-
-  // ── Content hashing ───────────────────────────────────────────────
-  const assets = hashAssets(config);
-  console.log(`   ${Object.keys(assets).length} assets hashed`);
-
-  // ── Compression ───────────────────────────────────────────────────
-  compressAssets(distDir);
-
-  // ── Manifest generation ───────────────────────────────────────────
-  const { manifest, warnings } = generateManifest(config, assets, wasmBuilt);
-
-  writeFileSync(
-    join(distDir, 'manifest.json'),
-    JSON.stringify(manifest, null, 2) + '\n',
-  );
-  console.log(
-    `\nManifest written: ${distDir}/manifest.json (build_hash: ${manifest.build_hash.slice(0, 12)}...)`,
-  );
-
-  // ── Service worker generation ─────────────────────────────────────
-  generateServiceWorker(config, assets, manifest.build_hash, wasmBuilt);
-
-  return {
-    manifest,
-    buildHash: manifest.build_hash,
-    warnings,
-  };
 }

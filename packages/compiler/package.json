@@ -52,5 +52,8 @@
     "url": "https://github.com/getforma-dev/forma-tools.git",
     "directory": "packages/compiler"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
 }
