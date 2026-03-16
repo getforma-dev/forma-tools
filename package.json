@@ -6,7 +6,8 @@
   ],
   "scripts": {
     "test": "npm run test --workspaces",
-    "test:e2e": "npx playwright test",
+    "test:e2e": "bash e2e/sync-fixtures.sh && npx playwright test",
+    "test:e2e:ci": "npx playwright test",
     "build": "npm run build -w packages/compiler && npm run build -w packages/build"
   },
   "devDependencies": {

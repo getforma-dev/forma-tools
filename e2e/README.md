@@ -1,70 +1,72 @@
 # FormaJS Full-Stack E2E Tests
 
-Browser-level verification of the entire Forma pipeline. Tests run in a real Chromium browser via Playwright.
+Browser-level verification of the entire Forma pipeline. Tests run in a real Chromium browser via Playwright. Fixtures are **auto-synced** from the FormaJS build — no manual copying.
 
 ## What's Tested
 
-| Test Group | What It Verifies |
-|------------|-----------------|
-| **HTML Runtime** (8 tests) | data-text, data-on:click, data-model, data-show, data-class, data-computed, $refs — all via data-* directives with zero JavaScript |
-| **Programmatic h() API** (2 tests) | createSignal + h() + mount() renders DOM, signals update reactively |
-| **Compiled template path** (3 tests) | template() + cloneNode() (what the compiler generates) creates working DOM with reactive effects |
-| **Cross-cutting** (2 tests) | No console errors on page load, all three approaches coexist on the same page without interference |
+| Test Group | Tests | What It Verifies |
+|------------|-------|-----------------|
+| **HTML Runtime** | 8 | data-text, data-on:click, data-model, data-show, data-class, data-computed, $refs |
+| **Programmatic h() API** | 2 | createSignal + h() + mount() renders DOM, signals update reactively |
+| **Compiled template path** | 3 | template() + cloneNode() (compiler output) creates working DOM with reactive effects |
+| **Cross-cutting** | 2 | No console errors on page load, all three approaches coexist |
 
 ## How to Run
 
-```bash
-# From the forma-tools root:
-npm run test:e2e
+### Locally (auto-syncs FormaJS build)
 
-# Or directly:
-npx playwright test
+```bash
+npm run test:e2e
 ```
+
+This automatically:
+1. Builds FormaJS from the sibling `../formajs/` directory
+2. Copies `formajs-runtime.global.js` and `formajs.global.js` to `e2e/fixtures/`
+3. Starts a local static server on port 3457
+4. Runs 15 Playwright tests in headless Chromium
+
+### Custom FormaJS path
+
+```bash
+FORMAJS_DIR=/path/to/formajs npm run test:e2e
+```
+
+### In CI
+
+The GitHub Actions CI workflow runs E2E automatically on every push to main — clones formajs from GitHub, builds it, copies fixtures, runs Playwright. On failure, the report is uploaded as an artifact.
 
 ## When to Run
 
-Run these tests whenever you:
-- Update `@getforma/core` (signals, h(), template, runtime)
-- Update `@getforma/compiler` (transform output format)
-- Change the HTML Runtime (data-* directive handling)
-- Add new directives or magic variables
-- Upgrade alien-signals
+- After updating `@getforma/core`
+- After updating `@getforma/compiler`
+- After changing HTML Runtime directives or magic variables
+- After upgrading alien-signals
+- Before every release
 
-## How It Works
+## File Structure
 
 ```
 e2e/
 ├── fixtures/
 │   ├── full-stack.html              ← Test page with all three entry points
-│   ├── formajs-runtime.global.js    ← HTML Runtime (IIFE, from @getforma/core build)
-│   ├── formajs.global.js            ← Full API (IIFE, for h()/mount()/template())
-│   └── compiled-counter.js          ← Compiler output example (for reference)
-├── full-stack.spec.ts               ← Playwright test file (15 tests)
+│   ├── formajs-runtime.global.js    ← Auto-synced from formajs build
+│   ├── formajs.global.js            ← Auto-synced from formajs build
+│   └── compiled-counter.js          ← Compiler output example (reference)
+├── full-stack.spec.ts               ← 15 Playwright tests
+├── sync-fixtures.sh                 ← Builds FormaJS and copies dist files
 └── README.md                        ← This file
-```
-
-The test:
-1. Starts a local static server (`serve`) on port 3457
-2. Opens `full-stack.html` in headless Chromium
-3. Verifies DOM content, clicks buttons, fills inputs, checks visibility/classes
-4. Asserts reactivity works across all three approaches
-
-## Refreshing Fixtures
-
-If you rebuild FormaJS, update the fixtures:
-
-```bash
-# From FormaStack/formajs:
-npm run build
-
-# Copy to forma-tools e2e:
-cp dist/formajs-runtime.global.js ../forma-tools/e2e/fixtures/
-cp dist/formajs.global.js ../forma-tools/e2e/fixtures/
 ```
 
 ## Adding Tests
 
-Add new test blocks to `full-stack.spec.ts`. For new directives or features:
-1. Add the HTML to `fixtures/full-stack.html` with unique IDs
-2. Add a `test()` block that interacts with the new elements
-3. Run `npx playwright test` to verify
+1. Add HTML to `fixtures/full-stack.html` with unique IDs
+2. Add a `test()` block in `full-stack.spec.ts`
+3. Run `npm run test:e2e` to verify
+
+## Troubleshooting
+
+| Error | Fix |
+|-------|-----|
+| "FormaJS directory not found" | `FORMAJS_DIR=~/path/to/formajs npm run test:e2e` |
+| "Cannot find module serve" | `npm install` |
+| "Browser not found" | `npx playwright install chromium` |
