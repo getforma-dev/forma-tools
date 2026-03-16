@@ -1,29 +1,101 @@
 # forma-tools
 
-Build tooling for [Forma](https://getforma.dev) — a reactive framework for building web applications.
+[![CI](https://github.com/getforma-dev/forma-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/getforma-dev/forma-tools/actions/workflows/ci.yml)
+
+Build tooling for [FormaJS](https://github.com/getforma-dev/formajs) — the reactive DOM library with fine-grained signals.
+
+**These tools are optional.** FormaJS works without them. Add them when you want faster rendering (compiled templates), server functions (`"use server"`), or the full Rust SSR pipeline.
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| [`@getforma/compiler`](packages/compiler) | TypeScript-to-FMIR compiler, Vite plugin, esbuild SSR plugin |
-| [`@getforma/build`](packages/build) | Parameterized esbuild build pipeline with content hashing, compression, and manifest generation |
+| Package | npm | What it does |
+|---------|-----|-------------|
+| [`@getforma/compiler`](packages/compiler) | [![npm](https://img.shields.io/npm/v/@getforma/compiler)](https://www.npmjs.com/package/@getforma/compiler) | Vite plugin that compiles `h()` → `template()` + `cloneNode()`. Server function transforms. esbuild SSR plugin for FMIR emission. |
+| [`@getforma/build`](packages/build) | [![npm](https://img.shields.io/npm/v/@getforma/build)](https://www.npmjs.com/package/@getforma/build) | Production build pipeline — esbuild bundling, content hashing, Brotli/gzip compression, asset manifest, SSR IR emission. |
 
-## Install
+## When Do You Need These?
+
+| You want to... | Install |
+|----------------|---------|
+| Use FormaJS with Vite (no compilation) | Nothing — just `@getforma/core` |
+| Faster rendering via compiled templates | `npm install -D @getforma/compiler` |
+| `"use server"` RPC functions | `npm install -D @getforma/compiler` |
+| Production build with hashing + compression | `npm install -D @getforma/build` |
+| Rust SSR with `forma-server` | `npm install -D @getforma/build` |
+
+`@getforma/build` depends on `@getforma/compiler` — installing build gives you both.
+
+## Quick Start
+
+### With Vite (compiler only)
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+import { formaCompiler } from "@getforma/compiler";
+
+export default defineConfig({
+  plugins: [formaCompiler()],
+});
+```
+
+### Production build pipeline
+
+```ts
+// build.ts
+import { build } from "@getforma/build";
+
+await build({
+  entryPoints: [{ entry: "src/app.tsx", outfile: "app.js" }],
+  routes: { "/": { js: ["app.js"], css: ["app.css"] } },
+  outputDir: "dist",
+});
+```
 
 ```bash
-npm install @getforma/compiler
-npm install @getforma/build
+npx tsx build.ts
 ```
+
+## Part of the Forma Stack
+
+```
+@getforma/core       → reactive DOM library (signals, h(), islands)
+@getforma/compiler   → h() optimization, server transforms, IR emission
+@getforma/build      → production pipeline (bundling, hashing, compression)
+forma-ir             → Rust FMIR parser + walker
+forma-server         → Rust/Axum SSR middleware
+```
+
+See the full stack at [getforma.dev](https://getforma.dev).
 
 ## Development
 
 ```bash
+git clone https://github.com/getforma-dev/forma-tools.git
+cd forma-tools
 npm install
-npm test        # run all workspace tests
-npm run build   # build all packages
+npm test                    # run all workspace tests (162 tests)
+npm run build --workspaces  # build all packages
+```
+
+## Publishing
+
+Uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers) — no tokens, OIDC authentication via GitHub Actions.
+
+```bash
+# Publish compiler
+npm version patch -w packages/compiler --no-git-tag-version
+git add -A && git commit -m "chore: bump compiler"
+git tag compiler-v0.1.4
+git push && git push --tags
+
+# Publish build
+npm version patch -w packages/build --no-git-tag-version
+git add -A && git commit -m "chore: bump build"
+git tag build-v0.1.4
+git push && git push --tags
 ```
 
 ## License
 
-MIT -- Copyright (c) 2026 Forma
+MIT — Copyright (c) 2026 Forma
