@@ -1,0 +1,48 @@
+name: Compatibility Check
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # Every Monday at midnight UTC
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  verify-compiler-imports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm install
+      - run: npm install @getforma/core@latest
+
+      - name: Verify compiler-generated imports exist in @getforma/core
+        run: |
+          node -e "
+            const core = require('@getforma/core');
+            const required = ['template', 'templateMany', 'createEffect', 'h', 'createSignal', 'Fragment', 'createComputed', 'batch', 'mount'];
+            const missing = required.filter(sym => typeof core[sym] === 'undefined');
+            if (missing.length > 0) {
+              console.error('MISSING from @getforma/core:', missing.join(', '));
+              process.exit(1);
+            }
+            console.log('All', required.length, 'compiler-generated imports verified in @getforma/core');
+          "
+
+      - name: Verify server imports exist in @getforma/core/server
+        run: |
+          node -e "
+            const server = require('@getforma/core/server');
+            const required = ['\$\$serverFunction', 'registerServerFunction'];
+            const missing = required.filter(sym => typeof server[sym] === 'undefined');
+            if (missing.length > 0) {
+              console.error('MISSING from @getforma/core/server:', missing.join(', '));
+              process.exit(1);
+            }
+            console.log('All', required.length, 'server imports verified in @getforma/core/server');
+          "
+
+      - name: Run compiler tests
+        run: npm test
