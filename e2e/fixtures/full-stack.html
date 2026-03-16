@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>FormaJS Full-Stack E2E Test</title>
+</head>
+<body>
+  <!-- ═══════ Test 1: HTML Runtime (data-* directives) ═══════ -->
+  <section id="test-runtime">
+    <div data-forma-state='{"count": 0, "name": "World"}'>
+      <p id="rt-text" data-text="{'Hello ' + name}"></p>
+      <p id="rt-count" data-text="{count}"></p>
+      <button id="rt-inc" data-on:click="{count++}">+1</button>
+      <button id="rt-reset" data-on:click="{count = 0}">Reset</button>
+      <input id="rt-input" data-model="{name}">
+      <div id="rt-show" data-show="{count > 0}">Count is positive</div>
+      <div id="rt-class" data-class:active="{count > 2}">Class test</div>
+      <div data-computed="doubled = count * 2">
+        <span id="rt-computed" data-text="{doubled}"></span>
+      </div>
+      <div data-ref="myDiv" id="rt-ref-target">Ref target</div>
+      <p id="rt-ref-check" data-text="{$refs.myDiv ? 'ref-found' : 'ref-missing'}"></p>
+    </div>
+  </section>
+
+  <!-- ═══════ Test 2: Programmatic h() API ═══════ -->
+  <div id="test-h-api"></div>
+
+  <!-- ═══════ Test 3: Compiled component (compiler output) ═══════ -->
+  <div id="test-compiled"></div>
+
+  <!-- Load FormaJS runtime (IIFE) -->
+  <script src="formajs-runtime.global.js"></script>
+
+  <!-- Load the full FormaJS API for programmatic tests -->
+  <script src="formajs.global.js"></script>
+
+  <!-- Programmatic h() test -->
+  <script>
+    (function() {
+      var FormaJS = window.FormaJS;
+      var createSignal = FormaJS.createSignal;
+      var h = FormaJS.h;
+      var mount = FormaJS.mount;
+      var createEffect = FormaJS.createEffect;
+      var template = FormaJS.template;
+
+      var result = createSignal(0);
+      var count = result[0];
+      var setCount = result[1];
+
+      mount(function() {
+        return h('div', { id: 'h-container' },
+          h('span', { id: 'h-count' }, function() { return String(count()); }),
+          h('button', { id: 'h-btn' }, 'h() +1')
+        );
+      }, '#test-h-api');
+
+      document.getElementById('h-btn').addEventListener('click', function() {
+        setCount(count() + 1);
+      });
+
+      // Test 3: Compiled component simulation
+      // The compiler generates template() + cloneNode() — verify it works
+      var tmpl = template('<div id="tpl-container"><span id="tpl-count"><!></span><button id="tpl-btn">Template +1</button></div>');
+      var root = tmpl.cloneNode(true);
+      var textPlaceholder = root.firstChild.firstChild;
+      var btn = root.firstChild.nextSibling;
+
+      var result2 = createSignal(0);
+      var tplCount = result2[0];
+      var setTplCount = result2[1];
+
+      var textNode = document.createTextNode('');
+      textPlaceholder.replaceWith(textNode);
+
+      createEffect(function() {
+        textNode.textContent = String(tplCount());
+      });
+
+      btn.addEventListener('click', function() {
+        setTplCount(tplCount() + 1);
+      });
+
+      document.getElementById('test-compiled').appendChild(root);
+    })();
+  </script>
+</body>
+</html>

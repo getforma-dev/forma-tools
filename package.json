@@ -1,9 +1,16 @@
 {
   "name": "forma-tools",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "test": "npm run test --workspaces",
+    "test:e2e": "npx playwright test",
     "build": "npm run build -w packages/compiler && npm run build -w packages/build"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "serve": "^14.2.6"
   }
 }
