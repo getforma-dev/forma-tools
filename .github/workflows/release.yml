@@ -51,7 +51,8 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - run: npm install
-      - run: npm run build --workspaces
+      - run: npm run build -w packages/compiler
+      - run: npm run build -w packages/build
       - run: npm test -w packages/build
 
       - name: Verify version matches tag
