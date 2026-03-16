@@ -78,24 +78,6 @@ npm test                    # run all workspace tests (162 tests)
 npm run build --workspaces  # build all packages
 ```
 
-## Publishing
-
-Uses [npm trusted publishing](https://docs.npmjs.com/trusted-publishers) — no tokens, OIDC authentication via GitHub Actions.
-
-```bash
-# Publish compiler
-npm version patch -w packages/compiler --no-git-tag-version
-git add -A && git commit -m "chore: bump compiler"
-git tag compiler-v0.1.4
-git push && git push --tags
-
-# Publish build
-npm version patch -w packages/build --no-git-tag-version
-git add -A && git commit -m "chore: bump build"
-git tag build-v0.1.4
-git push && git push --tags
-```
-
 ## License
 
 MIT — Copyright (c) 2026 Forma
