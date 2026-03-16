@@ -13,7 +13,11 @@ Production build pipeline for [FormaJS](https://github.com/getforma-dev/formajs)
 npm install -D @getforma/build
 ```
 
-This automatically installs `@getforma/compiler` and `esbuild`.
+This installs `esbuild` automatically. For SSR features (FMIR emission), also install the compiler:
+
+```bash
+npm install -D @getforma/compiler
+```
 
 ## Quick Start
 
@@ -149,7 +153,7 @@ The Rust server (`forma-server`) reads this manifest to serve assets with correc
 |---|---|---|
 | What it is | Vite/esbuild plugins | Full build pipeline |
 | Use case | Add to existing Vite config | Replace your build script |
-| Includes compiler? | — | Yes (dependency) |
+| Includes compiler? | — | Optional peer dependency (needed for SSR only) |
 | Content hashing | No | Yes |
 | Compression | No | Yes (Brotli + gzip) |
 | Manifest | No | Yes |
