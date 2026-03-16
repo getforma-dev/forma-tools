@@ -158,13 +158,26 @@ The Rust server (`forma-server`) reads this manifest to serve assets with correc
 
 ## Part of the Forma Stack
 
-| Package | Language | Description |
-|---|---|---|
-| [@getforma/core](https://www.npmjs.com/package/@getforma/core) | TypeScript | Reactive DOM library — signals, h(), islands, SSR hydration |
-| [@getforma/compiler](https://www.npmjs.com/package/@getforma/compiler) | TypeScript | h() optimization, server transforms, IR emission |
-| [@getforma/build](https://www.npmjs.com/package/@getforma/build) | TypeScript | **This package** — bundling, hashing, compression, manifest |
-| [forma-ir](https://crates.io/crates/forma-ir) | Rust | FMIR binary format: parser, walker, WASM exports |
-| [forma-server](https://crates.io/crates/forma-server) | Rust | Axum middleware for SSR, asset serving, CSP |
+### Frontend (TypeScript)
+
+| Package | Description |
+|---|---|
+| [@getforma/core](https://www.npmjs.com/package/@getforma/core) | Reactive DOM library — signals, h(), islands, SSR hydration |
+| [@getforma/compiler](https://www.npmjs.com/package/@getforma/compiler) | Vite plugin — h() optimization, server transforms, IR emission |
+| [@getforma/build](https://www.npmjs.com/package/@getforma/build) | **This package** — bundling, hashing, compression, manifest |
+
+### Backend (Rust)
+
+| Package | Description |
+|---|---|
+| [forma-ir](https://crates.io/crates/forma-ir) | FMIR binary format — parser, walker, WASM exports |
+| [forma-server](https://crates.io/crates/forma-server) | Axum middleware — SSR page rendering, asset serving, CSP headers |
+
+### Full Framework
+
+| Package | Description |
+|---|---|
+| [@getforma/create-app](https://github.com/getforma-dev/create-forma-app) | `npx @getforma/create-app` — scaffolds a Rust server + TypeScript frontend project |
 
 ## License
 

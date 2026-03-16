@@ -58,13 +58,26 @@ npx tsx build.ts
 
 ## Part of the Forma Stack
 
-```
-@getforma/core       → reactive DOM library (signals, h(), islands)
-@getforma/compiler   → h() optimization, server transforms, IR emission
-@getforma/build      → production pipeline (bundling, hashing, compression)
-forma-ir             → Rust FMIR parser + walker
-forma-server         → Rust/Axum SSR middleware
-```
+### Frontend (TypeScript)
+
+| Package | Description |
+|---|---|
+| [@getforma/core](https://www.npmjs.com/package/@getforma/core) | Reactive DOM library — signals, h(), islands, SSR hydration |
+| [@getforma/compiler](https://www.npmjs.com/package/@getforma/compiler) | **This repo** — Vite plugin, server transforms, IR emission |
+| [@getforma/build](https://www.npmjs.com/package/@getforma/build) | **This repo** — production pipeline, bundling, hashing, compression |
+
+### Backend (Rust)
+
+| Package | Description |
+|---|---|
+| [forma-ir](https://crates.io/crates/forma-ir) | FMIR binary format — parser, walker, WASM exports |
+| [forma-server](https://crates.io/crates/forma-server) | Axum middleware — SSR page rendering, asset serving, CSP headers |
+
+### Full Framework
+
+| Package | Description |
+|---|---|
+| [@getforma/create-app](https://github.com/getforma-dev/create-forma-app) | `npx @getforma/create-app` — scaffolds a Rust server + TypeScript frontend project |
 
 See the full stack at [getforma.dev](https://getforma.dev).
 
