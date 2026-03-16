@@ -158,13 +158,13 @@ The Rust server (`forma-server`) reads this manifest to serve assets with correc
 
 ## Part of the Forma Stack
 
-```
-@getforma/core       → reactive DOM library (signals, h(), islands)
-@getforma/compiler   → Vite/esbuild plugins (h() optimization, server transforms)
-@getforma/build      → this package (production pipeline)
-forma-ir             → Rust FMIR parser + walker
-forma-server         → Rust/Axum SSR middleware (reads manifest.json)
-```
+| Package | Language | Description |
+|---|---|---|
+| [@getforma/core](https://www.npmjs.com/package/@getforma/core) | TypeScript | Reactive DOM library — signals, h(), islands, SSR hydration |
+| [@getforma/compiler](https://www.npmjs.com/package/@getforma/compiler) | TypeScript | h() optimization, server transforms, IR emission |
+| [@getforma/build](https://www.npmjs.com/package/@getforma/build) | TypeScript | **This package** — bundling, hashing, compression, manifest |
+| [forma-ir](https://crates.io/crates/forma-ir) | Rust | FMIR binary format: parser, walker, WASM exports |
+| [forma-server](https://crates.io/crates/forma-server) | Rust | Axum middleware for SSR, asset serving, CSP |
 
 ## License
 

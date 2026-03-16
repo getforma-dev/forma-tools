@@ -131,13 +131,13 @@ const component = analyzer.parseComponentFile(entry.importPath, entry.componentN
 
 ## Part of the Forma Stack
 
-```
-@getforma/core       → reactive DOM library (signals, h(), islands)
-@getforma/compiler   → this package (transforms, IR emission)
-@getforma/build      → production build pipeline (uses compiler internally)
-forma-ir             → Rust FMIR parser + walker
-forma-server         → Rust/Axum SSR middleware
-```
+| Package | Language | Description |
+|---|---|---|
+| [@getforma/core](https://www.npmjs.com/package/@getforma/core) | TypeScript | Reactive DOM library — signals, h(), islands, SSR hydration |
+| [@getforma/compiler](https://www.npmjs.com/package/@getforma/compiler) | TypeScript | **This package** — h() optimization, server transforms, IR emission |
+| [@getforma/build](https://www.npmjs.com/package/@getforma/build) | TypeScript | Production build pipeline — bundling, hashing, compression, manifest |
+| [forma-ir](https://crates.io/crates/forma-ir) | Rust | FMIR binary format: parser, walker, WASM exports |
+| [forma-server](https://crates.io/crates/forma-server) | Rust | Axum middleware for SSR, asset serving, CSP |
 
 ## License
 
