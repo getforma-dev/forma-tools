@@ -8,6 +8,7 @@
  */
 
 import * as t from '@babel/types';
+import { isEventProp, isStaticLiteral, isUndefinedIdentifier } from './utils.js';
 
 // ---------------------------------------------------------------------------
 // Classification Enum
@@ -20,33 +21,6 @@ export enum SubtreeClassification {
   Dynamic = 'dynamic',
   /** Contains event handlers or client-side state -- becomes an island. */
   Island = 'island',
-}
-
-// ---------------------------------------------------------------------------
-// Detection Helpers
-// ---------------------------------------------------------------------------
-
-/** Check if a prop key is an event handler (onClick, onInput, etc.). */
-function isEventProp(key: string): boolean {
-  return key.length > 2
-    && key.charCodeAt(0) === 111 // 'o'
-    && key.charCodeAt(1) === 110 // 'n'
-    && key.charCodeAt(2) >= 65   // 'A'
-    && key.charCodeAt(2) <= 90;  // 'Z'
-}
-
-/** Check if an expression is a static literal. */
-function isStaticLiteral(node: t.Expression | t.SpreadElement): boolean {
-  return t.isStringLiteral(node)
-    || t.isNumericLiteral(node)
-    || t.isBooleanLiteral(node)
-    || t.isNullLiteral(node)
-    || isUndefinedIdentifier(node);
-}
-
-/** Check if an expression is `undefined`. */
-function isUndefinedIdentifier(node: t.Node): boolean {
-  return t.isIdentifier(node) && node.name === 'undefined';
 }
 
 /** Check if an expression is a function (arrow or regular). */
@@ -157,8 +131,8 @@ export function classifySubtree(
           continue;
         }
 
-        // Static literal => no change
-        if (isStaticLiteral(val as t.Expression)) {
+        // Static literal or undefined => no change
+        if (isStaticLiteral(val as t.Expression) || isUndefinedIdentifier(val as t.Expression)) {
           continue;
         }
 

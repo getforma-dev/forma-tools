@@ -23,6 +23,7 @@ import { parse } from '@babel/parser';
 import * as t from '@babel/types';
 import _traverse from '@babel/traverse';
 import { IrEmitContext } from './ir-emit.js';
+import { VOID_TAGS, isEventProp, isStaticLiteral, isUndefinedIdentifier } from './utils.js';
 
 // Handle CJS/ESM compatibility for @babel/traverse
 const traverse = (typeof _traverse === 'function' ? _traverse : (_traverse as any).default) as typeof _traverse;
@@ -55,36 +56,6 @@ const TYPE_OBJECT = 0x05;
 const SOURCE_SERVER = 0x00;
 const SOURCE_CLIENT = 0x01;
 
-// ---------------------------------------------------------------------------
-// HTML Void Tags
-// ---------------------------------------------------------------------------
-
-const VOID_TAGS = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-  'link', 'meta', 'param', 'source', 'track', 'wbr',
-]);
-
-// ---------------------------------------------------------------------------
-// Detection Helpers
-// ---------------------------------------------------------------------------
-
-/** Check if a prop key is an event handler (onClick, onInput, etc.). */
-function isEventProp(key: string): boolean {
-  return key.length > 2
-    && key.charCodeAt(0) === 111 // 'o'
-    && key.charCodeAt(1) === 110 // 'n'
-    && key.charCodeAt(2) >= 65   // 'A'
-    && key.charCodeAt(2) <= 90;  // 'Z'
-}
-
-/** Check if an expression is a static literal (string, number, boolean, null). */
-function isStaticLiteral(expr: t.Expression): boolean {
-  return t.isStringLiteral(expr)
-    || t.isNumericLiteral(expr)
-    || t.isBooleanLiteral(expr)
-    || t.isNullLiteral(expr);
-}
-
 /** Convert a static literal to its string representation for an attribute value. */
 function staticLiteralToAttrString(expr: t.Expression): string | null {
   if (t.isStringLiteral(expr)) return expr.value;
@@ -92,11 +63,6 @@ function staticLiteralToAttrString(expr: t.Expression): string | null {
   if (t.isBooleanLiteral(expr)) return expr.value ? '' : null;
   if (t.isNullLiteral(expr)) return null;
   return null;
-}
-
-/** Check if a node is `undefined`. */
-function isUndefinedIdentifier(node: t.Node): boolean {
-  return t.isIdentifier(node) && node.name === 'undefined';
 }
 
 /** Check if an expression is null, undefined, or false (Rule 12). */

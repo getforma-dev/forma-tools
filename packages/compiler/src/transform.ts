@@ -15,6 +15,7 @@ import { parse } from '@babel/parser';
 import _traverse from '@babel/traverse';
 import * as t from '@babel/types';
 import _generate from '@babel/generator';
+import { VOID_TAGS, isEventProp, isStaticLiteral, isUndefinedIdentifier } from './utils.js';
 import type { NodePath } from '@babel/traverse';
 
 // Handle ESM/CJS interop for @babel/traverse and @babel/generator
@@ -68,25 +69,10 @@ function escapeHTML(value: string): string {
     .replace(/>/g, '&gt;');
 }
 
-/** Check if a prop key is an event handler (onClick, onInput, etc.). */
-function isEventProp(key: string): boolean {
-  return key.length > 2
-    && key.charCodeAt(0) === 111 /* o */
-    && key.charCodeAt(1) === 110 /* n */
-    && key.charCodeAt(2) >= 65  /* A */
-    && key.charCodeAt(2) <= 90; /* Z */
-}
-
 /** Convert event prop name to DOM event name: onClick -> click. */
 function eventName(key: string): string {
   return key.slice(2).toLowerCase();
 }
-
-/** Self-closing HTML tags (void elements). */
-const VOID_TAGS = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-  'link', 'meta', 'param', 'source', 'track', 'wbr',
-]);
 
 // ---------------------------------------------------------------------------
 // Per-call counter context (avoids module-level mutable state for concurrent SSR)
@@ -302,14 +288,6 @@ function isHCall(expr: t.Expression, hBindingName: string): boolean {
     && expr.callee.name === hBindingName;
 }
 
-/** Check if an expression is a static literal (string, number, boolean, null). */
-function isStaticLiteral(expr: t.Expression): boolean {
-  return t.isStringLiteral(expr)
-    || t.isNumericLiteral(expr)
-    || t.isBooleanLiteral(expr)
-    || t.isNullLiteral(expr);
-}
-
 /** Convert a static literal AST node to a string for an HTML attribute. Returns null if the value should be omitted. */
 function staticLiteralToString(expr: t.Expression): string | null {
   if (t.isStringLiteral(expr)) return expr.value;
@@ -317,11 +295,6 @@ function staticLiteralToString(expr: t.Expression): string | null {
   if (t.isBooleanLiteral(expr)) return expr.value ? '' : null;
   if (t.isNullLiteral(expr)) return null;
   return null;
-}
-
-/** Check if an expression is `undefined`. */
-function isUndefinedIdentifier(expr: t.Node): boolean {
-  return t.isIdentifier(expr) && expr.name === 'undefined';
 }
 
 // ---------------------------------------------------------------------------
