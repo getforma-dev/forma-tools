@@ -1145,7 +1145,11 @@ function substituteInExpr(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve a sub-component by parsing its source and finding the exported function.
+ * Resolve a sub-component by parsing its source and finding the function.
+ * Checks exported functions first, then falls back to non-exported (local)
+ * function declarations — enabling inlining of file-local helpers like
+ * Sidebar() or TopBar() that are defined but not exported.
+ *
  * Returns the h() call expression from the function's return statement, with
  * prop substitutions applied.
  */
@@ -1164,6 +1168,7 @@ function resolveSubComponent(
 
   let returnNode: t.Expression | null = null;
 
+  // Pass 1: Check exported declarations
   traverse(ast, {
     ExportNamedDeclaration(path) {
       const decl = path.node.declaration;
@@ -1220,6 +1225,66 @@ function resolveSubComponent(
       }
     },
   });
+
+  // Pass 2: If not found as an export, check non-exported (local) declarations.
+  // This enables inlining of file-local component helpers like Sidebar/TopBar.
+  if (!returnNode) {
+    traverse(ast, {
+      // function Name() { ... }  (top-level, non-exported)
+      FunctionDeclaration(path) {
+        if (path.parent.type !== 'Program') return;
+        if (path.node.id?.name !== functionName) return;
+
+        path.traverse({
+          ReturnStatement(retPath: any) {
+            if (retPath.node.argument) {
+              returnNode = retPath.node.argument;
+              retPath.stop();
+            }
+          },
+          FunctionDeclaration(p: any) { p.skip(); },
+          FunctionExpression(p: any) { p.skip(); },
+          ArrowFunctionExpression(p: any) { p.skip(); },
+        });
+        path.stop();
+      },
+
+      // const Name = () => ... or const Name = function() { ... }  (top-level, non-exported)
+      VariableDeclaration(path) {
+        if (path.parent.type !== 'Program') return;
+
+        for (const declarator of path.node.declarations) {
+          if (
+            t.isIdentifier(declarator.id)
+            && declarator.id.name === functionName
+            && declarator.init
+          ) {
+            const init = declarator.init;
+
+            if (t.isArrowFunctionExpression(init) && !t.isBlockStatement(init.body)) {
+              returnNode = init.body;
+              path.stop();
+              return;
+            }
+
+            if (
+              (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init))
+              && t.isBlockStatement(init.body)
+            ) {
+              for (const stmt of init.body.body) {
+                if (t.isReturnStatement(stmt) && stmt.argument) {
+                  returnNode = stmt.argument;
+                  break;
+                }
+              }
+              path.stop();
+              return;
+            }
+          }
+        }
+      },
+    });
+  }
 
   if (!returnNode) return null;
 

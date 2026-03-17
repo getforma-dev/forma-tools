@@ -1138,4 +1138,113 @@ describe('IR Walk Engine', () => {
       expect(opList).not.toContain(OP_ISLAND_START);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Local (non-exported) function inlining
+  // -------------------------------------------------------------------------
+
+  describe('Local function inlining', () => {
+    it('inlines a non-exported function declaration', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'Sidebar') {
+          return {
+            source: `function Sidebar() { return h('nav', { class: 'sidebar' }, 'Nav links'); }`,
+            functionName: 'Sidebar',
+          };
+        }
+        return null;
+      };
+
+      const binary = walkAndEmit(
+        `h('div', null, Sidebar())`,
+        { resolveComponent },
+      );
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+      const strings = getStrings(binary);
+
+      // The inner nav from Sidebar should be inlined
+      expect(strings).toContain('sidebar');
+      expect(strings).toContain('Nav links');
+
+      // Two OPEN_TAGs: outer div + inner nav from Sidebar
+      const openCount = opList.filter(op => op === OP_OPEN_TAG).length;
+      expect(openCount).toBe(2);
+
+      // Should NOT contain island markers
+      expect(opList).not.toContain(OP_ISLAND_START);
+    });
+
+    it('inlines a non-exported arrow function (const)', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'TopBar') {
+          return {
+            source: `const TopBar = () => h('header', { class: 'topbar' }, 'Logo');`,
+            functionName: 'TopBar',
+          };
+        }
+        return null;
+      };
+
+      const binary = walkAndEmit(
+        `h('div', null, TopBar())`,
+        { resolveComponent },
+      );
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+      const strings = getStrings(binary);
+
+      expect(strings).toContain('topbar');
+      expect(strings).toContain('Logo');
+      expect(opList).not.toContain(OP_ISLAND_START);
+    });
+
+    it('inlines a non-exported arrow function with block body', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'Footer') {
+          return {
+            source: `const Footer = () => { return h('footer', { class: 'ft' }, 'Copyright'); };`,
+            functionName: 'Footer',
+          };
+        }
+        return null;
+      };
+
+      const binary = walkAndEmit(
+        `h('div', null, Footer())`,
+        { resolveComponent },
+      );
+      const strings = getStrings(binary);
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      expect(strings).toContain('ft');
+      expect(strings).toContain('Copyright');
+      expect(opList).not.toContain(OP_ISLAND_START);
+    });
+
+    it('inlines non-exported function expression (const Name = function)', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'Panel') {
+          return {
+            source: `const Panel = function() { return h('section', { class: 'panel' }, 'Content'); };`,
+            functionName: 'Panel',
+          };
+        }
+        return null;
+      };
+
+      const binary = walkAndEmit(
+        `h('div', null, Panel())`,
+        { resolveComponent },
+      );
+      const strings = getStrings(binary);
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      expect(strings).toContain('panel');
+      expect(strings).toContain('Content');
+      expect(opList).not.toContain(OP_ISLAND_START);
+    });
+  });
 });
