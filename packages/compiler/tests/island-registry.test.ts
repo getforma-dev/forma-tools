@@ -529,11 +529,11 @@ describe('Island Registry', () => {
             break;
           }
           case 0x04: pos += 4; break; // TEXT: str_idx(4)
-          case 0x05: pos += 2; break; // DYN_TEXT: slot_id(2)
+          case 0x05: pos += 4; break; // DYN_TEXT: slot_id(2) + marker_id(2)
           case 0x06: pos += 6; break; // DYN_ATTR: key_str_idx(4) + slot_id(2)
           case 0x07: pos += 10; break; // SHOW_IF: slot_id(2) + then_len(4) + else_len(4)
           case 0x08: break; // SHOW_ELSE: no payload
-          case 0x0A: pos += 10; break; // LIST: array_slot(2) + item_slot(2) + key_slot(2) + body_len(4)
+          case 0x0A: pos += 8; break; // LIST: array_slot(2) + item_slot(2) + body_len(4)
           case 0x0B: pos += 2; break; // ISLAND_START: island_id(2)
           case 0x0C: pos += 2; break; // ISLAND_END: island_id(2)
           case 0x12: pos += 8; break; // PROP: src_slot(2) + prop_str_idx(4) + target_slot(2)
