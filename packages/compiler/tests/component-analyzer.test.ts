@@ -91,6 +91,66 @@ describe('parseEntryPoint', () => {
       importPath: './LoginPage',
     });
   });
+
+  it('Pattern 3: block-body mount with return — extracts inline return node', () => {
+    const source = `
+      import { h, mount, createEffect } from '@getforma/core';
+      import { Sidebar } from './components/Sidebar';
+
+      mount(() => {
+        createEffect(() => { console.log('side effect'); });
+        return h('div', null, h(Sidebar, null));
+      }, '#app');
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.tsx');
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.inlineReturnNode).toBeDefined();
+  });
+
+  it('Pattern 3: block-body mount with Fragment return', () => {
+    const source = `
+      import { h, Fragment, mount } from '@getforma/core';
+
+      mount(() => {
+        return h(Fragment, null, h('div', null, 'A'), h('span', null, 'B'));
+      }, '#app');
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.tsx');
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.inlineReturnNode).toBeDefined();
+  });
+
+  it('Pattern 3: block-body mount with no return — returns null', () => {
+    const source = `
+      import { h, mount } from '@getforma/core';
+      mount(() => { console.log('no return'); }, '#app');
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.tsx');
+    expect(result).toBeNull();
+  });
+
+  it('Pattern 3: block-body mount with multiple statements before return', () => {
+    const source = `
+      import { h, mount, createSignal, createEffect, onCleanup } from '@getforma/core';
+      import { PageA } from './pages/PageA';
+
+      const [page, setPage] = createSignal('home');
+
+      mount(() => {
+        createEffect(() => { history.pushState(null, '', '/' + page()); });
+        const handler = () => setPage(location.pathname.slice(1));
+        window.addEventListener('popstate', handler);
+        onCleanup(() => window.removeEventListener('popstate', handler));
+        return h('div', { class: 'layout' }, h(PageA, null));
+      }, '#app');
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.tsx');
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.inlineReturnNode).toBeDefined();
+  });
 });
 
 // ===========================================================================

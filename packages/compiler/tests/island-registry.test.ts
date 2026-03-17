@@ -267,7 +267,7 @@ describe('Island Registry', () => {
 
       const { ctx } = walkAndEmitWithContext(
         `h('div', null, Deep())`,
-        { resolveComponent, depth: 1 },
+        { resolveComponent, depth: 3 },
       );
       const islands = ctx.getIslands();
 

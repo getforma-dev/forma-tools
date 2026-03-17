@@ -26,6 +26,9 @@ export interface EntryPointInfo {
   /** Names of components registered in activateIslands({...}).
    *  These must NOT be inlined — they emit ISLAND_START/ISLAND_END. */
   islandNames?: Set<string>;
+  /** For inline mount returns: the AST node of the return expression.
+   *  When set, componentName is '__inline__' and importPath is ''. */
+  inlineReturnNode?: import('@babel/types').Expression;
 }
 
 export interface ComponentInfo {
@@ -120,6 +123,26 @@ export class ComponentAnalyzer {
           if (importPath) {
             result = { componentName, importPath };
             path.stop();
+          }
+        }
+
+        // Pattern 3: mount(() => { ...statements; return JSX; }, '#app')
+        // Block-body arrow — extract the ReturnStatement, ignore everything else.
+        if (
+          !result &&
+          t.isArrowFunctionExpression(firstArg) &&
+          t.isBlockStatement(firstArg.body)
+        ) {
+          for (const stmt of firstArg.body.body) {
+            if (t.isReturnStatement(stmt) && stmt.argument) {
+              result = {
+                componentName: '__inline__',
+                importPath: '',
+                inlineReturnNode: stmt.argument,
+              };
+              path.stop();
+              break;
+            }
           }
         }
       },

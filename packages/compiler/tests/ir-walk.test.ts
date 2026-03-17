@@ -609,7 +609,7 @@ describe('IR Walk Engine', () => {
 
       const binary = walkAndEmit(
         `h('div', null, Deep())`,
-        { resolveComponent, depth: 1 }, // already at max depth
+        { resolveComponent, depth: 3 }, // already at max depth
       );
       const opcodes = extractOpcodeSection(binary);
       const opList = parseOpcodeList(opcodes);
@@ -971,6 +971,171 @@ describe('IR Walk Engine', () => {
       const ariaSlot = slots.find(s => s.name === 'attr:aria-label');
       expect(ariaSlot).toBeDefined();
       expect(ariaSlot!.default).toBe('Show password');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Fragment handling
+  // -------------------------------------------------------------------------
+
+  describe('Fragment handling', () => {
+    it('emits children inline at root level without wrapper', () => {
+      const binary = walkAndEmit(
+        `h(Fragment, null, h('div', null, 'A'), h('span', null, 'B'))`,
+      );
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      // Should emit: OPEN_TAG div, TEXT A, CLOSE_TAG, OPEN_TAG span, TEXT B, CLOSE_TAG
+      // No Fragment wrapper
+      expect(opList).toEqual([
+        OP_OPEN_TAG,  // div
+        OP_TEXT,      // 'A'
+        OP_CLOSE_TAG, // div
+        OP_OPEN_TAG,  // span
+        OP_TEXT,      // 'B'
+        OP_CLOSE_TAG, // span
+      ]);
+
+      const strings = getStrings(binary);
+      expect(strings).toContain('div');
+      expect(strings).toContain('span');
+      expect(strings).toContain('A');
+      expect(strings).toContain('B');
+    });
+
+    it('emits Fragment children nested inside h() tree', () => {
+      const binary = walkAndEmit(
+        `h('main', null, h(Fragment, null, h('p', null, 'X'), h('p', null, 'Y')))`,
+      );
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      // main contains both p elements directly (Fragment is transparent)
+      expect(opList).toEqual([
+        OP_OPEN_TAG,  // main
+        OP_OPEN_TAG,  // p
+        OP_TEXT,      // 'X'
+        OP_CLOSE_TAG, // p
+        OP_OPEN_TAG,  // p
+        OP_TEXT,      // 'Y'
+        OP_CLOSE_TAG, // p
+        OP_CLOSE_TAG, // main
+      ]);
+
+      const strings = getStrings(binary);
+      expect(strings).toContain('main');
+      expect(strings).toContain('p');
+      expect(strings).toContain('X');
+      expect(strings).toContain('Y');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Depth limit
+  // -------------------------------------------------------------------------
+
+  describe('depth limit', () => {
+    it('inlines component at depth 2', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'B') {
+          return {
+            source: `export function B() { return h('div', { class: 'inner' }, 'from-B'); }`,
+            functionName: 'B',
+          };
+        }
+        return null;
+      };
+
+      // Start at depth 2 — max is 3, so this should still inline
+      const binary = walkAndEmit(
+        `h('div', null, B())`,
+        { resolveComponent, depth: 2 },
+      );
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+      const strings = getStrings(binary);
+
+      // The inner div from B should be inlined
+      expect(strings).toContain('inner');
+      expect(strings).toContain('from-B');
+
+      // Two OPEN_TAGs: outer div + inner div from B
+      const openCount = opList.filter(op => op === OP_OPEN_TAG).length;
+      expect(openCount).toBe(2);
+
+      // Should NOT contain island markers
+      expect(opList).not.toContain(OP_ISLAND_START);
+    });
+
+    it('detects circular reference and emits island without infinite loop', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'A') {
+          return {
+            source: `export function A() { return h('div', null, B()); }`,
+            functionName: 'A',
+          };
+        }
+        if (name === 'B') {
+          return {
+            source: `export function B() { return h('div', null, A()); }`,
+            functionName: 'B',
+          };
+        }
+        return null;
+      };
+
+      // A calls B, B calls A — cycle should be detected
+      const binary = walkAndEmit(
+        `h('div', null, A())`,
+        { resolveComponent },
+      );
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      // Should contain island markers (for the cycled component)
+      expect(opList).toContain(OP_ISLAND_START);
+      expect(opList).toContain(OP_ISLAND_END);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Block-body component (createEffect + return)
+  // -------------------------------------------------------------------------
+
+  describe('Block-body component resolution', () => {
+    it('only walks the return h() tree, ignoring createEffect', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'Counter') {
+          return {
+            source: `export function Counter() {
+              createEffect(() => { console.log('effect'); });
+              return h('div', { class: 'counter' }, 'Count');
+            }`,
+            functionName: 'Counter',
+          };
+        }
+        return null;
+      };
+
+      const binary = walkAndEmit(
+        `h('main', null, Counter())`,
+        { resolveComponent },
+      );
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+      const strings = getStrings(binary);
+
+      // The return's h() tree should be walked
+      expect(strings).toContain('counter');
+      expect(strings).toContain('Count');
+
+      // Two OPEN_TAGs: outer main + inner div from Counter
+      const openCount = opList.filter(op => op === OP_OPEN_TAG).length;
+      expect(openCount).toBe(2);
+
+      // Should NOT contain island markers — the component is fully static
+      expect(opList).not.toContain(OP_ISLAND_START);
     });
   });
 });

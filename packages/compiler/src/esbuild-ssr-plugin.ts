@@ -9,6 +9,10 @@
 import type { Plugin } from 'esbuild';
 import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+
+// ESM-compatible require for loading esbuild (which is CJS) from sync functions
+const _require = createRequire(import.meta.url);
 import { parse } from '@babel/parser';
 import * as t from '@babel/types';
 import { IrEmitContext } from './ir-emit';
@@ -59,8 +63,26 @@ export interface IrResult {
 export function generateRealIr(entryPointPath: string): IrResult | null {
   try {
     // 1. Read the entry point file
-    const entrySource = readFileSync(entryPointPath, 'utf8');
+    let entrySource = readFileSync(entryPointPath, 'utf8');
     const entryDir = dirname(entryPointPath);
+
+    // 1b. If the file is .tsx/.jsx, transform JSX syntax to h() calls
+    // so the Babel AST parser produces CallExpression nodes (not JSXElement).
+    // The IR walker only understands h() call trees, not raw JSX AST.
+    if (entryPointPath.endsWith('.tsx') || entryPointPath.endsWith('.jsx')) {
+      try {
+        const esbuild = _require('esbuild');
+        const transformed = esbuild.transformSync(entrySource, {
+          loader: entryPointPath.endsWith('.tsx') ? 'tsx' : 'jsx',
+          jsxFactory: 'h',
+          jsxFragment: 'Fragment',
+          format: 'esm',
+        });
+        entrySource = transformed.code;
+      } catch {
+        // esbuild not available — fall through with raw JSX (will likely fail later)
+      }
+    }
 
     // 2. Create ComponentAnalyzer and parse entry point
     const analyzer = new ComponentAnalyzer(entryDir);
@@ -70,6 +92,128 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       return null;
     }
 
+    // ── Handle inline return from block-body mount() (Pattern 3) ──
+    if (entryInfo.componentName === '__inline__' && entryInfo.inlineReturnNode) {
+      const ctx = new IrEmitContext();
+      const signalSlots = new Map<string, number>();
+
+      // Parse the entry point AST for imports and local function extraction
+      const entryAst = parse(entrySource, PARSE_OPTS);
+
+      // Build import map from the entry point file
+      const importMap = new Map<string, string>();
+      for (const node of entryAst.program.body) {
+        if (t.isImportDeclaration(node)) {
+          const importPath = node.source.value;
+          for (const spec of node.specifiers) {
+            importMap.set(spec.local.name, importPath);
+          }
+        }
+      }
+
+      // Build resolve callback that handles BOTH imported AND locally-defined components
+      const resolveComponent = (name: string): { source: string; functionName: string } | null => {
+        // 1. Check imports first (same as existing logic)
+        const importPathRaw = importMap.get(name);
+        if (importPathRaw && (importPathRaw.startsWith('.') || importPathRaw.startsWith('/'))) {
+          const resolvedPath = resolveFilePath(entryDir, importPathRaw);
+          if (resolvedPath) {
+            try {
+              let src = readFileSync(resolvedPath, 'utf8');
+              // Transform JSX to h() calls if needed
+              if (resolvedPath.endsWith('.tsx') || resolvedPath.endsWith('.jsx')) {
+                try {
+                  const esbuild = _require('esbuild');
+                  src = esbuild.transformSync(src, {
+                    loader: resolvedPath.endsWith('.tsx') ? 'tsx' : 'jsx',
+                    jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
+                  }).code;
+                } catch { /* use raw source */ }
+              }
+              return { source: src, functionName: name };
+            } catch { /* fall through to local check */ }
+          }
+        }
+
+        // 2. Check locally-defined functions in the entry point
+        for (const node of entryAst.program.body) {
+          // function Sidebar() { ... }
+          if (t.isFunctionDeclaration(node) && node.id?.name === name) {
+            return { source: entrySource, functionName: name };
+          }
+          // const Sidebar = () => { ... } or const Sidebar = function() { ... }
+          if (t.isVariableDeclaration(node)) {
+            for (const decl of node.declarations) {
+              if (
+                t.isIdentifier(decl.id) &&
+                decl.id.name === name &&
+                decl.init &&
+                (t.isArrowFunctionExpression(decl.init) || t.isFunctionExpression(decl.init))
+              ) {
+                return { source: entrySource, functionName: name };
+              }
+            }
+          }
+        }
+
+        return null;
+      };
+
+      // Extract file constants and signal defaults from entry point itself
+      const analyzer2 = new ComponentAnalyzer(entryDir);
+      const fileConstants = analyzer2.extractFileConstants(entrySource, entryPointPath);
+
+      // Signal defaults: look for createSignal calls at module scope in the entry file
+      let signalDefaults = new Map<string, any>();
+      try {
+        signalDefaults = analyzer2.extractSignalDefaults(entrySource, entryPointPath, '__inline__');
+      } catch {
+        // extractSignalDefaults may not handle '__inline__' — that's fine, skip defaults
+      }
+
+      for (const [sigName, sigDefault] of signalDefaults) {
+        let typeHint = TYPE_TEXT;
+        let defaultBytes = new Uint8Array(0);
+        if (sigDefault.type === 'text' && typeof sigDefault.default === 'string') {
+          typeHint = TYPE_TEXT;
+          defaultBytes = new TextEncoder().encode(sigDefault.default);
+        } else if (sigDefault.type === 'bool' && typeof sigDefault.default === 'boolean') {
+          typeHint = TYPE_BOOL;
+          defaultBytes = new TextEncoder().encode(String(sigDefault.default));
+        }
+        const slotId = ctx.addSlot(sigName, typeHint, SOURCE_CLIENT, defaultBytes);
+        signalSlots.set(sigName, slotId);
+      }
+
+      const walkCtx: WalkContext = {
+        fileConstants,
+        signalSlots,
+        signalDefaults,
+        resolveComponent,
+        visited: new Set(),
+        depth: 0,
+        islandNames: entryInfo.islandNames,
+      };
+
+      const returnNode = entryInfo.inlineReturnNode;
+
+      if (t.isCallExpression(returnNode) && t.isIdentifier(returnNode.callee) && returnNode.callee.name === 'h') {
+        walkHTree(returnNode, 'h', ctx, walkCtx);
+      } else if (t.isCallExpression(returnNode)) {
+        walkCallExpression(returnNode, 'h', ctx, walkCtx);
+      } else {
+        console.warn(`   IR: inline return node is not a call expression`);
+        return null;
+      }
+
+      const binary = ctx.toBinary();
+      const islands = ctx.getIslands();
+
+      return { binary, islands };
+    }
+
+    // ── Original code continues for Pattern 1 & 2 (named component) ──
+
     // 3. Resolve the component file path
     const componentPath = resolveFilePath(entryDir, entryInfo.importPath);
     if (!componentPath) {
@@ -77,8 +221,17 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       return null;
     }
 
-    // 4. Read and parse the component file
-    const componentSource = readFileSync(componentPath, 'utf8');
+    // 4. Read and parse the component file (transform JSX if needed)
+    let componentSource = readFileSync(componentPath, 'utf8');
+    if (componentPath.endsWith('.tsx') || componentPath.endsWith('.jsx')) {
+      try {
+        const esbuild = _require('esbuild');
+        componentSource = esbuild.transformSync(componentSource, {
+          loader: componentPath.endsWith('.tsx') ? 'tsx' : 'jsx',
+          jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
+        }).code;
+      } catch { /* use raw source */ }
+    }
 
     // 5. Extract file constants (for Rule 9 static unroll)
     const fileConstants = analyzer.extractFileConstants(componentSource, componentPath);

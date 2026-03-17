@@ -204,7 +204,7 @@ export interface WalkContext {
   resolveComponent?: (name: string) => { source: string; functionName: string } | null;
   /** Set of visited component names for cycle detection. */
   visited?: Set<string>;
-  /** Current depth for sub-component resolution (max 1 in Phase 3a). */
+  /** Current depth for sub-component resolution (max 3). */
   depth?: number;
   /** List item bindings: "paramName.propName" → target slot id.
    *  Set when walking inside a createList mapFn body.
@@ -245,6 +245,27 @@ export function walkHTree(
   // First arg: tag name
   const tagArg = args[0];
   if (!tagArg) return;
+
+  // Fragment: h(Fragment, null, child1, child2) → emit children inline, no wrapper
+  if (t.isIdentifier(tagArg) && tagArg.name === 'Fragment') {
+    // Walk children (args after props)
+    for (let i = 2; i < args.length; i++) {
+      const child = args[i];
+      if (!child || t.isSpreadElement(child)) continue;
+      if (t.isCallExpression(child)) {
+        if (t.isIdentifier(child.callee) && child.callee.name === hName) {
+          walkHTree(child, hName, ctx, walkCtx);
+        } else {
+          walkCallExpression(child, hName, ctx, walkCtx);
+        }
+      } else if (t.isStringLiteral(child)) {
+        ctx.emit(OP_TEXT);
+        ctx.emitU32(ctx.addString(child.value));
+      }
+      // null/undefined/false → skip
+    }
+    return;
+  }
 
   // Rule 11: non-string tag → island
   if (!t.isStringLiteral(tagArg)) {
@@ -452,6 +473,29 @@ export function walkCallExpression(
     return;
   }
 
+  // Fragment: Fragment(child1, child2) → emit children inline, no wrapper
+  if (
+    t.isIdentifier(node.callee)
+    && node.callee.name === 'Fragment'
+  ) {
+    for (let i = 0; i < node.arguments.length; i++) {
+      const child = node.arguments[i];
+      if (!child || t.isSpreadElement(child)) continue;
+      if (t.isCallExpression(child)) {
+        if (t.isIdentifier(child.callee) && child.callee.name === hName) {
+          walkHTree(child, hName, ctx, walkCtx);
+        } else {
+          walkCallExpression(child, hName, ctx, walkCtx);
+        }
+      } else if (t.isStringLiteral(child)) {
+        ctx.emit(OP_TEXT);
+        ctx.emitU32(ctx.addString(child.value));
+      }
+      // null/undefined/false → skip
+    }
+    return;
+  }
+
   // Rule 10: Sub-component calls
   if (t.isIdentifier(node.callee)) {
     const componentName = node.callee.name;
@@ -509,9 +553,9 @@ export function walkCallExpression(
           return;
         }
 
-        // Depth check (max 1 in Phase 3a)
+        // Depth check (max 3)
         const depth = walkCtx.depth ?? 0;
-        if (depth >= 1) {
+        if (depth >= 3) {
           emitIsland(ctx, componentName);
           return;
         }
