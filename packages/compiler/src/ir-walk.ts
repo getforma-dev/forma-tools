@@ -28,6 +28,9 @@ import { VOID_TAGS, isEventProp, isStaticLiteral, isUndefinedIdentifier } from '
 // Handle CJS/ESM compatibility for @babel/traverse
 const traverse = (typeof _traverse === 'function' ? _traverse : (_traverse as any).default) as typeof _traverse;
 
+/** Maximum depth for sub-component resolution. Prevents unbounded AST parsing. */
+export const MAX_RESOLVE_DEPTH = 3;
+
 // ---------------------------------------------------------------------------
 // Opcodes
 // ---------------------------------------------------------------------------
@@ -553,9 +556,9 @@ export function walkCallExpression(
           return;
         }
 
-        // Depth check (max 3)
+        // Depth check
         const depth = walkCtx.depth ?? 0;
-        if (depth >= 3) {
+        if (depth >= MAX_RESOLVE_DEPTH) {
           emitIsland(ctx, componentName);
           return;
         }

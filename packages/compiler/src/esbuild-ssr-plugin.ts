@@ -86,6 +86,8 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
 
     // 2. Create ComponentAnalyzer and parse entry point
     const analyzer = new ComponentAnalyzer(entryDir);
+    // IMPORTANT: JSX transform (step 1b) must run BEFORE parseEntryPoint so that
+    // any inlineReturnNode references the transformed AST (h() calls, not JSX nodes).
     const entryInfo = analyzer.parseEntryPoint(entrySource, entryPointPath);
     if (!entryInfo) {
       console.warn(`   IR: could not find mount() call in ${entryPointPath}`);
@@ -160,13 +162,12 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       };
 
       // Extract file constants and signal defaults from entry point itself
-      const analyzer2 = new ComponentAnalyzer(entryDir);
-      const fileConstants = analyzer2.extractFileConstants(entrySource, entryPointPath);
+      const fileConstants = analyzer.extractFileConstants(entrySource, entryPointPath);
 
       // Signal defaults: look for createSignal calls at module scope in the entry file
       let signalDefaults = new Map<string, any>();
       try {
-        signalDefaults = analyzer2.extractSignalDefaults(entrySource, entryPointPath, '__inline__');
+        signalDefaults = analyzer.extractSignalDefaults(entrySource, entryPointPath, '__inline__');
       } catch {
         // extractSignalDefaults may not handle '__inline__' — that's fine, skip defaults
       }
@@ -305,7 +306,16 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       if (!resolvedPath) return null;
 
       try {
-        const source = readFileSync(resolvedPath, 'utf8');
+        let source = readFileSync(resolvedPath, 'utf8');
+        if (resolvedPath.endsWith('.tsx') || resolvedPath.endsWith('.jsx')) {
+          try {
+            const esbuild = _require('esbuild');
+            source = esbuild.transformSync(source, {
+              loader: resolvedPath.endsWith('.tsx') ? 'tsx' : 'jsx',
+              jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
+            }).code;
+          } catch { /* use raw source */ }
+        }
         return { source, functionName: name };
       } catch {
         return null;
