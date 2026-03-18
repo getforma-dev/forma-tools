@@ -468,7 +468,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
       format: 'esm',
       target: 'es2022',
       alias: config.formaAlias
-        ? { '@getforma/core': config.formaAlias }
+        ? { 'formajs': config.formaAlias }
         : {},
       minify: !config.watch,
       sourcemap: config.watch ? 'inline' : false,

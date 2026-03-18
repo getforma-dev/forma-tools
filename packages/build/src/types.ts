@@ -42,7 +42,7 @@ export interface BuildConfig {
   cssEntries?: CssEntry[];
   /** Output directory for all built assets */
   outputDir: string;
-  /** Path or package name to alias '@getforma/core' to in esbuild */
+  /** Package name to resolve 'formajs' imports to (e.g. '@getforma/core') */
   formaAlias?: string;
   /** Directory containing .woff2 font files to copy */
   fontDir?: string;
