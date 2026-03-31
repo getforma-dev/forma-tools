@@ -511,16 +511,24 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
         await ctx.watch();
       }
 
-      // In watch mode, return a minimal result
+      // Generate a dev manifest with identity mappings (unhashed filenames)
+      // so the server can boot without a production build
+      const { manifest, warnings } = generateManifest(config, {}, false);
+      manifest.build_hash = 'dev';
+
+      writeFileSync(
+        join(distDir, 'manifest.json'),
+        JSON.stringify(manifest, null, 2) + '\n',
+      );
+      console.log(`\nDev manifest written: ${distDir}/manifest.json`);
+
+      // Generate a dev service worker so /sw.js doesn't 404
+      generateServiceWorker(config, {}, 'dev', false);
+
       return {
-        manifest: {
-          version: 1,
-          build_hash: 'watch-mode',
-          assets: {},
-          routes: {},
-        },
-        buildHash: 'watch-mode',
-        warnings: [],
+        manifest,
+        buildHash: 'dev',
+        warnings,
       };
     }
 
