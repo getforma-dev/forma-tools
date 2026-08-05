@@ -23,7 +23,7 @@
     "esbuild": "^0.25.0"
   },
   "peerDependencies": {
-    "@getforma/compiler": "^0.1.0"
+    "@getforma/compiler": "^0.1.0 || ^0.2.0"
   },
   "peerDependenciesMeta": {
     "@getforma/compiler": {

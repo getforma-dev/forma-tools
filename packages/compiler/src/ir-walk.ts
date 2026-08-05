@@ -214,6 +214,11 @@ export interface WalkContext {
    *  The PROP opcodes extract properties at runtime; these bindings
    *  tell the child walker which slot each property was extracted into. */
   listItemBindings?: Map<string, number>;
+  /** Per-page registry for list slot naming: occurrences of each derived
+   *  base name (for `#n` dedup) plus the running list count (for the
+   *  positional fallback). Created lazily by the first createList and
+   *  shared by reference with nested walk contexts. */
+  listNames?: { counts: Map<string, number>; total: number };
   /** Names of island components registered in activateIslands({...}).
    *  Island components are NEVER inlined — they always emit ISLAND_START/ISLAND_END. */
   islandNames?: Set<string>;
@@ -877,12 +882,38 @@ function emitCreateShowBranch(
 // ---------------------------------------------------------------------------
 
 /**
+ * Derive a human-meaningful name for a list's data source expression:
+ * an identifier (`todos`), a call (`todos()`, `state.todos()`), an arrow
+ * wrapping either (`() => todos()`), or a member access (`state.todos`).
+ * Returns null when no static name is recoverable.
+ */
+function deriveListSourceName(node: t.Node | null | undefined): string | null {
+  if (!node) return null;
+  if (t.isIdentifier(node)) return node.name;
+  if (t.isCallExpression(node)) return deriveListSourceName(node.callee);
+  if (t.isArrowFunctionExpression(node) && t.isExpression(node.body)) {
+    return deriveListSourceName(node.body);
+  }
+  if (t.isMemberExpression(node) && t.isIdentifier(node.property) && !node.computed) {
+    return node.property.name;
+  }
+  return null;
+}
+
+/**
  * Emit LIST opcode for a createList() call.
  *
  * Pattern: createList(dataSignal, keyFn, mapFn)
  *   dataSignal: identifier or arrow returning an array
  *   keyFn: (item) => string key — ignored for SSR
  *   mapFn: (item) => h(...) — the template to render for each item
+ *
+ * Slot naming: each list derives a base name from its data source
+ * (`createList(todos, ...)` → `todos`), deduped per page (`todos#2` for a
+ * second list over the same source) with a positional fallback (`#3`) when
+ * no name is derivable. Slots are then `list:<base>:array`,
+ * `list:<base>:item`, and `list:<base>:<prop>`, so every list on a page is
+ * individually addressable by name for server-side SlotData injection.
  *
  * Binary format:
  *   LIST(0x0A) array_slot_id(u16) item_slot_id(u16) body_len(u32)
@@ -922,9 +953,20 @@ function emitCreateList(
     return;
   }
 
+  // Unique per-page base name for this list's slots (see doc comment above)
+  const registry = (walkCtx.listNames ??= { counts: new Map(), total: 0 });
+  registry.total += 1;
+  const sourceName = deriveListSourceName(node.arguments[0]);
+  let base = sourceName ?? `#${registry.total}`;
+  if (sourceName) {
+    const occurrence = (registry.counts.get(sourceName) ?? 0) + 1;
+    registry.counts.set(sourceName, occurrence);
+    if (occurrence > 1) base = `${sourceName}#${occurrence}`;
+  }
+
   // Create slots: array slot (server-sourced) and item slot
-  const arraySlotId = ctx.addSlot('list:array', TYPE_ARRAY, SOURCE_SERVER);
-  const itemSlotId = ctx.addSlot('list:item', TYPE_OBJECT, SOURCE_SERVER);
+  const arraySlotId = ctx.addSlot(`list:${base}:array`, TYPE_ARRAY, SOURCE_SERVER);
+  const itemSlotId = ctx.addSlot(`list:${base}:item`, TYPE_OBJECT, SOURCE_SERVER);
 
   // Scan the body for param.prop member accesses to determine which
   // properties need PROP extraction opcodes.
@@ -935,7 +977,7 @@ function emitCreateList(
   const bindings = new Map<string, number>();
   const propEntries: Array<{ name: string; strIdx: number; slotId: number }> = [];
   for (const propName of Array.from(propNames)) {
-    const targetSlotId = ctx.addSlot(`list:${propName}`, TYPE_TEXT, SOURCE_SERVER);
+    const targetSlotId = ctx.addSlot(`list:${base}:${propName}`, TYPE_TEXT, SOURCE_SERVER);
     bindings.set(`${paramName}.${propName}`, targetSlotId);
     propEntries.push({
       name: propName,

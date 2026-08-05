@@ -75,6 +75,30 @@ function getStrings(data: Uint8Array): string[] {
   return readStringTable(data, sections.stringTableOffset);
 }
 
+/**
+ * Decode the slot table and return slot names in declaration order.
+ * Entry layout: slot_id(u16) + name_str_idx(u32) + type_hint(u8) +
+ * source(u8) + default_len(u16) + default_bytes.
+ */
+function getSlotNames(data: Uint8Array): string[] {
+  const sections = readSections(data);
+  const strings = readStringTable(data, sections.stringTableOffset);
+  const names: string[] = [];
+  let pos = sections.slotTableOffset;
+  const count = readU16LE(data, pos);
+  pos += 2;
+  for (let i = 0; i < count; i++) {
+    pos += 2; // slot_id
+    const nameIdx = readU32LE(data, pos);
+    pos += 4;
+    pos += 2; // type_hint + source
+    const defaultLen = readU16LE(data, pos);
+    pos += 2 + defaultLen;
+    names.push(strings[nameIdx]!);
+  }
+  return names;
+}
+
 // Opcode constants
 const OP_OPEN_TAG    = 0x01;
 const OP_CLOSE_TAG   = 0x02;
@@ -1245,6 +1269,79 @@ describe('IR Walk Engine', () => {
       expect(strings).toContain('panel');
       expect(strings).toContain('Content');
       expect(opList).not.toContain(OP_ISLAND_START);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // createList slot naming — every list individually addressable by name
+  // -------------------------------------------------------------------------
+
+  describe('createList slot naming', () => {
+    it('derives slot names from an identifier data source', () => {
+      const binary = walkCallAndEmit(
+        `createList(todos, (r) => r.id, (r) => h('li', null, r.title))`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:todos:array');
+      expect(slotNames).toContain('list:todos:item');
+      expect(slotNames).toContain('list:todos:title');
+    });
+
+    it('gives two lists over different sources distinct slot names', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          createList(todos, (r) => r.id, (r) => h('li', null, r.title)),
+          createList(users, (r) => r.id, (r) => h('li', null, r.name)),
+        )`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:todos:array');
+      expect(slotNames).toContain('list:users:array');
+      expect(slotNames).toContain('list:todos:title');
+      expect(slotNames).toContain('list:users:name');
+
+      // No two slots may share a name — by-name SlotData injection must be
+      // able to reach every slot on the page.
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+
+    it('dedupes two lists over the same source with #n suffixes', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          createList(todos, (r) => r.id, (r) => h('li', null, r.title)),
+          createList(todos, (r) => r.id, (r) => h('span', null, r.title)),
+        )`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:todos:array');
+      expect(slotNames).toContain('list:todos#2:array');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+
+    it('derives names through arrows, calls, and member access', () => {
+      const arrowCall = walkCallAndEmit(
+        `createList(() => todos(), (r) => r.id, (r) => h('li', null, r.title))`,
+      );
+      expect(getSlotNames(arrowCall)).toContain('list:todos:array');
+
+      const memberCall = walkCallAndEmit(
+        `createList(state.todos(), (r) => r.id, (r) => h('li', null, r.title))`,
+      );
+      expect(getSlotNames(memberCall)).toContain('list:todos:array');
+    });
+
+    it('falls back to a positional name when the source has no name', () => {
+      const binary = walkCallAndEmit(
+        `createList([{ title: 'a' }], (r) => r.id, (r) => h('li', null, r.title))`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:#1:array');
+      expect(slotNames).toContain('list:#1:item');
+      expect(slotNames).toContain('list:#1:title');
     });
   });
 });

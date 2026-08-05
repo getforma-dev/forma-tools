@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.0] - 2026-08-05
+
+### Changed
+- **Breaking: list slots now get unique, per-list names** — previously every `createList` emitted slots named `list:array` / `list:item` / `list:<prop>`, so on pages with more than one list only the first was reachable by name and server-side `SlotData` injection could not target the others. Each list now derives a base name from its data source (`createList(todos, ...)` → `todos`; arrows, calls, and member access unwrap to the underlying name), deduped per page with `#n` suffixes and a positional fallback (`#3`) when no name is derivable. Slots are emitted as `list:<base>:array`, `list:<base>:item`, and `list:<base>:<prop>`.
+- **Migration**: server code injecting `"list:array"` must switch to the named key, e.g. `"list:todos:array"`. Slot names are visible in the emitted `.ir` string table; unknown keys are silently ignored by `forma_ir::SlotData::from_json`, so stale keys fail soft — check names after upgrading.
+
 ## [0.1.5] - 2026-03-16
 
 ### Added

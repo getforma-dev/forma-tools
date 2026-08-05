@@ -8,6 +8,9 @@
 ### Added
 - Functional test for the Tailwind CSS entry path (uses a fake locally installed `@tailwindcss/cli`, no network)
 
+### Changed
+- Optional `@getforma/compiler` peer range widened to `^0.1.0 || ^0.2.0`
+
 ## [0.1.5] - 2026-03-16
 
 ### Added
