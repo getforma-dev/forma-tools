@@ -104,7 +104,9 @@ import { formaSsrPlugin } from "@getforma/compiler";
 
 ### Slot Naming
 
-Slot names are a **compile contract**: the server injects `SlotData` by name (via `forma_ir::SlotData::from_json`), so the compiler derives stable, human-meaningful names for every list and show binding. Names are visible in the emitted `.ir` string table.
+Slot names are a **compile contract**: the server injects `SlotData` by name (via `forma_ir::SlotData::from_json`), so the compiler derives stable, human-meaningful names for every binding. Names are visible in the emitted `.ir` string table.
+
+**Every slot name a page emits is unique.** The Rust loader builds one `HashMap<String, u16>` from the slot table, so two slots sharing a name silently collapse and the earlier one becomes permanently unreachable for injection. Uniqueness is enforced by the four page-wide occurrence registries described below (list, show, attr, text).
 
 **Lists** (`createList`) derive a base name in this order:
 
@@ -116,11 +118,18 @@ Slots are then `list:<base>:array`, `list:<base>:item`, and `list:<base>:<prop>`
 
 **Shows** (`createShow` and ternary conditionals) follow the same scheme with the base derived from the **condition**: `createShow(() => visible(), ...)` → `show:visible` (`!` unwraps, so `() => !hidden()` → `show:hidden`; both arrow and `function` forms unwrap, including block bodies), with the same positional fallback (`show:#2`).
 
-**Occurrence suffixes** are per-base in document order: the first occurrence of a base is unsuffixed, the second reuse of the same base gets `#2` (`show:visible`, `show:visible#2`, ...), and so on. Lists and shows keep separate registries. The registries are **page-wide**: lists/shows inside island subtrees, inlined sub-components, and list bodies dedup against the same namespace as page-level ones, in document order — two islands that each bind `visible` yield `show:visible` and `show:visible#2`, never a duplicate name.
+**Dynamic attributes** (`class: () => cls()`) are named `attr:<key>` and **dynamic text children** (`h('p', null, () => msg())`) are named `text:<childIndex>`, where the index counts children of the immediate parent element from 0. Neither is derived from a page-unique source: two sibling elements can bind the same attribute key, and every element restarts its child indexing at 0 — so both run the same occurrence scheme over their own page-wide registry.
 
-**Migration** (0.2.x):
-- `createShow` slots were previously all named `show:createShow` (and ternary shows `show:<index>`) — server code injecting those keys must move to the name-keyed scheme above.
-- Lists over literal sources were previously positional (`list:#N:array`) — where the map function has a named parameter they are now map-param-derived (`list:tile:array`). Unknown keys fail soft (silently ignored), so check names after upgrading.
+**Occurrence suffixes** are per-base in document order: the first occurrence of a base is unsuffixed, the second reuse of the same base gets `#2` (`show:visible`, `show:visible#2`; `attr:class`, `attr:class#2`; `text:0`, `text:0#2`), and so on. A name that occurs once on a page is **never** suffixed, so single-occurrence keys keep the spelling downstream consumers pin.
+
+The four families keep separate registries, and each registry is **page-wide**: constructs inside island subtrees, inlined sub-components, list bodies and show branches dedup against the same namespace as page-level ones, in document order — two islands that each bind `visible` yield `show:visible` and `show:visible#2`, and a dynamic `class` inside a list body dedups against one on the page root, never a duplicate name.
+
+A dynamic attribute or text child that binds a **known signal** (`() => count()` where `count` is a `createSignal` the analyzer found) reuses that signal's named slot instead and mints no `attr:`/`text:` name at all.
+
+**Migration**:
+- (0.2.1) Pages with two dynamic attributes sharing a key, or two dynamic text children at the same child index, previously emitted the SAME slot name twice and the earlier slot was unreachable. Those later occurrences are now suffixed (`attr:class#2`, `text:0#2`). Server code that injected such a key was, before this change, always addressing the LAST occurrence; it now addresses the first, and the later ones need the suffixed keys. Single-occurrence names are unchanged.
+- (0.2.x) `createShow` slots were previously all named `show:createShow` (and ternary shows `show:<index>`) — server code injecting those keys must move to the name-keyed scheme above.
+- (0.2.x) Lists over literal sources were previously positional (`list:#N:array`) — where the map function has a named parameter they are now map-param-derived (`list:tile:array`). Unknown keys fail soft (silently ignored), so check names after upgrading.
 
 ### Islands: slot ids and props injection
 

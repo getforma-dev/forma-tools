@@ -202,10 +202,14 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         depth: 0,
         islandNames: entryInfo.islandNames,
         // Per-page slot-name registries MUST be created on the root context
-        // (not lazily inside a spread-copied nested context) so every list
-        // and show on the page dedups against one shared namespace.
+        // (not lazily inside a spread-copied nested context) so every list,
+        // show, dynamic attribute and dynamic text child on the page dedups
+        // against one shared namespace.
+        // Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes a dynamic attr inside an island against one on the page"
         listNames: { counts: new Map(), total: 0 },
         showNames: { counts: new Map(), total: 0 },
+        attrNames: new Map(),
+        textNames: new Map(),
       };
 
       const returnNode = entryInfo.inlineReturnNode;
@@ -516,10 +520,13 @@ function isDirectory(filePath: string): boolean {
  * Produces a minimal FMIR binary representing:
  *   <div id="app" data-forma-page="{pageName}"></div>
  *
- * This is enough to validate the full pipeline without needing to resolve
- * component imports and walk their h() trees.
+ * This is the fallback every page lands on when real IR emission fails: the
+ * shell the client-side mount hydrates into. Exported so the test suite can
+ * exercise THIS function rather than a copy of its body — a re-implementation
+ * in the test would keep passing while the shipped fallback was broken.
+ * Verified by: packages/compiler/tests/ir-roundtrip.test.ts > "placeholder IR from the SSR plugin has valid structure"
  */
-function generatePlaceholderIr(pageName: string): Uint8Array {
+export function generatePlaceholderIr(pageName: string): Uint8Array {
   const ctx = new IrEmitContext();
 
   const divIdx = ctx.addString('div');

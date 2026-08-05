@@ -19,6 +19,14 @@ import { generateRealIr } from '../src/esbuild-ssr-plugin';
 import { parse } from '@babel/parser';
 import type * as T from '@babel/types';
 import * as t from '@babel/types';
+import {
+  assertBinaryInvariants,
+  getIslands,
+  getSlots,
+  getStrings,
+  parseOpcodeList,
+  readSections,
+} from './helpers/fmir';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,115 +41,25 @@ function parseExpr(code: string): T.Expression {
   return decl.declarations[0]!.init!;
 }
 
-function readU16LE(data: Uint8Array, offset: number): number {
-  return data[offset]! | (data[offset + 1]! << 8);
-}
-
-function readU32LE(data: Uint8Array, offset: number): number {
-  return (
-    data[offset]!
-    | (data[offset + 1]! << 8)
-    | (data[offset + 2]! << 16)
-    | (data[offset + 3]! << 24)
-  ) >>> 0;
-}
-
-function readStringTable(data: Uint8Array, offset: number): string[] {
-  const count = readU32LE(data, offset);
-  const strings: string[] = [];
-  let pos = offset + 4;
-  for (let i = 0; i < count; i++) {
-    const len = readU16LE(data, pos);
-    pos += 2;
-    const bytes = data.slice(pos, pos + len);
-    strings.push(new TextDecoder().decode(bytes));
-    pos += len;
-  }
-  return strings;
-}
-
-function readSections(data: Uint8Array) {
-  return {
-    opcodeOffset: readU32LE(data, 16),
-    opcodeSize: readU32LE(data, 20),
-    stringTableOffset: readU32LE(data, 24),
-    stringTableSize: readU32LE(data, 28),
-    slotTableOffset: readU32LE(data, 32),
-    slotTableSize: readU32LE(data, 36),
-    islandTableOffset: readU32LE(data, 40),
-    islandTableSize: readU32LE(data, 44),
-  };
-}
-
-/** Parse island table from binary, given access to the string table. */
-function readIslandTable(data: Uint8Array, offset: number, strings: string[]): Array<{
-  id: number;
-  trigger: number;
-  propsMode: number;
-  name: string;
-  byteOffset: number;
-  slotIds: number[];
-}> {
-  const count = readU16LE(data, offset);
-  const islands: Array<{ id: number; trigger: number; propsMode: number; name: string; byteOffset: number; slotIds: number[] }> = [];
-  let pos = offset + 2;
-  for (let i = 0; i < count; i++) {
-    const id = readU16LE(data, pos); pos += 2;
-    const trigger = data[pos]!; pos += 1;
-    const propsMode = data[pos]!; pos += 1;
-    const nameStrIdx = readU32LE(data, pos); pos += 4;
-    const byteOffset = readU32LE(data, pos); pos += 4;
-    const slotCount = readU16LE(data, pos); pos += 2;
-    const slotIds: number[] = [];
-    for (let j = 0; j < slotCount; j++) {
-      slotIds.push(readU16LE(data, pos)); pos += 2;
-    }
-    islands.push({
-      id,
-      trigger,
-      propsMode,
-      name: strings[nameStrIdx] || `island_${id}`,
-      byteOffset,
-      slotIds,
-    });
-  }
-  return islands;
-}
-
-/** Parse the slot table (v2) from binary, given access to the string table. */
-function readSlotTable(data: Uint8Array, offset: number, strings: string[]): Array<{ id: number; name: string; typeHint: number; default: string }> {
-  const count = readU16LE(data, offset);
-  const slots: Array<{ id: number; name: string; typeHint: number; default: string }> = [];
-  let pos = offset + 2;
-  for (let i = 0; i < count; i++) {
-    const id = readU16LE(data, pos); pos += 2;
-    const nameStrIdx = readU32LE(data, pos); pos += 4;
-    const typeHint = data[pos]!; pos += 1;
-    pos += 1; // source(u8)
-    const defaultLen = readU16LE(data, pos); pos += 2;
-    const defaultStr = new TextDecoder().decode(data.slice(pos, pos + defaultLen));
-    pos += defaultLen;
-    slots.push({ id, name: strings[nameStrIdx] || '', typeHint, default: defaultStr });
-  }
-  return slots;
-}
-
-function walkAndEmit(code: string, walkCtx: WalkContext = {}): Uint8Array {
-  const expr = parseExpr(code);
-  const ctx = new IrEmitContext();
-  if (t.isCallExpression(expr)) {
-    walkHTree(expr, 'h', ctx, walkCtx);
-  }
-  return ctx.toBinary();
-}
-
+/**
+ * Walk `code` and return both the binary and the context that produced it,
+ * asserting the universal FMIR invariants (see assertBinaryInvariants) on the
+ * way out — unique slot names and ids, an interned and orphan-free string
+ * table, and island byte offsets that point at their own ISLAND_START.
+ */
 function walkAndEmitWithContext(code: string, walkCtx: WalkContext = {}): { binary: Uint8Array; ctx: IrEmitContext } {
   const expr = parseExpr(code);
   const ctx = new IrEmitContext();
   if (t.isCallExpression(expr)) {
     walkHTree(expr, 'h', ctx, walkCtx);
   }
-  return { binary: ctx.toBinary(), ctx };
+  const binary = ctx.toBinary();
+  assertBinaryInvariants(binary);
+  return { binary, ctx };
+}
+
+function walkAndEmit(code: string, walkCtx: WalkContext = {}): Uint8Array {
+  return walkAndEmitWithContext(code, walkCtx).binary;
 }
 
 function walkCallAndEmitWithContext(code: string, walkCtx: WalkContext = {}): { binary: Uint8Array; ctx: IrEmitContext } {
@@ -150,7 +68,9 @@ function walkCallAndEmitWithContext(code: string, walkCtx: WalkContext = {}): { 
   if (t.isCallExpression(expr)) {
     walkCallExpression(expr, 'h', ctx, walkCtx);
   }
-  return { binary: ctx.toBinary(), ctx };
+  const binary = ctx.toBinary();
+  assertBinaryInvariants(binary);
+  return { binary, ctx };
 }
 
 // ---------------------------------------------------------------------------
@@ -165,9 +85,7 @@ describe('Island Registry', () => {
   describe('emitIsland registers islands in island table', () => {
     it('unknown expression child produces non-empty island table', () => {
       const binary = walkAndEmit(`h('div', null, someFunction())`);
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const islands = readIslandTable(binary, sections.islandTableOffset, strings);
+      const islands = getIslands(binary);
 
       expect(islands.length).toBe(1);
       expect(islands[0]!.id).toBe(0);
@@ -178,9 +96,7 @@ describe('Island Registry', () => {
     it('multiple islands produce multiple entries in island table', () => {
       // two unknown function calls -> two islands
       const binary = walkAndEmit(`h('div', null, funcA(), funcB())`);
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const islands = readIslandTable(binary, sections.islandTableOffset, strings);
+      const islands = getIslands(binary);
 
       expect(islands.length).toBe(2);
       expect(islands[0]!.id).toBe(0);
@@ -194,28 +110,21 @@ describe('Island Registry', () => {
         walkHTree(expr, 'h', ctx, {});
       }
       const binary = ctx.toBinary();
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const islands = readIslandTable(binary, sections.islandTableOffset, strings);
+      const islands = getIslands(binary);
 
       expect(islands.length).toBe(1);
     });
 
     it('spread without .map() produces island in table', () => {
       const binary = walkAndEmit(`h('div', null, ...children)`);
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const islands = readIslandTable(binary, sections.islandTableOffset, strings);
+      const islands = getIslands(binary);
 
       expect(islands.length).toBe(1);
     });
 
     it('static content produces empty island table', () => {
       const binary = walkAndEmit(`h('div', { class: 'hero' }, 'Hello')`);
-      const sections = readSections(binary);
-      const islandCount = readU16LE(binary, sections.islandTableOffset);
-
-      expect(islandCount).toBe(0);
+      expect(getIslands(binary)).toEqual([]);
     });
   });
 
@@ -443,9 +352,7 @@ describe('Island Registry', () => {
       ctx.emitU32(0);
 
       const binary = ctx.toBinary();
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const islands = readIslandTable(binary, sections.islandTableOffset, strings);
+      const islands = getIslands(binary);
 
       expect(islands.length).toBe(1);
       expect(islands[0]!.id).toBe(0);
@@ -470,9 +377,7 @@ describe('Island Registry', () => {
       ctx.emitU32(divIdx);
 
       const binary = ctx.toBinary();
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const islands = readIslandTable(binary, sections.islandTableOffset, strings);
+      const islands = getIslands(binary);
 
       expect(islands.length).toBe(1);
       expect(islands[0]!.name).toBe('FormIsland');
@@ -481,19 +386,17 @@ describe('Island Registry', () => {
 
     it('island name appears in string table', () => {
       const binary = walkAndEmit(`h('div', null, SomeComponent())`);
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
 
-      expect(strings).toContain('SomeComponent');
+      // The island name and the shell tag are the ONLY strings a component
+      // island shell interns.
+      expect(getStrings(binary)).toEqual(['div', 'SomeComponent']);
     });
 
     it('function name appears in string table for identifier calls', () => {
       const binary = walkAndEmit(`h('div', null, someFunc())`);
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
 
       // Identifier call uses its function name
-      expect(strings).toContain('someFunc');
+      expect(getStrings(binary)).toEqual(['div', 'someFunc']);
     });
 
     it('all section bounds are valid when islands are present', () => {
@@ -522,55 +425,6 @@ describe('Island Registry', () => {
   // -------------------------------------------------------------------------
 
   describe('island content walk — full component subtree in IR', () => {
-    /** Simple opcode scanner: extract opcode bytes from the bytecode section. */
-    function readOpcodes(binary: Uint8Array): number[] {
-      const sections = readSections(binary);
-      const start = sections.opcodeOffset;
-      const end = start + sections.opcodeSize;
-      const opcodes: number[] = [];
-      let pos = start;
-
-      while (pos < end) {
-        const op = binary[pos]!;
-        opcodes.push(op);
-        pos += 1;
-
-        // Skip payloads based on opcode
-        switch (op) {
-          case 0x01: { // OPEN_TAG: tag_str_idx(4) + attr_count(2) + attrs
-            pos += 4;
-            const attrCount = readU16LE(binary, pos); pos += 2;
-            pos += attrCount * 8; // key(4) + val(4) per attr
-            break;
-          }
-          case 0x02: pos += 4; break; // CLOSE_TAG: tag_str_idx(4)
-          case 0x03: { // VOID_TAG: tag_str_idx(4) + attr_count(2) + attrs
-            pos += 4;
-            const ac = readU16LE(binary, pos); pos += 2;
-            pos += ac * 8;
-            break;
-          }
-          case 0x04: pos += 4; break; // TEXT: str_idx(4)
-          case 0x05: pos += 4; break; // DYN_TEXT: slot_id(2) + marker_id(2)
-          case 0x06: pos += 6; break; // DYN_ATTR: key_str_idx(4) + slot_id(2)
-          case 0x07: pos += 10; break; // SHOW_IF: slot_id(2) + then_len(4) + else_len(4)
-          case 0x08: break; // SHOW_ELSE: no payload
-          case 0x0A: pos += 8; break; // LIST: array_slot(2) + item_slot(2) + body_len(4)
-          case 0x0B: pos += 2; break; // ISLAND_START: island_id(2)
-          case 0x0C: pos += 2; break; // ISLAND_END: island_id(2)
-          case 0x12: pos += 8; break; // PROP: src_slot(2) + prop_str_idx(4) + target_slot(2)
-          default: break; // unknown, advance 1
-        }
-      }
-      return opcodes;
-    }
-
-    const OP = {
-      OPEN_TAG: 0x01, CLOSE_TAG: 0x02, VOID_TAG: 0x03,
-      TEXT: 0x04, DYN_TEXT: 0x05, DYN_ATTR: 0x06,
-      SHOW_IF: 0x07, ISLAND_START: 0x0B, ISLAND_END: 0x0C,
-    };
-
     it('resolved island emits full component subtree (not empty shell)', () => {
       const resolveComponent = (name: string) => {
         if (name === 'FilterBar') {
@@ -597,24 +451,20 @@ describe('Island Registry', () => {
       expect(islands).toHaveLength(1);
       expect(islands[0]!.name).toBe('FilterBar');
 
-      // String table should contain strings from inside the component
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      expect(strings).toContain('filter-bar');
-      expect(strings).toContain('label');
-      expect(strings).toContain('Filter:');
-      expect(strings).toContain('input');
-
-      // Bytecode should have ISLAND_START, multiple OPEN_TAG/TEXT/CLOSE_TAG, ISLAND_END
-      const opcodes = readOpcodes(binary);
-      expect(opcodes).toContain(OP.ISLAND_START);
-      expect(opcodes).toContain(OP.ISLAND_END);
-      expect(opcodes).toContain(OP.TEXT); // 'Filter:' text node
-      expect(opcodes).toContain(OP.VOID_TAG); // <input> is void
-
-      // Count OPEN_TAG ops — should have outer div + filter-bar div + label = 3
-      const openTags = opcodes.filter(o => o === OP.OPEN_TAG);
-      expect(openTags.length).toBeGreaterThanOrEqual(3);
+      // The component's whole subtree is emitted BETWEEN the island markers,
+      // with its own root element — not a bare shell.
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG div',
+        'ISLAND_START FilterBar#0',
+        'OPEN_TAG div class="filter-bar"',
+        'OPEN_TAG label',
+        'TEXT "Filter:"',
+        'CLOSE_TAG label',
+        'VOID_TAG input type="text" placeholder="Search..."',
+        'CLOSE_TAG div',
+        'ISLAND_END FilterBar#0',
+        'CLOSE_TAG div',
+      ]);
     });
 
     it('island root element matches component root tag', () => {
@@ -635,13 +485,20 @@ describe('Island Registry', () => {
         { resolveComponent, islandNames: new Set(['PerfPanel']) },
       );
 
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-
-      // The island's root element should be 'section' (from component), not 'div'
-      expect(strings).toContain('section');
-      expect(strings).toContain('perf-panel');
-      expect(strings).toContain('Performance');
+      // The island's root element is 'section' (from the component), not the
+      // 'div' of the fallback shell.
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG main',
+        'ISLAND_START PerfPanel#0',
+        'OPEN_TAG section class="perf-panel"',
+        'OPEN_TAG h3',
+        'TEXT "Performance"',
+        'CLOSE_TAG h3',
+        'CLOSE_TAG section',
+        'ISLAND_END PerfPanel#0',
+        'CLOSE_TAG main',
+      ]);
+      expect(getStrings(binary)).not.toContain('div');
     });
 
     it('unresolved island falls back to empty div shell', () => {
@@ -655,21 +512,15 @@ describe('Island Registry', () => {
       expect(islands).toHaveLength(1);
       expect(islands[0]!.name).toBe('UnknownIsland');
 
-      // Bytecode should have ISLAND_START + OPEN_TAG(div) + CLOSE_TAG + ISLAND_END
-      const opcodes = readOpcodes(binary);
-      const islandStart = opcodes.indexOf(OP.ISLAND_START);
-      const islandEnd = opcodes.indexOf(OP.ISLAND_END);
-      expect(islandStart).toBeGreaterThan(-1);
-      expect(islandEnd).toBeGreaterThan(islandStart);
-
-      // Only one OPEN_TAG + CLOSE_TAG between island markers (empty shell)
-      const between = opcodes.slice(islandStart + 1, islandEnd);
-      const openTags = between.filter(o => o === OP.OPEN_TAG);
-      const closeTags = between.filter(o => o === OP.CLOSE_TAG);
-      expect(openTags.length).toBe(1);
-      expect(closeTags.length).toBe(1);
-      // No TEXT or VOID_TAG (empty shell)
-      expect(between).not.toContain(OP.TEXT);
+      // Exactly one attribute-less <div> between the island markers.
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG div',
+        'ISLAND_START UnknownIsland#0',
+        'OPEN_TAG div',
+        'CLOSE_TAG div',
+        'ISLAND_END UnknownIsland#0',
+        'CLOSE_TAG div',
+      ]);
     });
 
     it('resolved island with dynamic attrs creates slots', () => {
@@ -692,11 +543,19 @@ describe('Island Registry', () => {
         { resolveComponent, islandNames: new Set(['DynIsland']) },
       );
 
-      const opcodes = readOpcodes(binary);
-      // Should have DYN_ATTR for the dynamic class
-      expect(opcodes).toContain(OP.DYN_ATTR);
-      // Should still have the static content
-      expect(opcodes).toContain(OP.TEXT);
+      // The dynamic class binds a slot, and the static content survives.
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG div',
+        'ISLAND_START DynIsland#0',
+        'OPEN_TAG div',
+        'DYN_ATTR class -> attr:class',
+        'OPEN_TAG span',
+        'TEXT "content"',
+        'CLOSE_TAG span',
+        'CLOSE_TAG div',
+        'ISLAND_END DynIsland#0',
+        'CLOSE_TAG div',
+      ]);
     });
 
     it('resolved island with createShow emits SHOW_IF', () => {
@@ -721,10 +580,19 @@ describe('Island Registry', () => {
         { resolveComponent, islandNames: new Set(['ConditionalIsland']) },
       );
 
-      const opcodes = readOpcodes(binary);
-      expect(opcodes).toContain(OP.SHOW_IF);
-      expect(opcodes).toContain(OP.ISLAND_START);
-      expect(opcodes).toContain(OP.ISLAND_END);
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG div',
+        'ISLAND_START ConditionalIsland#0',
+        'OPEN_TAG div class="cond"',
+        'SHOW_IF show:visible then=17 else=0',
+        'OPEN_TAG span',
+        'TEXT "shown"',
+        'CLOSE_TAG span',
+        'SHOW_ELSE',
+        'CLOSE_TAG div',
+        'ISLAND_END ConditionalIsland#0',
+        'CLOSE_TAG div',
+      ]);
     });
 
     it('island bytecode is larger than empty shell', () => {
@@ -795,12 +663,24 @@ describe('Island Registry', () => {
       expect(islands[0]!.name).toBe('Header');
       expect(islands[1]!.name).toBe('Footer');
 
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      expect(strings).toContain('header');
-      expect(strings).toContain('Welcome');
-      expect(strings).toContain('footer');
-      expect(strings).toContain('Copyright');
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG div',
+        'ISLAND_START Header#0',
+        'OPEN_TAG header',
+        'OPEN_TAG h1',
+        'TEXT "Welcome"',
+        'CLOSE_TAG h1',
+        'CLOSE_TAG header',
+        'ISLAND_END Header#0',
+        'ISLAND_START Footer#1',
+        'OPEN_TAG footer',
+        'OPEN_TAG p',
+        'TEXT "Copyright"',
+        'CLOSE_TAG p',
+        'CLOSE_TAG footer',
+        'ISLAND_END Footer#1',
+        'CLOSE_TAG div',
+      ]);
     });
 
     it('resolved island captures slot ids referenced in its subtree', () => {
@@ -838,9 +718,7 @@ describe('Island Registry', () => {
       // per-item list scratch slot (`list:rows:item`) — it holds the LAST
       // rendered row after SSR, so serializing it into data-forma-props
       // would leak that row into the page.
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const slots = readSlotTable(binary, sections.slotTableOffset, strings);
+      const slots = getSlots(binary);
       const idsByName = new Map(slots.map(s => [s.name, s.id]));
       const expected = [
         'attr:class',      // dynamic class on the island root
@@ -855,7 +733,7 @@ describe('Island Registry', () => {
       expect(slotIds).not.toContain(idsByName.get('list:rows:item'));
 
       // And the binary island table round-trips the same slot ids
-      const tableIslands = readIslandTable(binary, sections.islandTableOffset, strings);
+      const tableIslands = getIslands(binary);
       expect(tableIslands[0]!.slotIds).toEqual(expected);
     });
 
@@ -943,9 +821,7 @@ describe('Island Registry', () => {
         { resolveComponent, islandNames: new Set(['Outer', 'Inner', 'Tail']) },
       );
 
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      const slots = readSlotTable(binary, sections.slotTableOffset, strings);
+      const slots = getSlots(binary);
       const idsByName = new Map(slots.map(s => [s.name, s.id]));
 
       const islands = ctx.getIslands();
@@ -983,10 +859,21 @@ describe('Island Registry', () => {
       const islands = ctx.getIslands();
       expect(islands).toHaveLength(2);
 
-      const sections = readSections(binary);
-      const strings = readStringTable(binary, sections.stringTableOffset);
-      // Good island's content should be in string table
-      expect(strings).toContain('works');
+      // The resolvable island keeps its real subtree; the unresolvable one
+      // falls back to a bare shell.
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG div',
+        'ISLAND_START Good#0',
+        'OPEN_TAG div',
+        'TEXT "works"',
+        'CLOSE_TAG div',
+        'ISLAND_END Good#0',
+        'ISLAND_START Bad#1',
+        'OPEN_TAG div',
+        'CLOSE_TAG div',
+        'ISLAND_END Bad#1',
+        'CLOSE_TAG div',
+      ]);
     });
   });
 });
@@ -1050,9 +937,7 @@ describe('generateRealIr island signal defaults', () => {
     const result = generateRealIr(entryPath);
     expect(result).not.toBeNull();
 
-    const sections = readSections(result!.binary);
-    const strings = readStringTable(result!.binary, sections.stringTableOffset);
-    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const slots = getSlots(result!.binary);
     const byName = new Map(slots.map(s => [s.name, s]));
 
     // Slots are NAMED after the island's module-level signals, with defaults
@@ -1065,7 +950,7 @@ describe('generateRealIr island signal defaults', () => {
     // The island metadata captures the reused signal slot
     expect(result!.islands).toHaveLength(1);
     expect(result!.islands[0]!.name).toBe('CounterIsland');
-    expect(result!.islands[0]!.slotIds).toContain(byName.get('statusText')!.id);
+    expect(result!.islands[0]!.slotIds).toEqual([byName.get('statusText')!.id]);
   });
 
   it('conflicting twin declaration warns and keeps the root default', () => {
@@ -1095,9 +980,7 @@ describe('generateRealIr island signal defaults', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("signal 'statusText'"));
 
     // Root Page is authoritative — its default wins
-    const sections = readSections(result!.binary);
-    const strings = readStringTable(result!.binary, sections.stringTableOffset);
-    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const slots = getSlots(result!.binary);
     const statusSlots = slots.filter(s => s.name === 'statusText');
     expect(statusSlots).toHaveLength(1);
     expect(statusSlots[0]!.default).toBe('busy');
@@ -1129,9 +1012,7 @@ describe('generateRealIr island signal defaults', () => {
     // No warning for identical twin declarations (the ksx pattern)
     expect(warnSpy).not.toHaveBeenCalled();
 
-    const sections = readSections(result!.binary);
-    const strings = readStringTable(result!.binary, sections.stringTableOffset);
-    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const slots = getSlots(result!.binary);
     const statusSlots = slots.filter(s => s.name === 'statusText');
     expect(statusSlots).toHaveLength(1);
     expect(statusSlots[0]!.default).toBe('idle');
@@ -1174,9 +1055,7 @@ describe('generateRealIr island signal defaults', () => {
     expect(result).not.toBeNull();
 
     // First-wins: AlphaIsland declared 'shared' first, so its default is kept
-    const sections = readSections(result!.binary);
-    const strings = readStringTable(result!.binary, sections.stringTableOffset);
-    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const slots = getSlots(result!.binary);
     const sharedSlots = slots.filter(s => s.name === 'shared');
     expect(sharedSlots).toHaveLength(1);
     expect(sharedSlots[0]!.default).toBe('from-alpha');
@@ -1212,9 +1091,7 @@ describe('generateRealIr island signal defaults', () => {
     const result = generateRealIr(entryPath);
     expect(result).not.toBeNull();
 
-    const sections = readSections(result!.binary);
-    const strings = readStringTable(result!.binary, sections.stringTableOffset);
-    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const slots = getSlots(result!.binary);
     const byName = new Map(slots.map(s => [s.name, s]));
 
     // The island's module-level signal becomes a named slot with its default
@@ -1223,7 +1100,7 @@ describe('generateRealIr island signal defaults', () => {
     // The island registers via the inline path and captures the reused slot
     expect(result!.islands).toHaveLength(1);
     expect(result!.islands[0]!.name).toBe('CounterIsland');
-    expect(result!.islands[0]!.slotIds).toContain(byName.get('statusText')!.id);
+    expect(result!.islands[0]!.slotIds).toEqual([byName.get('statusText')!.id]);
   });
 
   it('unresolvable island source warns and skips without failing', () => {

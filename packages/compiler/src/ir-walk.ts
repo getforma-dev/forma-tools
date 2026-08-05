@@ -250,6 +250,21 @@ export interface WalkContext {
   /** Per-page registry for show slot naming (createShow + ternary SHOW_IF):
    *  same shape and sharing semantics as listNames. */
   showNames?: { counts: Map<string, number>; total: number };
+  /** Per-page occurrence registry for `attr:<key>` slot names. Two dynamic
+   *  attributes sharing a key anywhere on the page (sibling elements, an
+   *  island and the page around it, a list body and its enclosing page) would
+   *  otherwise mint the same name twice; same eager-init and by-reference
+   *  sharing rules as listNames.
+   *  Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes two dynamic attrs sharing a key on sibling elements"
+   */
+  attrNames?: Map<string, number>;
+  /** Per-page occurrence registry for `text:<childIndex>` slot names. Child
+   *  indices restart inside every element, so two dynamic text children at the
+   *  same index in different parents collide without it; same sharing rules as
+   *  listNames.
+   *  Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes two dynamic text children at the same child index"
+   */
+  textNames?: Map<string, number>;
   /** Names of island components registered in activateIslands({...}).
    *  Island components are NEVER inlined — they always emit ISLAND_START/ISLAND_END. */
   islandNames?: Set<string>;
@@ -305,14 +320,57 @@ function extractResolvedConstants(
  * Ensure the per-page name registries exist on the given context.
  * MUST run at the walk entry points BEFORE any nested walk spread-copies the
  * context ({ ...walkCtx, ... }): a registry first created lazily on a COPY
- * dies with that copy, and a later sibling list/show would recreate it and
+ * dies with that copy, and a later sibling construct would recreate it and
  * mint DUPLICATE slot names (e.g. two `list:todos:array` slots), which
  * collapse in the Rust name→id map (last-insert-wins). Covers hand-built
  * test contexts as well as the root contexts built by the SSR plugin.
+ * Every slot-name family that can collide page-wide is registered here —
+ * list, show, attr and text.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes a dynamic attr inside an island against one on the page"
  */
 function ensureNameRegistries(walkCtx: WalkContext): void {
   walkCtx.listNames ??= { counts: new Map(), total: 0 };
   walkCtx.showNames ??= { counts: new Map(), total: 0 };
+  walkCtx.attrNames ??= new Map();
+  walkCtx.textNames ??= new Map();
+}
+
+/**
+ * Reserve the next occurrence of `base` in a per-page occurrence registry and
+ * return the unique name for it: the first occurrence keeps `base` verbatim,
+ * the Nth gets `base#N`. Shared by every slot-name family (list bases, show,
+ * attr, text) so one documented scheme governs all of them — and so a name
+ * that appears once on a page keeps the spelling downstream consumers pin.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "keeps single-occurrence attr and text names unsuffixed"
+ */
+function uniqueName(counts: Map<string, number>, base: string): string {
+  const occurrence = (counts.get(base) ?? 0) + 1;
+  counts.set(base, occurrence);
+  return occurrence > 1 ? `${base}#${occurrence}` : base;
+}
+
+/**
+ * Page-unique slot name for a dynamic attribute: `attr:<key>`, then
+ * `attr:<key>#2` for the next attribute anywhere on the page that binds the
+ * same key. ensureNameRegistries has already run at the walk entry point on
+ * every path that reaches here, so the non-null assertion holds — and a lazy
+ * `??=` in its place would reintroduce the stranding bug that makes nested
+ * walks mint duplicates.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes two dynamic attrs sharing a key on sibling elements"
+ */
+function attrSlotName(key: string, walkCtx: WalkContext): string {
+  return uniqueName(walkCtx.attrNames!, `attr:${key}`);
+}
+
+/**
+ * Page-unique slot name for a dynamic text child at `childIndex` in its
+ * parent's argument list (`h(tag, props, child0, ...)`, so the first child is
+ * index 2): `text:0`, then `text:0#2` for the next dynamic text child that
+ * lands at the same index under a different parent.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes two dynamic text children at the same child index"
+ */
+function textSlotName(childIndex: number, walkCtx: WalkContext): string {
+  return uniqueName(walkCtx.textNames!, `text:${childIndex - 2}`);
 }
 
 /**
@@ -446,7 +504,7 @@ export function walkHTree(
           slotId = walkCtx.signalSlots.get(sigName)!;
           ctx.recordSlotRef(slotId);
         } else {
-          const slotName = `attr:${key}`;
+          const slotName = attrSlotName(key, walkCtx);
           // Try to compute SSR default by evaluating the expression with
           // signal defaults and module-level string constants
           let defaultBytes = new Uint8Array(0);
@@ -486,7 +544,7 @@ export function walkHTree(
         );
       }
       const keyIdx = ctx.addString(key);
-      const slotName = `attr:${key}`;
+      const slotName = attrSlotName(key, walkCtx);
       const slotId = ctx.addSlot(slotName, TYPE_TEXT);
       dynAttrs.push({ keyIdx, slotId });
     }
@@ -830,8 +888,7 @@ function emitChild(
       slotId = walkCtx.signalSlots.get(signalName)!;
       ctx.recordSlotRef(slotId);
     } else {
-      const slotName = `text:${childIndex - 2}`;
-      slotId = ctx.addSlot(slotName, TYPE_TEXT);
+      slotId = ctx.addSlot(textSlotName(childIndex, walkCtx), TYPE_TEXT);
     }
     const markerId = ctx.nextMarker();
     ctx.emit(OP_DYN_TEXT);
@@ -871,15 +928,14 @@ function emitChild(
  * comment on emitCreateList).
  */
 function deriveShowSlotName(cond: t.Node | null | undefined, walkCtx: WalkContext): string {
-  const registry = (walkCtx.showNames ??= { counts: new Map(), total: 0 });
+  // Created at the walk entry points — see attrSlotName on why this must not
+  // fall back to a lazily created registry.
+  const registry = walkCtx.showNames!;
   registry.total += 1;
   const condName = deriveBindingName(cond);
-  let base = condName ?? `#${registry.total}`;
-  if (condName) {
-    const occurrence = (registry.counts.get(condName) ?? 0) + 1;
-    registry.counts.set(condName, occurrence);
-    if (occurrence > 1) base = `${condName}#${occurrence}`;
-  }
+  const base = condName === null
+    ? `#${registry.total}`
+    : uniqueName(registry.counts, condName);
   return `show:${base}`;
 }
 
@@ -1072,6 +1128,14 @@ function deriveBindingName(node: t.Node | null | undefined): string | null {
  * list on a page is individually addressable by name for server-side
  * SlotData injection.
  *
+ * Dynamic attributes (`attr:<key>`) and dynamic text children
+ * (`text:<childIndex>`) run the SAME occurrence scheme over their own
+ * page-wide registries — see attrSlotName / textSlotName. Every slot name a
+ * page emits is therefore unique, which the Rust name→id map requires: it
+ * inserts each name into one HashMap, so a duplicate silently makes the
+ * earlier slot unreachable for server-side SlotData injection.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes two dynamic attrs sharing a key on sibling elements"
+ *
  * Binary format:
  *   LIST(0x0A) array_slot_id(u16) item_slot_id(u16) body_len(u32)
  *   [...body opcodes (PROP + template)...]
@@ -1111,17 +1175,17 @@ function emitCreateList(
   }
 
   // Unique per-page base name for this list's slots (see doc comment above):
-  // source-derived, else map-param-derived, else positional.
-  const registry = (walkCtx.listNames ??= { counts: new Map(), total: 0 });
+  // source-derived, else map-param-derived, else positional. Deduped on the
+  // BASE, not on each slot name, so one list's three slots stay a matched set.
+  // Created at the walk entry points — see attrSlotName on why this must not
+  // fall back to a lazily created registry.
+  const registry = walkCtx.listNames!;
   registry.total += 1;
   const derivedName = deriveBindingName(node.arguments[0])
     ?? (paramName !== '_' ? paramName : null);
-  let base = derivedName ?? `#${registry.total}`;
-  if (derivedName) {
-    const occurrence = (registry.counts.get(derivedName) ?? 0) + 1;
-    registry.counts.set(derivedName, occurrence);
-    if (occurrence > 1) base = `${derivedName}#${occurrence}`;
-  }
+  const base = derivedName === null
+    ? `#${registry.total}`
+    : uniqueName(registry.counts, derivedName);
 
   // Create slots: array slot (server-sourced) and item slot
   const arraySlotId = ctx.addSlot(`list:${base}:array`, TYPE_ARRAY, SOURCE_SERVER);
@@ -1589,8 +1653,7 @@ function emitBranchContent(
   }
 
   // Anything else → DYN_TEXT
-  const slotName = `text:${childIndex - 2}`;
-  const slotId = ctx.addSlot(slotName, TYPE_TEXT);
+  const slotId = ctx.addSlot(textSlotName(childIndex, walkCtx), TYPE_TEXT);
   const markerId = ctx.nextMarker();
   ctx.emit(OP_DYN_TEXT);
   ctx.emitU16(slotId);
@@ -1602,14 +1665,22 @@ function emitBranchContent(
 // ---------------------------------------------------------------------------
 
 /**
- * Emit ISLAND_START / ISLAND_END markers and register island in the table.
+ * Emit ISLAND_START / ISLAND_END markers and register the island in the table.
  *
- * When rootTag and rootAttrs are provided (resolved from the island component's
- * own root h() call), the shell element matches the component's root element.
- * The Rust walker injects data-forma-island attributes onto this element, so
- * CSR hydration can replace it in-place without an extra wrapper div.
+ * This is the FALLBACK shell for every subtree the walker does NOT translate
+ * into IR — a registered island whose component would not resolve, a
+ * sub-component stopped by the depth/cycle/non-static-props guards, an
+ * un-unrollable spread, or an unrecognized expression. It emits a bare <div>
+ * for the Rust walker to hang data-forma-island / data-forma-component
+ * attributes on, so CSR hydration can replace it in place.
+ *
+ * A registered island that DOES resolve never reaches here: it emits its own
+ * root element from the walked component subtree, between ISLAND_START and
+ * ISLAND_END (see walkCallExpression's islandNames branch).
+ * Verified by: packages/compiler/tests/island-registry.test.ts > "unresolved island falls back to empty div shell"
+ * Verified by: packages/compiler/tests/island-registry.test.ts > "island root element matches component root tag"
  */
-function emitIsland(ctx: IrEmitContext, name?: string, rootTag?: string, rootAttrs?: Array<[string, string]>): void {
+function emitIsland(ctx: IrEmitContext, name?: string): void {
   // Capture byte offset BEFORE emitting ISLAND_START so walk_island() can seek directly here.
   const byteOffset = ctx.opcodeLen();
   // addIsland increments nextIslandCounter and registers the island in the table.
@@ -1619,21 +1690,12 @@ function emitIsland(ctx: IrEmitContext, name?: string, rootTag?: string, rootAtt
   ctx.emit(OP_ISLAND_START);
   ctx.emitU16(id);
 
-  // Emit a shell element so the Rust walker has an element to inject
+  // Emit an empty <div> shell so the Rust walker has an element to inject
   // data-forma-island / data-forma-component attributes onto.
-  // Uses the component's own root tag + static attributes when resolved,
-  // falling back to a plain <div> for unresolvable components.
-  const tag = rootTag || 'div';
-  const tagIdx = ctx.addString(tag);
+  const tagIdx = ctx.addString('div');
   ctx.emit(OP_OPEN_TAG);
   ctx.emitU32(tagIdx);
-
-  const attrs = rootAttrs || [];
-  ctx.emitU16(attrs.length);
-  for (const [key, val] of attrs) {
-    ctx.emitU32(ctx.addString(key));
-    ctx.emitU32(ctx.addString(val));
-  }
+  ctx.emitU16(0); // no attributes
 
   ctx.emit(OP_CLOSE_TAG);
   ctx.emitU32(tagIdx);
