@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { IrEmitContext } from '../src/ir-emit';
 import { walkHTree, walkCallExpression, type WalkContext } from '../src/ir-walk';
+import { ComponentAnalyzer } from '../src/component-analyzer';
 import { parse } from '@babel/parser';
 import type * as T from '@babel/types';
 import * as t from '@babel/types';
@@ -302,6 +303,9 @@ describe('IR Walk Engine', () => {
 
       expect(opList).toContain(OP_SHOW_IF);
       expect(opList).toContain(OP_SHOW_ELSE);
+
+      // Slot name is derived from the ternary's test expression
+      expect(getSlotNames(binary)).toContain('show:submitting');
     });
 
     it('emits TEXT in both branches of ternary', () => {
@@ -338,6 +342,28 @@ describe('IR Walk Engine', () => {
       const openCount = opList.filter(op => op === OP_OPEN_TAG).length;
       // Outer div + 2 branch elements = 3
       expect(openCount).toBe(3);
+
+      expect(getSlotNames(binary)).toContain('show:loading');
+    });
+
+    it('dedupes ternary shows against createShow shows in one namespace', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          () => visible() ? 'Yes' : 'No',
+          createShow(() => visible(), () => h('span', null, 'Also')),
+        )`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('show:visible');
+      expect(slotNames).toContain('show:visible#2');
+    });
+
+    it('falls back to a positional name for a non-derivable ternary test', () => {
+      const binary = walkAndEmit(
+        `h('div', null, () => (a() && b()) ? 'Both' : 'Not')`,
+      );
+      expect(getSlotNames(binary)).toContain('show:#1');
     });
   });
 
@@ -429,6 +455,89 @@ describe('IR Walk Engine', () => {
       const strings = getStrings(binary);
       expect(strings).toContain('class');
     });
+
+    it('emits static attribute for identifier resolving to a module string const', () => {
+      const stringConstants = new Map([['SIL_BODY', 'M10 20 L30 40']]);
+      const binary = walkAndEmit(`h('path', { d: SIL_BODY })`, { stringConstants });
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      // Resolved const → static attribute pair, no DYN_ATTR slot
+      expect(opList).not.toContain(OP_DYN_ATTR);
+      const strings = getStrings(binary);
+      expect(strings).toContain('d');
+      expect(strings).toContain('M10 20 L30 40');
+      expect(getSlotNames(binary)).not.toContain('attr:d');
+    });
+
+    it('folds const + chains via extractStringConstants into a static attribute', () => {
+      const analyzer = new ComponentAnalyzer('.');
+      const source = [
+        `const SIL_HEAD = 'M10 0 ';`,
+        `const SIL_TORSO = 'L20 30';`,
+        'const SIL_BODY = SIL_HEAD + SIL_TORSO + `z`;',
+      ].join('\n');
+      const stringConstants = analyzer.extractStringConstants(source, 'icon.ts');
+      expect(stringConstants.get('SIL_BODY')).toBe('M10 0 L20 30z');
+
+      const binary = walkAndEmit(`h('path', { d: SIL_BODY })`, { stringConstants });
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      expect(opList).not.toContain(OP_DYN_ATTR);
+      expect(getStrings(binary)).toContain('M10 0 L20 30z');
+    });
+
+    it('does not fold a module const shadowed in a nested scope and warns instead', () => {
+      const analyzer = new ComponentAnalyzer('.');
+      const source = [
+        `const cls = 'icon';`,
+        `export function Page() {`,
+        `  const cls = computeClass();`,
+        `  return h('div', { class: cls });`,
+        `}`,
+      ].join('\n');
+      const stringConstants = analyzer.extractStringConstants(source, 'page.ts');
+      // The shadowed name must NOT survive folding — baking the module value
+      // as a static attr would be unrecoverable client-side (F10 hazard).
+      expect(stringConstants.has('cls')).toBe(false);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const binary = walkAndEmit(`h('div', { class: cls })`, { stringConstants });
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      // Falls back to the correctable DYN_ATTR path, with the build warning
+      expect(opList).toContain(OP_DYN_ATTR);
+      expect(getStrings(binary)).not.toContain('icon');
+      expect(getSlotNames(binary)).toContain('attr:class');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`attribute 'class' on <div> references 'cls'`),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not fold let variables and warns on the unresolved identifier', () => {
+      const analyzer = new ComponentAnalyzer('.');
+      const stringConstants = analyzer.extractStringConstants(
+        `let silBody = 'M10 20';`,
+        'icon.ts',
+      );
+      expect(stringConstants.has('silBody')).toBe(false);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const binary = walkAndEmit(`h('path', { d: silBody })`, { stringConstants });
+      const opcodes = extractOpcodeSection(binary);
+      const opList = parseOpcodeList(opcodes);
+
+      // Keeps today's behavior: DYN_ATTR with an empty-default slot
+      expect(opList).toContain(OP_DYN_ATTR);
+      expect(getSlotNames(binary)).toContain('attr:d');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`attribute 'd' on <path> references 'silBody'`),
+      );
+      warnSpy.mockRestore();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -485,6 +594,55 @@ describe('IR Walk Engine', () => {
 
       expect(opList).toContain(OP_SHOW_IF);
       expect(opList).toContain(OP_SHOW_ELSE);
+    });
+
+    it('derives the slot name from the condition', () => {
+      const binary = walkCallAndEmit(
+        `createShow(() => visible(), () => h('span', null, 'Visible'))`,
+      );
+      expect(getSlotNames(binary)).toContain('show:visible');
+    });
+
+    it('derives the slot name through a ! negation', () => {
+      const binary = walkCallAndEmit(
+        `createShow(() => !hidden(), () => h('span', null, 'Shown'))`,
+      );
+      expect(getSlotNames(binary)).toContain('show:hidden');
+    });
+
+    it('derives the slot name from a function-expression condition', () => {
+      const binary = walkCallAndEmit(
+        `createShow(function () { return visible(); }, () => h('span', null, 'Visible'))`,
+      );
+      expect(getSlotNames(binary)).toContain('show:visible');
+    });
+
+    it('derives the slot name from a block-body arrow condition', () => {
+      const binary = walkCallAndEmit(
+        `createShow(() => { return visible(); }, () => h('span', null, 'Visible'))`,
+      );
+      expect(getSlotNames(binary)).toContain('show:visible');
+    });
+
+    it('dedupes two shows on the same signal with #n suffixes', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          createShow(() => visible(), () => h('span', null, 'A')),
+          createShow(() => visible(), () => h('span', null, 'B')),
+        )`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('show:visible');
+      expect(slotNames).toContain('show:visible#2');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+
+    it('falls back to a positional name for a non-derivable condition', () => {
+      const binary = walkCallAndEmit(
+        `createShow(() => a() && b(), () => h('span', null, 'Both'))`,
+      );
+      expect(getSlotNames(binary)).toContain('show:#1');
     });
 
     it('emits then-branch content for createShow', () => {
@@ -996,6 +1154,43 @@ describe('IR Walk Engine', () => {
       expect(ariaSlot).toBeDefined();
       expect(ariaSlot!.default).toBe('Show password');
     });
+
+    it('computes default for function prop referencing a module string const', () => {
+      const ctx = new IrEmitContext();
+      const signalDefaults = new Map([
+        ['suffix', { type: 'text', default: ' selected' as boolean | string | number | null }],
+      ]);
+      const signalSlots = new Map<string, number>();
+      signalSlots.set('suffix', ctx.addSlot('suffix', TYPE_TEXT, SOURCE_CLIENT, new TextEncoder().encode(' selected')));
+      const stringConstants = new Map([['SIL_BODY', 'M10 20 L30 40']]);
+
+      const expr = parseExpr(`h('path', { d: () => SIL_BODY + suffix() })`);
+      if (t.isCallExpression(expr)) {
+        walkHTree(expr, 'h', ctx, { signalSlots, signalDefaults, stringConstants });
+      }
+      const binary = ctx.toBinary();
+      const slots = extractSlotDefaults(binary);
+
+      const dSlot = slots.find(s => s.name === 'attr:d');
+      expect(dSlot).toBeDefined();
+      expect(dSlot!.default).toBe('M10 20 L30 40 selected');
+    });
+
+    it('computes default for function prop that only references a const (no signals)', () => {
+      const ctx = new IrEmitContext();
+      const stringConstants = new Map([['SIL_BODY', 'M10 20 L30 40']]);
+
+      const expr = parseExpr(`h('path', { d: () => SIL_BODY })`);
+      if (t.isCallExpression(expr)) {
+        walkHTree(expr, 'h', ctx, { signalSlots: new Map(), stringConstants });
+      }
+      const binary = ctx.toBinary();
+      const slots = extractSlotDefaults(binary);
+
+      const dSlot = slots.find(s => s.name === 'attr:d');
+      expect(dSlot).toBeDefined();
+      expect(dSlot!.default).toBe('M10 20 L30 40');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1333,15 +1528,162 @@ describe('IR Walk Engine', () => {
       expect(getSlotNames(memberCall)).toContain('list:todos:array');
     });
 
-    it('falls back to a positional name when the source has no name', () => {
+    it('derives names from a function-expression data source', () => {
+      const binary = walkCallAndEmit(
+        `createList(function () { return todos(); }, (r) => r.id, (r) => h('li', null, r.title))`,
+      );
+      expect(getSlotNames(binary)).toContain('list:todos:array');
+    });
+
+    it('derives from the map param when the source has no name', () => {
       const binary = walkCallAndEmit(
         `createList([{ title: 'a' }], (r) => r.id, (r) => h('li', null, r.title))`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:r:array');
+      expect(slotNames).toContain('list:r:item');
+      expect(slotNames).toContain('list:r:title');
+    });
+
+    it('falls back to a positional name when the map param is _', () => {
+      const binary = walkCallAndEmit(
+        `createList([{ title: 'a' }], (_) => _.id, (_) => h('li', null, _.title))`,
       );
       const slotNames = getSlotNames(binary);
 
       expect(slotNames).toContain('list:#1:array');
       expect(slotNames).toContain('list:#1:item');
       expect(slotNames).toContain('list:#1:title');
+    });
+
+    it('does not consume a suffix for an unrelated list between occurrences', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          createList(todos, (r) => r.id, (r) => h('li', null, r.title)),
+          createList(users, (r) => r.id, (r) => h('li', null, r.name)),
+          createList(todos, (r) => r.id, (r) => h('span', null, r.title)),
+        )`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:todos:array');
+      expect(slotNames).toContain('list:users:array');
+      expect(slotNames).toContain('list:todos#2:array');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+
+    it('names two literal-source lists by their distinct map params', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          createList([{ title: 'x' }], (a) => a.id, (a) => h('li', null, a.title)),
+          createList([{ name: 'y' }], (b) => b.id, (b) => h('li', null, b.name)),
+        )`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:a:array');
+      expect(slotNames).toContain('list:b:array');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Shared name registries across nested walk contexts
+  // -------------------------------------------------------------------------
+  // Island subtrees, inlined sub-components, and list bodies walk spread
+  // COPIES of the WalkContext. The registries must live on the root context
+  // (created eagerly at the walk entry) so a list/show first seen inside a
+  // copy still dedups against later page-level siblings — otherwise the page
+  // mints duplicate slot names that collapse in the Rust name→id map.
+  describe('shared name registries across nested walk contexts', () => {
+    const todoWidgetResolver = (name: string) => {
+      if (name === 'TodoWidget') {
+        return {
+          source: `export function TodoWidget() {
+            return h('section', null,
+              createList(todos, (r) => r.id, (r) => h('li', null, r.title))
+            );
+          }`,
+          functionName: 'TodoWidget',
+        };
+      }
+      return null;
+    };
+
+    it('dedupes a sub-component list against a later page-level list over the same source', () => {
+      // The FAILING order pre-fix: the first list lives inside the inlined
+      // sub-component's copied context, so the page-level list used to
+      // recreate the registry and mint a duplicate 'list:todos:array'.
+      const binary = walkAndEmit(
+        `h('div', null,
+          TodoWidget(),
+          createList(todos, (r) => r.id, (r) => h('ul', null, r.title)),
+        )`,
+        { resolveComponent: todoWidgetResolver },
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:todos:array');
+      expect(slotNames).toContain('list:todos#2:array');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+
+    it('dedupes a page-level list against a later sub-component list (reversed order)', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          createList(todos, (r) => r.id, (r) => h('ul', null, r.title)),
+          TodoWidget(),
+        )`,
+        { resolveComponent: todoWidgetResolver },
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('list:todos:array');
+      expect(slotNames).toContain('list:todos#2:array');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+
+    it('dedupes same-signal shows across two sibling island subtrees', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'AlphaIsland' || name === 'BetaIsland') {
+          return {
+            source: `export function ${name}() {
+              return h('div', null,
+                createShow(() => visible(), () => h('span', null, 'shown'))
+              );
+            }`,
+            functionName: name,
+          };
+        }
+        return null;
+      };
+
+      const binary = walkAndEmit(
+        `h('div', null, AlphaIsland(), BetaIsland())`,
+        { resolveComponent, islandNames: new Set(['AlphaIsland', 'BetaIsland']) },
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('show:visible');
+      expect(slotNames).toContain('show:visible#2');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
+    });
+
+    it('dedupes a show inside a list body against a later page-level show', () => {
+      const binary = walkAndEmit(
+        `h('div', null,
+          createList(todos, (r) => r.id, (r) =>
+            h('li', null, createShow(() => visible(), () => h('b', null, 'row')))
+          ),
+          createShow(() => visible(), () => h('span', null, 'page')),
+        )`,
+      );
+      const slotNames = getSlotNames(binary);
+
+      expect(slotNames).toContain('show:visible');
+      expect(slotNames).toContain('show:visible#2');
+      expect(new Set(slotNames).size).toBe(slotNames.length);
     });
   });
 });

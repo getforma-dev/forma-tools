@@ -16,7 +16,7 @@ const _require = createRequire(import.meta.url);
 import { parse } from '@babel/parser';
 import * as t from '@babel/types';
 import { IrEmitContext } from './ir-emit';
-import { ComponentAnalyzer } from './component-analyzer';
+import { ComponentAnalyzer, type EntryPointInfo, type SignalDefault } from './component-analyzer';
 import { walkHTree, walkCallExpression, type WalkContext } from './ir-walk';
 
 export interface SsrPluginOptions {
@@ -120,20 +120,11 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         if (importPathRaw && (importPathRaw.startsWith('.') || importPathRaw.startsWith('/'))) {
           const resolvedPath = resolveFilePath(entryDir, importPathRaw);
           if (resolvedPath) {
-            try {
-              let src = readFileSync(resolvedPath, 'utf8');
-              // Transform JSX to h() calls if needed
-              if (resolvedPath.endsWith('.tsx') || resolvedPath.endsWith('.jsx')) {
-                try {
-                  const esbuild = _require('esbuild');
-                  src = esbuild.transformSync(src, {
-                    loader: resolvedPath.endsWith('.tsx') ? 'tsx' : 'jsx',
-                    jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
-                  }).code;
-                } catch { /* use raw source */ }
-              }
+            const src = loadComponentSource(resolvedPath);
+            if (src !== null) {
               return { source: src, functionName: name };
-            } catch { /* fall through to local check */ }
+            }
+            // read failed — fall through to local check
           }
         }
 
@@ -163,6 +154,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
 
       // Extract file constants and signal defaults from entry point itself
       const fileConstants = analyzer.extractFileConstants(entrySource, entryPointPath);
+      const stringConstants = analyzer.extractStringConstants(entrySource, entryPointPath);
 
       // Signal defaults: look for createSignal calls at module scope in the entry file
       let signalDefaults = new Map<string, any>();
@@ -171,6 +163,20 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       } catch {
         // extractSignalDefaults may not handle '__inline__' — that's fine, skip defaults
       }
+
+      // Merge signal defaults from island component files (finding F9) — the
+      // inline block-body mount path can register islands via
+      // activateIslands({...}) too. The entry file IS the component here, so
+      // its own import map and dir serve as the component-level fallback.
+      mergeIslandSignalDefaults(
+        analyzer,
+        entryInfo,
+        'the entry mount',
+        entryDir,
+        importMap,
+        entryDir,
+        signalDefaults,
+      );
 
       for (const [sigName, sigDefault] of signalDefaults) {
         let typeHint = TYPE_TEXT;
@@ -188,12 +194,18 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
 
       const walkCtx: WalkContext = {
         fileConstants,
+        stringConstants,
         signalSlots,
         signalDefaults,
         resolveComponent,
         visited: new Set(),
         depth: 0,
         islandNames: entryInfo.islandNames,
+        // Per-page slot-name registries MUST be created on the root context
+        // (not lazily inside a spread-copied nested context) so every list
+        // and show on the page dedups against one shared namespace.
+        listNames: { counts: new Map(), total: 0 },
+        showNames: { counts: new Map(), total: 0 },
       };
 
       const returnNode = entryInfo.inlineReturnNode;
@@ -223,25 +235,48 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
     }
 
     // 4. Read and parse the component file (transform JSX if needed)
-    let componentSource = readFileSync(componentPath, 'utf8');
-    if (componentPath.endsWith('.tsx') || componentPath.endsWith('.jsx')) {
-      try {
-        const esbuild = _require('esbuild');
-        componentSource = esbuild.transformSync(componentSource, {
-          loader: componentPath.endsWith('.tsx') ? 'tsx' : 'jsx',
-          jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
-        }).code;
-      } catch { /* use raw source */ }
+    const componentSource = loadComponentSource(componentPath);
+    if (componentSource === null) {
+      console.warn(`   IR: could not read component file ${componentPath}`);
+      return null;
     }
 
-    // 5. Extract file constants (for Rule 9 static unroll)
+    // 5. Extract file constants (for Rule 9 static unroll) and string
+    // constants (for static attribute resolution)
     const fileConstants = analyzer.extractFileConstants(componentSource, componentPath);
+    const stringConstants = analyzer.extractStringConstants(componentSource, componentPath);
 
     // 6. Extract signal defaults (for slot defaults)
     const signalDefaults = analyzer.extractSignalDefaults(
       componentSource,
       componentPath,
       entryInfo.componentName,
+    );
+
+    // 6b. Build import map from the component file (for island signal
+    // extraction below and sub-component resolution in step 10)
+    const componentAst = parse(componentSource, PARSE_OPTS);
+    const componentDir = dirname(componentPath);
+    const importMap = new Map<string, string>();
+    for (const node of componentAst.program.body) {
+      if (t.isImportDeclaration(node)) {
+        const importPath = node.source.value;
+        for (const spec of node.specifiers) {
+          importMap.set(spec.local.name, importPath);
+        }
+      }
+    }
+
+    // 6c. Merge signal defaults from ISLAND component files (first-wins,
+    // root component authoritative — see mergeIslandSignalDefaults).
+    mergeIslandSignalDefaults(
+      analyzer,
+      entryInfo,
+      `root '${entryInfo.componentName}'`,
+      entryDir,
+      importMap,
+      componentDir,
+      signalDefaults,
     );
 
     // 7. Parse the component file to find the return h() tree
@@ -281,20 +316,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       signalSlots.set(name, slotId);
     }
 
-    // 9. Build import map from the component file (for sub-component resolution)
-    const componentAst = parse(componentSource, PARSE_OPTS);
-    const importMap = new Map<string, string>();
-    for (const node of componentAst.program.body) {
-      if (t.isImportDeclaration(node)) {
-        const importPath = node.source.value;
-        for (const spec of node.specifiers) {
-          importMap.set(spec.local.name, importPath);
-        }
-      }
-    }
-
     // 10. Build resolve callback for sub-components
-    const componentDir = dirname(componentPath);
     const resolveComponent = (name: string): { source: string; functionName: string } | null => {
       const importPathRaw = importMap.get(name);
       if (!importPathRaw) return null;
@@ -305,32 +327,26 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       const resolvedPath = resolveFilePath(componentDir, importPathRaw);
       if (!resolvedPath) return null;
 
-      try {
-        let source = readFileSync(resolvedPath, 'utf8');
-        if (resolvedPath.endsWith('.tsx') || resolvedPath.endsWith('.jsx')) {
-          try {
-            const esbuild = _require('esbuild');
-            source = esbuild.transformSync(source, {
-              loader: resolvedPath.endsWith('.tsx') ? 'tsx' : 'jsx',
-              jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
-            }).code;
-          } catch { /* use raw source */ }
-        }
-        return { source, functionName: name };
-      } catch {
-        return null;
-      }
+      const source = loadComponentSource(resolvedPath);
+      if (source === null) return null;
+      return { source, functionName: name };
     };
 
     // 11. Build WalkContext and walk the h() tree
     const walkCtx: WalkContext = {
       fileConstants,
+      stringConstants,
       signalSlots,
       signalDefaults,
       resolveComponent,
       visited: new Set(),
       depth: 0,
       islandNames: entryInfo.islandNames,
+      // Per-page slot-name registries MUST be created on the root context
+      // (not lazily inside a spread-copied nested context) so every list
+      // and show on the page dedups against one shared namespace.
+      listNames: { counts: new Map(), total: 0 },
+      showNames: { counts: new Map(), total: 0 },
     };
 
     const returnNode = componentInfo.returnNode;
@@ -351,6 +367,105 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
     };
   } catch (err) {
     console.warn(`   IR: real emission failed: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Merge signal defaults from ISLAND component files into the page-level map.
+ * Island files declare their signals at module scope (or inside the island
+ * function); merging is FIRST-WINS — the root component's defaults (already
+ * in `signalDefaults`) are authoritative, then islands merge in registry
+ * order. Identical duplicate declarations merge silently; only a conflicting
+ * default warns, naming the declarer whose default actually won — first-wins
+ * means the keeper may be an EARLIER ISLAND, not necessarily the root.
+ *
+ * `rootLabel` names the pre-seeded declarations in warnings (e.g.
+ * "root 'DashboardPage'"). `componentImportMap`/`componentDir` are the
+ * fallback for resolving island files not imported by the entry itself;
+ * the inline mount path passes the entry's own map and dir for both.
+ */
+function mergeIslandSignalDefaults(
+  analyzer: ComponentAnalyzer,
+  entryInfo: EntryPointInfo,
+  rootLabel: string,
+  entryDir: string,
+  componentImportMap: Map<string, string>,
+  componentDir: string,
+  signalDefaults: Map<string, SignalDefault>,
+): void {
+  if (!entryInfo.islandNames) return;
+
+  // Provenance: signal name -> label of the declarer whose default won.
+  const provenance = new Map<string, string>();
+  for (const sigName of signalDefaults.keys()) {
+    provenance.set(sigName, rootLabel);
+  }
+
+  for (const islandName of entryInfo.islandNames) {
+    // Resolve the island's source file via the entry's import map,
+    // falling back to the component file's import map.
+    let islandPath: string | null = null;
+    const entryImport = entryInfo.importMap?.get(islandName);
+    if (entryImport && (entryImport.startsWith('.') || entryImport.startsWith('/'))) {
+      islandPath = resolveFilePath(entryDir, entryImport);
+    }
+    if (!islandPath) {
+      const componentImport = componentImportMap.get(islandName);
+      if (componentImport && (componentImport.startsWith('.') || componentImport.startsWith('/'))) {
+        islandPath = resolveFilePath(componentDir, componentImport);
+      }
+    }
+    if (!islandPath) {
+      console.warn(`   IR: could not resolve island component '${islandName}' for signal extraction`);
+      continue;
+    }
+
+    const islandSource = loadComponentSource(islandPath);
+    if (islandSource === null) {
+      console.warn(`   IR: could not read island component file ${islandPath}`);
+      continue;
+    }
+
+    const islandDefaults = analyzer.extractIslandSignalDefaults(
+      islandSource,
+      islandPath,
+      islandName,
+    );
+    for (const [sigName, sigDefault] of islandDefaults) {
+      const existing = signalDefaults.get(sigName);
+      if (!existing) {
+        signalDefaults.set(sigName, sigDefault);
+        provenance.set(sigName, `island '${islandName}'`);
+      } else if (existing.type !== sigDefault.type || existing.default !== sigDefault.default) {
+        const keeper = provenance.get(sigName) ?? rootLabel;
+        console.warn(
+          `   IR: signal '${sigName}' in island '${islandName}' has default ${JSON.stringify(sigDefault.default)} but ${keeper} declares ${JSON.stringify(existing.default)} — keeping the default from ${keeper}`,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Read a component source file, transforming JSX syntax to h() calls
+ * when the file is .tsx/.jsx (the IR walker only understands h() trees).
+ * Returns the (possibly transformed) source, or null if the read fails.
+ */
+function loadComponentSource(filePath: string): string | null {
+  try {
+    let source = readFileSync(filePath, 'utf8');
+    if (filePath.endsWith('.tsx') || filePath.endsWith('.jsx')) {
+      try {
+        const esbuild = _require('esbuild');
+        source = esbuild.transformSync(source, {
+          loader: filePath.endsWith('.tsx') ? 'tsx' : 'jsx',
+          jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
+        }).code;
+      } catch { /* use raw source */ }
+    }
+    return source;
+  } catch {
     return null;
   }
 }

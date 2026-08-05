@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ComponentAnalyzer, type SignalDefault } from '../src/component-analyzer';
 
 const analyzer = new ComponentAnalyzer('/test/project');
@@ -18,6 +18,10 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'OnboardingPage',
       importPath: './OnboardingPage',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['OnboardingPage', './OnboardingPage'],
+      ]),
     });
   });
 
@@ -40,6 +44,10 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'Dashboard',
       importPath: './Dashboard',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['Dashboard', './Dashboard'],
+      ]),
     });
   });
 
@@ -53,6 +61,10 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'UserProfile',
       importPath: './pages/UserProfile',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['UserProfile', './pages/UserProfile'],
+      ]),
     });
   });
 
@@ -66,6 +78,10 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'App',
       importPath: './App',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['App', './App'],
+      ]),
     });
   });
 
@@ -89,6 +105,10 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'Page',
       importPath: './LoginPage',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['Page', './LoginPage'],
+      ]),
     });
   });
 
@@ -129,6 +149,35 @@ describe('parseEntryPoint', () => {
     `;
     const result = analyzer.parseEntryPoint(source, 'app.tsx');
     expect(result).toBeNull();
+  });
+
+  it('collects activateIslands names on the named mount path', () => {
+    const source = `
+      import { mount, activateIslands } from 'formajs';
+      import { DashboardPage } from './DashboardPage';
+      import { CounterIsland } from './CounterIsland';
+      mount(() => DashboardPage(), '#app');
+      activateIslands({ CounterIsland });
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.ts');
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('DashboardPage');
+    expect(result!.islandNames).toEqual(new Set(['CounterIsland']));
+  });
+
+  it('collects activateIslands names on the inline block-body mount path', () => {
+    const source = `
+      import { h, mount, activateIslands } from 'formajs';
+      import { CounterIsland } from './CounterIsland';
+      mount(() => {
+        return h('div', null, CounterIsland());
+      }, '#app');
+      activateIslands({ CounterIsland });
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.ts');
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.islandNames).toEqual(new Set(['CounterIsland']));
   });
 
   it('Pattern 3: block-body mount with multiple statements before return', () => {
@@ -376,6 +425,91 @@ describe('extractFileConstants', () => {
       { 'data-testid': 'card', 'aria-label': 'info' },
     ]);
   });
+
+  it('extracts export const array declarations', () => {
+    const source = `
+      export const FEATURES = [
+        { name: 'Auth', enabled: true },
+      ];
+    `;
+    const result = analyzer.extractFileConstants(source, 'file.ts');
+    expect(result.size).toBe(1);
+    expect(result.get('FEATURES')).toEqual([{ name: 'Auth', enabled: true }]);
+  });
+});
+
+// ===========================================================================
+// String Constant Extraction — extractStringConstants
+// ===========================================================================
+
+describe('extractStringConstants', () => {
+  it('folds an export const string declaration', () => {
+    const source = `
+      export const ICON_PATH = 'M4 6h16' + 'M4 12h16';
+      const LOCAL = 'plain';
+    `;
+    const result = analyzer.extractStringConstants(source, 'icons.ts');
+    expect(result.get('ICON_PATH')).toBe('M4 6h16M4 12h16');
+    expect(result.get('LOCAL')).toBe('plain');
+  });
+
+  it('folds a reference chain through an export const', () => {
+    const source = `
+      export const HEAD = 'M10 0 ';
+      const BODY = HEAD + 'L20 30';
+    `;
+    const result = analyzer.extractStringConstants(source, 'icons.ts');
+    expect(result.get('BODY')).toBe('M10 0 L20 30');
+  });
+
+  it('drops a const shadowed by a nested variable declaration', () => {
+    const source = `
+      const cls = 'icon';
+      const KEEP = 'kept';
+      export function Page() {
+        const cls = computeClass();
+        return h('div', { class: cls });
+      }
+    `;
+    const result = analyzer.extractStringConstants(source, 'page.ts');
+    // Shadowed name must not fold — the walker cannot tell which binding an
+    // identifier refers to, and baking the module value into a static attr
+    // would be unrecoverable client-side.
+    expect(result.has('cls')).toBe(false);
+    expect(result.get('KEEP')).toBe('kept');
+  });
+
+  it('drops a const shadowed by a function parameter', () => {
+    const source = `
+      const label = 'Default';
+      function format(label) { return label.trim(); }
+    `;
+    const result = analyzer.extractStringConstants(source, 'file.ts');
+    expect(result.has('label')).toBe(false);
+  });
+
+  it('drops a folded const whose UTF-8 encoding exceeds 65535 bytes and warns', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const source = `
+      const HUGE = '${'x'.repeat(70000)}';
+      const SMALL = 'ok';
+    `;
+    const result = analyzer.extractStringConstants(source, 'big.ts');
+    // A >64KB string cannot be encoded in the FMIR string table (u16 length
+    // prefix), so it must never enter the fold map.
+    expect(result.has('HUGE')).toBe(false);
+    expect(result.get('SMALL')).toBe('ok');
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`const 'HUGE'`),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('keeps a folded const at exactly 65535 bytes', () => {
+    const source = `const EDGE = '${'x'.repeat(65535)}';`;
+    const result = analyzer.extractStringConstants(source, 'edge.ts');
+    expect(result.get('EDGE')).toHaveLength(65535);
+  });
 });
 
 // ===========================================================================
@@ -527,6 +661,120 @@ describe('extractSignalDefaults', () => {
       };
     `;
     const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
+    expect(result.size).toBe(1);
+    expect(result.get('count')).toEqual({ type: 'number', default: 0 });
+  });
+});
+
+// ===========================================================================
+// Finding 9: Island Signal Default Extraction — extractIslandSignalDefaults
+// ===========================================================================
+
+describe('extractIslandSignalDefaults', () => {
+  it('detects module-level signals (ksx island pattern)', () => {
+    const source = `
+      import { createSignal, h } from 'formajs';
+      const [pillRunning, setPillRunning] = createSignal(false);
+      const [statusText, setStatusText] = createSignal('idle');
+      const [retryCount, setRetryCount] = createSignal(0);
+      export function StatusIsland() {
+        return h('div', null, () => statusText());
+      }
+    `;
+    const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'StatusIsland');
+    expect(result.size).toBe(3);
+    expect(result.get('pillRunning')).toEqual({ type: 'bool', default: false });
+    expect(result.get('statusText')).toEqual({ type: 'text', default: 'idle' });
+    expect(result.get('retryCount')).toEqual({ type: 'number', default: 0 });
+  });
+
+  it('detects function-level signals', () => {
+    const source = `
+      import { createSignal, h } from 'formajs';
+      export function CounterIsland() {
+        const [count, setCount] = createSignal(0);
+        return h('span', null, () => count());
+      }
+    `;
+    const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'CounterIsland');
+    expect(result.size).toBe(1);
+    expect(result.get('count')).toEqual({ type: 'number', default: 0 });
+  });
+
+  it('detects mixed module-level and function-level signals', () => {
+    const source = `
+      import { createSignal, h } from 'formajs';
+      const [shared, setShared] = createSignal('module');
+      export function MixedIsland() {
+        const [local, setLocal] = createSignal(true);
+        return h('div', null, () => shared());
+      }
+    `;
+    const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'MixedIsland');
+    expect(result.size).toBe(2);
+    expect(result.get('shared')).toEqual({ type: 'text', default: 'module' });
+    expect(result.get('local')).toEqual({ type: 'bool', default: true });
+  });
+
+  it('skips non-literal initializers', () => {
+    const source = `
+      import { createSignal, h } from 'formajs';
+      const [config, setConfig] = createSignal({ key: 'val' });
+      const [items, setItems] = createSignal([1, 2]);
+      const [initial, setInitial] = createSignal(getInitial());
+      const [label, setLabel] = createSignal('ok');
+      export function SkipIsland() {
+        const [derived, setDerived] = createSignal(compute());
+        return h('div', null, () => label());
+      }
+    `;
+    const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'SkipIsland');
+    // Only 'label' is a literal — everything else is skipped
+    expect(result.size).toBe(1);
+    expect(result.get('label')).toEqual({ type: 'text', default: 'ok' });
+  });
+
+  it('ignores signals declared in other exported functions', () => {
+    const source = `
+      import { createSignal, h } from 'formajs';
+      export function OtherIsland() {
+        const [other, setOther] = createSignal('nope');
+        return h('div', null, 'other');
+      }
+      export function TargetIsland() {
+        const [target, setTarget] = createSignal('yes');
+        return h('div', null, 'target');
+      }
+    `;
+    const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'TargetIsland');
+    expect(result.size).toBe(1);
+    expect(result.get('target')).toEqual({ type: 'text', default: 'yes' });
+  });
+
+  it('works with exported const arrow island component', () => {
+    const source = `
+      import { createSignal, h } from 'formajs';
+      const [open, setOpen] = createSignal(false);
+      export const MenuIsland = () => {
+        const [selected, setSelected] = createSignal(null);
+        return h('nav', null, 'menu');
+      };
+    `;
+    const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'MenuIsland');
+    expect(result.size).toBe(2);
+    expect(result.get('open')).toEqual({ type: 'bool', default: false });
+    expect(result.get('selected')).toEqual({ type: 'null', default: null });
+  });
+
+  it('detects export const module-level signals', () => {
+    const source = `
+      import { createSignal, h } from 'formajs';
+      export const [count, setCount] = createSignal(0);
+      export function ExportedSignalIsland() {
+        return h('span', null, () => count());
+      }
+    `;
+    const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'ExportedSignalIsland');
     expect(result.size).toBe(1);
     expect(result.get('count')).toEqual({ type: 'number', default: 0 });
   });

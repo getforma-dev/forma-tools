@@ -26,6 +26,9 @@ export interface EntryPointInfo {
   /** Names of components registered in activateIslands({...}).
    *  These must NOT be inlined — they emit ISLAND_START/ISLAND_END. */
   islandNames?: Set<string>;
+  /** Import mappings from the entry file: local name -> import source string.
+   *  Used to resolve island component files imported by the entry. */
+  importMap?: Map<string, string>;
   /** For inline mount returns: the AST node of the return expression.
    *  When set, componentName is '__inline__' and importPath is ''. */
   inlineReturnNode?: import('@babel/types').Expression;
@@ -148,11 +151,42 @@ export class ComponentAnalyzer {
       },
     });
 
-    if (result) return result;
+    if (result) {
+      (result as EntryPointInfo).importMap = importMap;
+      // The mount() patterns (including inline block-body mounts) can ALSO
+      // register islands via activateIslands({...}) — scan for them so the
+      // walker never inlines an island component and the SSR plugin can
+      // merge island signal defaults on these paths too.
+      const mountIslandNames = this.collectIslandNames(ast);
+      if (mountIslandNames.size > 0) {
+        (result as EntryPointInfo).islandNames = mountIslandNames;
+      }
+      return result;
+    }
 
     // Step 3: Fallback — activateIslands({ ... }) pattern.
     // Collect island component names from the registry object, then find
     // the Page component import that isn't an island.
+    const islandNames = this.collectIslandNames(ast);
+
+    if (islandNames.size === 0) return null;
+
+    // The SSR root is the imported component whose name ends with "Page"
+    // and is NOT one of the island components in the registry.
+    for (const [name, importPath] of importMap) {
+      if (!islandNames.has(name) && name.endsWith('Page') && importPath.startsWith('.')) {
+        return { componentName: name, importPath, islandNames, importMap };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Collect island component names from an activateIslands({ ... }) call.
+   * Returns an empty set when no registry call is present.
+   */
+  private collectIslandNames(ast: T.File): Set<string> {
     const islandNames = new Set<string>();
 
     traverse(ast, {
@@ -174,17 +208,7 @@ export class ComponentAnalyzer {
       },
     });
 
-    if (islandNames.size === 0) return null;
-
-    // The SSR root is the imported component whose name ends with "Page"
-    // and is NOT one of the island components in the registry.
-    for (const [name, importPath] of importMap) {
-      if (!islandNames.has(name) && name.endsWith('Page') && importPath.startsWith('.')) {
-        return { componentName: name, importPath, islandNames };
-      }
-    }
-
-    return null;
+    return islandNames;
   }
 
   /**
@@ -275,8 +299,27 @@ export class ComponentAnalyzer {
   // -------------------------------------------------------------------------
 
   /**
-   * Extract top-level `const NAME = [{ ... }, ...]` declarations.
-   * Only handles arrays of object literals with primitive values.
+   * Unwrap `export const X = ...` to its inner VariableDeclaration; pass
+   * bare VariableDeclarations through unchanged. Module-level extraction
+   * must see exported constants the same as unexported ones — iterating
+   * program.body naively only yields the ExportNamedDeclaration wrapper.
+   */
+  private static asVariableDeclaration(node: T.Node): T.VariableDeclaration | null {
+    if (t.isVariableDeclaration(node)) return node;
+    if (
+      t.isExportNamedDeclaration(node)
+      && node.declaration
+      && t.isVariableDeclaration(node.declaration)
+    ) {
+      return node.declaration;
+    }
+    return null;
+  }
+
+  /**
+   * Extract top-level `const NAME = [{ ... }, ...]` declarations
+   * (including `export const`). Only handles arrays of object literals
+   * with primitive values.
    *
    * Returns a Map from constant name to the evaluated array.
    */
@@ -284,9 +327,10 @@ export class ComponentAnalyzer {
     const ast = parse(source, PARSE_OPTS);
     const constants = new Map<string, any[]>();
 
-    for (const node of ast.program.body) {
-      // Only top-level const declarations
-      if (!t.isVariableDeclaration(node) || node.kind !== 'const') continue;
+    for (const stmt of ast.program.body) {
+      // Only top-level const declarations (export-wrapped or bare)
+      const node = ComponentAnalyzer.asVariableDeclaration(stmt);
+      if (!node || node.kind !== 'const') continue;
 
       for (const decl of node.declarations) {
         if (!t.isIdentifier(decl.id) || !decl.init) continue;
@@ -302,6 +346,133 @@ export class ComponentAnalyzer {
     }
 
     return constants;
+  }
+
+  /**
+   * Extract top-level `const NAME = <expr>` declarations (including
+   * `export const`) whose initializer folds statically to a string: string
+   * literals, no-expression template literals, `+` concatenation chains, and
+   * references to string constants declared earlier in the same file (folded
+   * in declaration order).
+   *
+   * Only `const` declarations are captured — `let`/`var` may be reassigned
+   * at runtime, so they cannot be treated as static.
+   *
+   * Names that are ALSO declared in any nested (function/block) scope are
+   * dropped again — see the shadowing note below.
+   *
+   * Returns a Map from constant name to the folded string value.
+   */
+  extractStringConstants(source: string, filename: string): Map<string, string> {
+    const ast = parse(source, PARSE_OPTS);
+    const constants = new Map<string, string>();
+
+    for (const stmt of ast.program.body) {
+      // Only top-level const declarations (never let/var; export-wrapped or bare)
+      const node = ComponentAnalyzer.asVariableDeclaration(stmt);
+      if (!node || node.kind !== 'const') continue;
+
+      for (const decl of node.declarations) {
+        if (!t.isIdentifier(decl.id) || !decl.init) continue;
+
+        const folded = this.foldStringExpression(decl.init, constants);
+        if (folded === null) continue;
+
+        // FMIR string-table entries carry a u16 byte-length prefix, so a
+        // folded constant over 65535 UTF-8 bytes can never be encoded (see
+        // encodeStringTable in ir-emit.ts). Drop it here — attribute uses
+        // fall through to the DYN_ATTR warn path instead of hard-failing
+        // the whole IR emission at encode time.
+        const byteLength = new TextEncoder().encode(folded).length;
+        if (byteLength > 0xffff) {
+          console.warn(
+            `   IR: const '${decl.id.name}' in ${filename} folds to a ${byteLength}-byte string — exceeds the 65535-byte FMIR string limit, not folding it`,
+          );
+          continue;
+        }
+
+        constants.set(decl.id.name, folded);
+      }
+    }
+
+    // Shadowing guard (F10 hazard): if a nested scope re-declares a name we
+    // folded (module `const cls = 'icon'` + component-local
+    // `const cls = computeClass()`), folding would bake the MODULE value
+    // into a static attribute with NO slot — unrecoverable client-side,
+    // strictly worse than the old empty-DYN_ATTR behavior, which was at
+    // least correctable at runtime. The walk has no scope tracking, so be
+    // conservative: delete any folded name that is also declared (variable
+    // or parameter) in ANY nested scope, even an unrelated one. Rare and
+    // over-conservative, but safe — shadowed names then hit the existing
+    // unresolvable-identifier warn path.
+    if (constants.size > 0) {
+      const deleteBindings = (idNode: T.Node) => {
+        for (const name of Object.keys(t.getBindingIdentifiers(idNode))) {
+          constants.delete(name);
+        }
+      };
+      traverse(ast, {
+        VariableDeclarator(path) {
+          // Skip module top-level declarations — those ARE the folded consts.
+          const declaration = path.parentPath;
+          const container = declaration.parentPath;
+          if (!container) return;
+          if (t.isProgram(container.node)) return;
+          if (
+            t.isExportNamedDeclaration(container.node)
+            && container.parentPath
+            && t.isProgram(container.parentPath.node)
+          ) {
+            return;
+          }
+          deleteBindings(path.node.id);
+        },
+        Function(path) {
+          for (const param of path.node.params) deleteBindings(param);
+        },
+        CatchClause(path) {
+          if (path.node.param) deleteBindings(path.node.param);
+        },
+      });
+    }
+
+    return constants;
+  }
+
+  /**
+   * Fold an expression to a string using constants already folded earlier
+   * in the same file. Returns null if the expression cannot be folded
+   * (non-string values are dropped — only string results are kept).
+   */
+  private foldStringExpression(
+    node: T.Node,
+    known: Map<string, string>,
+  ): string | null {
+    if (t.isStringLiteral(node)) return node.value;
+
+    // Template literal with no expressions: `foo`
+    if (t.isTemplateLiteral(node) && node.expressions.length === 0) {
+      return node.quasis.map(q => q.value.cooked ?? q.value.raw).join('');
+    }
+
+    // Reference to a const folded earlier in the same file
+    if (t.isIdentifier(node)) {
+      return known.get(node.name) ?? null;
+    }
+
+    // Binary +: left + right (string concatenation chains)
+    if (t.isBinaryExpression(node) && node.operator === '+') {
+      const left = this.foldStringExpression(node.left, known);
+      const right = this.foldStringExpression(node.right, known);
+      if (left === null || right === null) return null;
+      return left + right;
+    }
+
+    if (t.isParenthesizedExpression(node)) {
+      return this.foldStringExpression(node.expression, known);
+    }
+
+    return null;
   }
 
   /**
@@ -390,80 +561,142 @@ export class ComponentAnalyzer {
     // Find the target function
     traverse(ast, {
       ExportNamedDeclaration(path) {
-        const decl = path.node.declaration;
-
-        let funcBody: T.BlockStatement | null = null;
-
-        // export function Name() { ... }
-        if (t.isFunctionDeclaration(decl) && decl.id?.name === functionName) {
-          funcBody = decl.body;
-        }
-
-        // export const Name = () => { ... } or export const Name = function() { ... }
-        if (t.isVariableDeclaration(decl)) {
-          for (const declarator of decl.declarations) {
-            if (
-              t.isIdentifier(declarator.id) &&
-              declarator.id.name === functionName &&
-              declarator.init
-            ) {
-              const init = declarator.init;
-              if (
-                (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) &&
-                t.isBlockStatement(init.body)
-              ) {
-                funcBody = init.body;
-              }
-            }
-          }
-        }
-
+        const funcBody = self.findExportedFunctionBody(path.node, functionName);
         if (!funcBody) return;
 
         // Walk the function body for createSignal calls
-        for (const stmt of funcBody.body) {
-          if (!t.isVariableDeclaration(stmt)) continue;
-
-          for (const varDecl of stmt.declarations) {
-            // Must be array destructuring: const [name, setName] = ...
-            if (!t.isArrayPattern(varDecl.id)) continue;
-            if (!varDecl.init) continue;
-
-            // Must be a createSignal(...) call
-            if (
-              !t.isCallExpression(varDecl.init) ||
-              !t.isIdentifier(varDecl.init.callee) ||
-              varDecl.init.callee.name !== 'createSignal'
-            ) {
-              continue;
-            }
-
-            // Extract signal name from first element of array pattern
-            const elements = varDecl.id.elements;
-            if (elements.length < 1 || !elements[0] || !t.isIdentifier(elements[0])) {
-              continue;
-            }
-            const signalName = elements[0].name;
-
-            // Extract initial value from first argument
-            const initArgs = varDecl.init.arguments;
-            if (initArgs.length < 1) continue;
-
-            const initArg = initArgs[0];
-            if (!initArg || t.isSpreadElement(initArg)) continue;
-
-            const signalDefault = self.evaluateSignalDefault(initArg as T.Expression);
-            if (signalDefault) {
-              signals.set(signalName, signalDefault);
-            }
-          }
-        }
+        self.collectSignalDefaults(funcBody.body, signals);
 
         path.stop();
       },
     });
 
     return signals;
+  }
+
+  /**
+   * Find `const [name, setName] = createSignal(initialValue)` patterns
+   * in an ISLAND component file.
+   *
+   * Unlike extractSignalDefaults, this covers BOTH:
+   * (a) module top-level declarations (island files typically declare their
+   *     signals at module scope so the Page twin can single-source defaults),
+   * (b) the top-level statements of the exported function named componentName.
+   *
+   * Returns a Map from signal name to its default info.
+   */
+  extractIslandSignalDefaults(
+    source: string,
+    filename: string,
+    componentName: string,
+  ): Map<string, SignalDefault> {
+    const ast = parse(source, PARSE_OPTS);
+    const signals = new Map<string, SignalDefault>();
+
+    // (a) Module top-level createSignal declarations
+    this.collectSignalDefaults(ast.program.body, signals);
+
+    // (b) Top-level statements of the exported component function
+    const self = this;
+    traverse(ast, {
+      ExportNamedDeclaration(path) {
+        const funcBody = self.findExportedFunctionBody(path.node, componentName);
+        if (!funcBody) return;
+
+        self.collectSignalDefaults(funcBody.body, signals);
+
+        path.stop();
+      },
+    });
+
+    return signals;
+  }
+
+  /**
+   * Match an ExportNamedDeclaration against a function name and return its
+   * block body. Handles `export function Name() {}`, `export const Name =
+   * () => {}`, and `export const Name = function() {}`.
+   */
+  private findExportedFunctionBody(
+    node: T.ExportNamedDeclaration,
+    functionName: string,
+  ): T.BlockStatement | null {
+    const decl = node.declaration;
+
+    // export function Name() { ... }
+    if (t.isFunctionDeclaration(decl) && decl.id?.name === functionName) {
+      return decl.body;
+    }
+
+    // export const Name = () => { ... } or export const Name = function() { ... }
+    if (t.isVariableDeclaration(decl)) {
+      for (const declarator of decl.declarations) {
+        if (
+          t.isIdentifier(declarator.id) &&
+          declarator.id.name === functionName &&
+          declarator.init
+        ) {
+          const init = declarator.init;
+          if (
+            (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) &&
+            t.isBlockStatement(init.body)
+          ) {
+            return init.body;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Scan a statement list for `const [name, setName] = createSignal(literal)`
+   * declarations (including `export const` at module level) and record their
+   * defaults into the given map. Non-literal initializers are skipped.
+   */
+  private collectSignalDefaults(
+    statements: T.Statement[],
+    signals: Map<string, SignalDefault>,
+  ): void {
+    for (const stmt of statements) {
+      const decl = ComponentAnalyzer.asVariableDeclaration(stmt);
+      if (!decl) continue;
+
+      for (const varDecl of decl.declarations) {
+        // Must be array destructuring: const [name, setName] = ...
+        if (!t.isArrayPattern(varDecl.id)) continue;
+        if (!varDecl.init) continue;
+
+        // Must be a createSignal(...) call
+        if (
+          !t.isCallExpression(varDecl.init) ||
+          !t.isIdentifier(varDecl.init.callee) ||
+          varDecl.init.callee.name !== 'createSignal'
+        ) {
+          continue;
+        }
+
+        // Extract signal name from first element of array pattern
+        const elements = varDecl.id.elements;
+        if (elements.length < 1 || !elements[0] || !t.isIdentifier(elements[0])) {
+          continue;
+        }
+        const signalName = elements[0].name;
+
+        // Extract initial value from first argument
+        const initArgs = varDecl.init.arguments;
+        if (initArgs.length < 1) continue;
+
+        const initArg = initArgs[0];
+        if (!initArg || t.isSpreadElement(initArg)) continue;
+
+        const signalDefault = this.evaluateSignalDefault(initArg as T.Expression);
+        if (signalDefault) {
+          signals.set(signalName, signalDefault);
+        }
+      }
+    }
   }
 
   /**

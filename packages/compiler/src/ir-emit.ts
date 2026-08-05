@@ -68,6 +68,11 @@ export class IrEmitContext {
     byteOffset: number;
   }> = [];
 
+  /** Stack of slot-id capture sets for island subtree walks.
+   *  Every set on the stack records each referenced slot, so an outer
+   *  island's span also captures slots of islands nested inside it. */
+  private slotCaptureStack: Set<number>[] = [];
+
   /** DYN_TEXT marker counter */
   private nextMarkerId: number = 0;
 
@@ -88,7 +93,46 @@ export class IrEmitContext {
   addSlot(name: string, typeHint: number, source: number = 0x01, defaultBytes: Uint8Array = new Uint8Array(0)): number {
     const id = this.nextSlotId++;
     this.slots.push({ id, name, typeHint, source, defaultBytes });
+    this.recordSlotRef(id);
     return id;
+  }
+
+  /** Begin capturing slot ids referenced while walking an island subtree. */
+  beginSlotCapture(): void {
+    this.slotCaptureStack.push(new Set<number>());
+  }
+
+  /** End the innermost capture; returns the captured slot ids sorted ascending. */
+  endSlotCapture(): number[] {
+    const captured = this.slotCaptureStack.pop();
+    return captured ? Array.from(captured).sort((a, b) => a - b) : [];
+  }
+
+  /** Record a slot-id reference into every active capture set.
+   *  Called automatically by addSlot; call it directly when an opcode reuses
+   *  a pre-existing slot (signalSlots / listItemBindings) without addSlot. */
+  recordSlotRef(id: number): void {
+    for (const set of this.slotCaptureStack) set.add(id);
+  }
+
+  /** Matches per-item list scratch slots (`list:<base>:item`). These are
+   *  TYPE_OBJECT working storage the LIST opcode overwrites per row, so after
+   *  SSR they hold the LAST rendered row — serializing them into an island's
+   *  data-forma-props would leak that row into the page. They are excluded
+   *  from island slot ids; everything else (attr:*, text:*, show:*,
+   *  list:*:array, list:*:<prop>, named signal slots) is kept. */
+  private static readonly LIST_ITEM_SCRATCH_RE = /^list:[^:]+:item$/;
+
+  /** Replace the slot ids of a registered island entry (back-filled after
+   *  the island's component subtree has been walked). Filters out per-item
+   *  list scratch slots — see LIST_ITEM_SCRATCH_RE. */
+  setIslandSlotIds(islandId: number, slotIds: number[]): void {
+    const island = this.islands.find(i => i.id === islandId);
+    if (!island) return;
+    island.slotIds = slotIds.filter(id => {
+      const slot = this.slots.find(s => s.id === id);
+      return !slot || !IrEmitContext.LIST_ITEM_SCRATCH_RE.test(slot.name);
+    });
   }
 
   /** Get a fresh marker id for DYN_TEXT. */
@@ -219,6 +263,15 @@ export class IrEmitContext {
     const encodedStrings: Uint8Array[] = [];
     for (const s of this.strings) {
       const encoded = encoder.encode(s);
+      // The per-string length prefix is a u16 — a longer string would
+      // silently wrap via setUint16 and desynchronize the whole table for
+      // the Rust parser. Fail hard instead of emitting a corrupt binary
+      // (generateRealIr catches this and falls back to placeholder IR).
+      if (encoded.length > 0xffff) {
+        throw new Error(
+          `FMIR string table entry is ${encoded.length} UTF-8 bytes — exceeds the 65535-byte u16 length limit (string starts with ${JSON.stringify(s.slice(0, 40))}...)`,
+        );
+      }
       encodedStrings.push(encoded);
       totalSize += 2 + encoded.length; // u16 len + bytes
     }
@@ -248,6 +301,13 @@ export class IrEmitContext {
     // Each entry: slot_id(u16) + name_str_idx(u32) + type_hint(u8) + source(u8) + default_len(u16) + default_bytes
     let totalSize = 2; // count
     for (const slot of this.slots) {
+      // default_len is a u16 — larger defaults would silently wrap and
+      // corrupt the slot table (see the matching guard in encodeStringTable).
+      if (slot.defaultBytes.length > 0xffff) {
+        throw new Error(
+          `FMIR slot '${slot.name}' has a ${slot.defaultBytes.length}-byte default — exceeds the 65535-byte u16 length limit`,
+        );
+      }
       totalSize += 2 + 4 + 1 + 1 + 2 + slot.defaultBytes.length; // 10 + default_bytes.length
     }
 

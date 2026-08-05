@@ -23,6 +23,7 @@ import { parse } from '@babel/parser';
 import * as t from '@babel/types';
 import _traverse from '@babel/traverse';
 import { IrEmitContext } from './ir-emit.js';
+import { ComponentAnalyzer } from './component-analyzer.js';
 import { VOID_TAGS, isEventProp, isStaticLiteral, isUndefinedIdentifier } from './utils.js';
 
 // Handle CJS/ESM compatibility for @babel/traverse
@@ -80,6 +81,19 @@ function isFunctionExpr(node: t.Node): boolean {
   return t.isArrowFunctionExpression(node) || t.isFunctionExpression(node);
 }
 
+/** Render an Identifier or MemberExpression as source-like text for warnings. */
+function exprToText(node: t.Node): string {
+  if (t.isIdentifier(node)) return node.name;
+  if (t.isMemberExpression(node)) {
+    const obj = exprToText(node.object);
+    if (!node.computed && t.isIdentifier(node.property)) {
+      return `${obj}.${node.property.name}`;
+    }
+    return `${obj}[...]`;
+  }
+  return '<expression>';
+}
+
 /**
  * Extract signal name from a simple signal-call arrow: () => signalName()
  * Returns the signal name if the body is a no-arg call to an identifier, else null.
@@ -113,15 +127,17 @@ function extractSignalName(fn: t.ArrowFunctionExpression | t.FunctionExpression)
 function tryEvalExprDefault(
   fnExpr: t.ArrowFunctionExpression | t.FunctionExpression,
   signalDefaults: Map<string, { type: string; default: string | boolean | number | null }>,
+  stringConsts?: Map<string, string>,
 ): string | undefined {
   const body = getEffectiveBody(fnExpr);
   if (!body) return undefined;
-  return evalNode(body, signalDefaults);
+  return evalNode(body, signalDefaults, stringConsts);
 }
 
 function evalNode(
   node: t.Expression,
   signals: Map<string, { type: string; default: string | boolean | number | null }>,
+  stringConsts?: Map<string, string>,
 ): string | undefined {
   // String literal: "foo"
   if (t.isStringLiteral(node)) return node.value;
@@ -140,6 +156,11 @@ function evalNode(
     return node.quasis.map(q => q.value.cooked || q.value.raw).join('');
   }
 
+  // Module-level string constant reference: SIL_BODY
+  if (t.isIdentifier(node)) {
+    return stringConsts?.get(node.name);
+  }
+
   // Signal call: signalName()
   if (
     t.isCallExpression(node)
@@ -156,7 +177,7 @@ function evalNode(
 
   // Unary negation: !expr or !!expr
   if (t.isUnaryExpression(node) && node.operator === '!') {
-    const inner = evalNode(node.argument as t.Expression, signals);
+    const inner = evalNode(node.argument as t.Expression, signals, stringConsts);
     if (inner === undefined) return undefined;
     const bool = isTruthy(inner);
     return String(!bool);
@@ -164,23 +185,23 @@ function evalNode(
 
   // Ternary: test ? consequent : alternate
   if (t.isConditionalExpression(node)) {
-    const test = evalNode(node.test as t.Expression, signals);
+    const test = evalNode(node.test as t.Expression, signals, stringConsts);
     if (test === undefined) return undefined;
     const branch = isTruthy(test) ? node.consequent : node.alternate;
-    return evalNode(branch as t.Expression, signals);
+    return evalNode(branch as t.Expression, signals, stringConsts);
   }
 
   // Binary +: left + right (string concatenation)
   if (t.isBinaryExpression(node) && node.operator === '+') {
-    const left = evalNode(node.left as t.Expression, signals);
-    const right = evalNode(node.right as t.Expression, signals);
+    const left = evalNode(node.left as t.Expression, signals, stringConsts);
+    const right = evalNode(node.right as t.Expression, signals, stringConsts);
     if (left === undefined || right === undefined) return undefined;
     return left + right;
   }
 
   // Parenthesized expression
   if (t.isParenthesizedExpression(node)) {
-    return evalNode(node.expression, signals);
+    return evalNode(node.expression, signals, stringConsts);
   }
 
   // Can't evaluate
@@ -199,6 +220,10 @@ function isTruthy(val: string): boolean {
 export interface WalkContext {
   /** File-level constant arrays (for Rule 9 static unroll). */
   fileConstants?: Map<string, any[]>;
+  /** File-level string constants: const name → folded string value.
+   *  Identifiers referencing these resolve to STATIC attribute values
+   *  (and fold inside function-valued prop SSR defaults). */
+  stringConstants?: Map<string, string>;
   /** Signal name -> slot id mappings. */
   signalSlots?: Map<string, number>;
   /** Signal name -> default value (for computing DYN_ATTR SSR defaults). */
@@ -216,9 +241,15 @@ export interface WalkContext {
   listItemBindings?: Map<string, number>;
   /** Per-page registry for list slot naming: occurrences of each derived
    *  base name (for `#n` dedup) plus the running list count (for the
-   *  positional fallback). Created lazily by the first createList and
-   *  shared by reference with nested walk contexts. */
+   *  positional fallback). Initialized eagerly at the walk entry points
+   *  (walkHTree / walkCallExpression) so it lives on the ROOT context and is
+   *  shared by reference with every spread-copied nested walk context —
+   *  island subtrees, inlined sub-components, and list bodies all dedup
+   *  against the same page-wide namespace. */
   listNames?: { counts: Map<string, number>; total: number };
+  /** Per-page registry for show slot naming (createShow + ternary SHOW_IF):
+   *  same shape and sharing semantics as listNames. */
+  showNames?: { counts: Map<string, number>; total: number };
   /** Names of island components registered in activateIslands({...}).
    *  Island components are NEVER inlined — they always emit ISLAND_START/ISLAND_END. */
   islandNames?: Set<string>;
@@ -234,8 +265,55 @@ const PARSE_OPTS = {
 };
 
 // ---------------------------------------------------------------------------
+// Per-file Constant Scoping
+// ---------------------------------------------------------------------------
+
+/** Analyzer for re-extracting constants from resolved sub-component/island
+ *  sources (baseDir is unused by the extraction methods). */
+const constantAnalyzer = new ComponentAnalyzer('');
+
+/**
+ * Re-extract file-level constants from a resolved component source so the
+ * sub-component/island walk resolves identifiers against its OWN module
+ * scope — mirroring the root-file extraction in the SSR plugin.
+ * Falls back to EMPTY maps if the source fails to parse: falling back to the
+ * parent context's constants would resolve the child file's identifiers
+ * against the WRONG module scope (the parent's).
+ */
+function extractResolvedConstants(
+  source: string,
+  _walkCtx: WalkContext,
+): Pick<WalkContext, 'fileConstants' | 'stringConstants'> {
+  try {
+    return {
+      fileConstants: constantAnalyzer.extractFileConstants(source, '<resolved>'),
+      stringConstants: constantAnalyzer.extractStringConstants(source, '<resolved>'),
+    };
+  } catch {
+    return {
+      fileConstants: new Map(),
+      stringConstants: new Map(),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Walk Engine — Main Entry Points
 // ---------------------------------------------------------------------------
+
+/**
+ * Ensure the per-page name registries exist on the given context.
+ * MUST run at the walk entry points BEFORE any nested walk spread-copies the
+ * context ({ ...walkCtx, ... }): a registry first created lazily on a COPY
+ * dies with that copy, and a later sibling list/show would recreate it and
+ * mint DUPLICATE slot names (e.g. two `list:todos:array` slots), which
+ * collapse in the Rust name→id map (last-insert-wins). Covers hand-built
+ * test contexts as well as the root contexts built by the SSR plugin.
+ */
+function ensureNameRegistries(walkCtx: WalkContext): void {
+  walkCtx.listNames ??= { counts: new Map(), total: 0 };
+  walkCtx.showNames ??= { counts: new Map(), total: 0 };
+}
 
 /**
  * Walk an h() call tree and emit FMIR opcodes.
@@ -247,6 +325,7 @@ export function walkHTree(
   ctx: IrEmitContext,
   walkCtx: WalkContext,
 ): void {
+  ensureNameRegistries(walkCtx);
   const args = node.arguments;
   if (args.length === 0) return;
 
@@ -351,6 +430,7 @@ export function walkHTree(
         if (bindingKey && walkCtx.listItemBindings.has(bindingKey)) {
           const keyIdx = ctx.addString(key);
           const slotId = walkCtx.listItemBindings.get(bindingKey)!;
+          ctx.recordSlotRef(slotId);
           dynAttrs.push({ keyIdx, slotId });
           continue;
         }
@@ -364,14 +444,20 @@ export function walkHTree(
         let slotId: number;
         if (sigName && walkCtx.signalSlots?.has(sigName)) {
           slotId = walkCtx.signalSlots.get(sigName)!;
+          ctx.recordSlotRef(slotId);
         } else {
           const slotName = `attr:${key}`;
-          // Try to compute SSR default by evaluating the expression with signal defaults
+          // Try to compute SSR default by evaluating the expression with
+          // signal defaults and module-level string constants
           let defaultBytes = new Uint8Array(0);
-          if (walkCtx.signalDefaults && walkCtx.signalDefaults.size > 0) {
+          if (
+            (walkCtx.signalDefaults && walkCtx.signalDefaults.size > 0)
+            || (walkCtx.stringConstants && walkCtx.stringConstants.size > 0)
+          ) {
             const evaluated = tryEvalExprDefault(
               val as t.ArrowFunctionExpression | t.FunctionExpression,
-              walkCtx.signalDefaults,
+              walkCtx.signalDefaults ?? new Map(),
+              walkCtx.stringConstants,
             );
             if (evaluated !== undefined && evaluated !== '') {
               defaultBytes = new TextEncoder().encode(evaluated);
@@ -383,7 +469,22 @@ export function walkHTree(
         continue;
       }
 
+      // Module-level string const as attr value: d: SIL_BODY → static attribute
+      if (t.isIdentifier(val) && walkCtx.stringConstants?.has(val.name)) {
+        const keyIdx = ctx.addString(key);
+        const valIdx = ctx.addString(walkCtx.stringConstants.get(val.name)!);
+        staticAttrs.push({ keyIdx, valIdx });
+        continue;
+      }
+
       // Any other expression -> DYN_ATTR
+      // Bare identifiers/members that resolved nowhere render empty in SSR —
+      // warn so the silent-MISSING failure mode is visible at build time.
+      if ((t.isIdentifier(val) && !isUndefinedIdentifier(val)) || t.isMemberExpression(val)) {
+        console.warn(
+          `   IR: attribute '${key}' on <${tag}> references '${exprToText(val)}' which cannot be resolved statically — SSR will render this attribute empty; inline the literal, use a module-level const, or wrap in a function for a reactive value`,
+        );
+      }
       const keyIdx = ctx.addString(key);
       const slotName = `attr:${key}`;
       const slotId = ctx.addSlot(slotName, TYPE_TEXT);
@@ -454,6 +555,8 @@ export function walkCallExpression(
   ctx: IrEmitContext,
   walkCtx: WalkContext,
 ): void {
+  ensureNameRegistries(walkCtx);
+
   // Check if this is a createShow call (Rule 8)
   if (
     t.isIdentifier(node.callee)
@@ -527,19 +630,34 @@ export function walkCallExpression(
               ctx.emit(OP_ISLAND_START);
               ctx.emitU16(id);
 
-              // Walk the full component subtree for SSR content
-              const newVisited = new Set<string>(walkCtx.visited || new Set<string>());
-              newVisited.add(componentName);
-              const islandWalkCtx: WalkContext = {
-                ...walkCtx,
-                visited: newVisited,
-                depth: (walkCtx.depth ?? 0) + 1,
-              };
-              walkCallExpression(componentReturn, hName, ctx, islandWalkCtx);
+              // Walk the full component subtree for SSR content, capturing
+              // every slot id referenced in the island span so the island
+              // table entry carries real slot_ids (the Rust walker skips
+              // data-forma-props emission for islands with empty slot_ids).
+              ctx.beginSlotCapture();
+              let capturedSlotIds: number[] = [];
+              try {
+                const newVisited = new Set<string>(walkCtx.visited || new Set<string>());
+                newVisited.add(componentName);
+                const islandWalkCtx: WalkContext = {
+                  ...walkCtx,
+                  ...extractResolvedConstants(resolved.source, walkCtx),
+                  visited: newVisited,
+                  depth: (walkCtx.depth ?? 0) + 1,
+                };
+                walkCallExpression(componentReturn, hName, ctx, islandWalkCtx);
+              } finally {
+                // Always pop the capture set, even when the subtree walk
+                // throws (the catch below falls back to emitIsland) — an
+                // unbalanced stack would make an enclosing island's
+                // endSlotCapture pop THIS island's set instead of its own.
+                capturedSlotIds = ctx.endSlotCapture();
+              }
 
               // Emit ISLAND_END
               ctx.emit(OP_ISLAND_END);
               ctx.emitU16(id);
+              ctx.setIslandSlotIds(id, capturedSlotIds);
               return;
             }
           }
@@ -599,6 +717,7 @@ export function walkCallExpression(
 
             walkHTree(componentReturn, hName, ctx, {
               ...walkCtx,
+              ...extractResolvedConstants(resolved.source, walkCtx),
               visited: newVisited,
               depth: depth + 1,
             });
@@ -673,6 +792,7 @@ function emitChild(
       const key = `${arg.object.name}.${arg.property.name}`;
       if (walkCtx.listItemBindings?.has(key)) {
         const slotId = walkCtx.listItemBindings.get(key)!;
+        ctx.recordSlotRef(slotId);
         const markerId = ctx.nextMarker();
         ctx.emit(OP_DYN_TEXT);
         ctx.emitU16(slotId);
@@ -708,6 +828,7 @@ function emitChild(
     let slotId: number;
     if (signalName && walkCtx.signalSlots?.has(signalName)) {
       slotId = walkCtx.signalSlots.get(signalName)!;
+      ctx.recordSlotRef(slotId);
     } else {
       const slotName = `text:${childIndex - 2}`;
       slotId = ctx.addSlot(slotName, TYPE_TEXT);
@@ -724,6 +845,7 @@ function emitChild(
     const key = `${child.object.name}.${child.property.name}`;
     if (walkCtx.listItemBindings?.has(key)) {
       const slotId = walkCtx.listItemBindings.get(key)!;
+      ctx.recordSlotRef(slotId);
       const markerId = ctx.nextMarker();
       ctx.emit(OP_DYN_TEXT);
       ctx.emitU16(slotId);
@@ -741,6 +863,27 @@ function emitChild(
 // ---------------------------------------------------------------------------
 
 /**
+ * Derive the slot name for a SHOW_IF (createShow or ternary) from its
+ * condition expression, using the shared per-page showNames registry:
+ * condition-derived base (`() => visible()` → `show:visible`) with a
+ * positional fallback (`show:#2`) and per-base occurrence suffixes
+ * (`show:visible#2`) — same scheme as list slot naming (see the doc
+ * comment on emitCreateList).
+ */
+function deriveShowSlotName(cond: t.Node | null | undefined, walkCtx: WalkContext): string {
+  const registry = (walkCtx.showNames ??= { counts: new Map(), total: 0 });
+  registry.total += 1;
+  const condName = deriveBindingName(cond);
+  let base = condName ?? `#${registry.total}`;
+  if (condName) {
+    const occurrence = (registry.counts.get(condName) ?? 0) + 1;
+    registry.counts.set(condName, occurrence);
+    if (occurrence > 1) base = `${condName}#${occurrence}`;
+  }
+  return `show:${base}`;
+}
+
+/**
  * Emit SHOW_IF for a ternary conditional expression.
  *
  * Binary format:
@@ -756,7 +899,7 @@ function emitTernaryShowIf(
   walkCtx: WalkContext,
   childIndex: number,
 ): void {
-  const slotName = `show:${childIndex - 2}`;
+  const slotName = deriveShowSlotName(cond.test, walkCtx);
   const slotId = ctx.addSlot(slotName, TYPE_BOOL, SOURCE_CLIENT);
 
   ctx.emit(OP_SHOW_IF);
@@ -801,7 +944,7 @@ function emitCreateShow(
   ctx: IrEmitContext,
   walkCtx: WalkContext,
 ): void {
-  const slotName = `show:createShow`;
+  const slotName = deriveShowSlotName(node.arguments[0], walkCtx);
   const slotId = ctx.addSlot(slotName, TYPE_BOOL, SOURCE_CLIENT);
 
   ctx.emit(OP_SHOW_IF);
@@ -882,20 +1025,28 @@ function emitCreateShowBranch(
 // ---------------------------------------------------------------------------
 
 /**
- * Derive a human-meaningful name for a list's data source expression:
- * an identifier (`todos`), a call (`todos()`, `state.todos()`), an arrow
- * wrapping either (`() => todos()`), or a member access (`state.todos`).
+ * Derive a human-meaningful name for a binding expression:
+ * an identifier (`todos`), a call (`todos()`, `state.todos()`), an arrow or
+ * function expression wrapping either (`() => todos()`,
+ * `function() { return todos(); }`), a member access (`state.todos`), or a
+ * `!`-negation of any of these (`!visible()`, `!!visible()`).
  * Returns null when no static name is recoverable.
  */
-function deriveListSourceName(node: t.Node | null | undefined): string | null {
+function deriveBindingName(node: t.Node | null | undefined): string | null {
   if (!node) return null;
   if (t.isIdentifier(node)) return node.name;
-  if (t.isCallExpression(node)) return deriveListSourceName(node.callee);
-  if (t.isArrowFunctionExpression(node) && t.isExpression(node.body)) {
-    return deriveListSourceName(node.body);
+  if (t.isCallExpression(node)) return deriveBindingName(node.callee);
+  if (t.isArrowFunctionExpression(node) || t.isFunctionExpression(node)) {
+    // Unwrap both function forms (expression and block bodies) the same way
+    // extractSignalName does — a `function() { return visible(); }` condition
+    // must derive the same name as `() => visible()`.
+    return deriveBindingName(getEffectiveBody(node));
   }
   if (t.isMemberExpression(node) && t.isIdentifier(node.property) && !node.computed) {
     return node.property.name;
+  }
+  if (t.isUnaryExpression(node) && node.operator === '!') {
+    return deriveBindingName(node.argument);
   }
   return null;
 }
@@ -909,11 +1060,17 @@ function deriveListSourceName(node: t.Node | null | undefined): string | null {
  *   mapFn: (item) => h(...) — the template to render for each item
  *
  * Slot naming: each list derives a base name from its data source
- * (`createList(todos, ...)` → `todos`), deduped per page (`todos#2` for a
- * second list over the same source) with a positional fallback (`#3`) when
- * no name is derivable. Slots are then `list:<base>:array`,
- * `list:<base>:item`, and `list:<base>:<prop>`, so every list on a page is
- * individually addressable by name for server-side SlotData injection.
+ * (`createList(todos, ...)` → `todos`); when the source has no derivable
+ * name (e.g. a literal `() => []`), the map function's first parameter is
+ * used instead (`(tile) => ...` → `tile`, unless named `_`), and only then
+ * a positional fallback (`#3`). Shows follow the same scheme: the base is
+ * derived from the condition (`() => visible()` → `visible`, `!` unwraps)
+ * with the same positional fallback. Occurrence suffixes are per-BASE in
+ * document order — the first occurrence is unsuffixed, the second reuse of
+ * the same base gets `#2`, and so on. Slots are then `list:<base>:array`,
+ * `list:<base>:item`, and `list:<base>:<prop>` (or `show:<base>`), so every
+ * list on a page is individually addressable by name for server-side
+ * SlotData injection.
  *
  * Binary format:
  *   LIST(0x0A) array_slot_id(u16) item_slot_id(u16) body_len(u32)
@@ -953,15 +1110,17 @@ function emitCreateList(
     return;
   }
 
-  // Unique per-page base name for this list's slots (see doc comment above)
+  // Unique per-page base name for this list's slots (see doc comment above):
+  // source-derived, else map-param-derived, else positional.
   const registry = (walkCtx.listNames ??= { counts: new Map(), total: 0 });
   registry.total += 1;
-  const sourceName = deriveListSourceName(node.arguments[0]);
-  let base = sourceName ?? `#${registry.total}`;
-  if (sourceName) {
-    const occurrence = (registry.counts.get(sourceName) ?? 0) + 1;
-    registry.counts.set(sourceName, occurrence);
-    if (occurrence > 1) base = `${sourceName}#${occurrence}`;
+  const derivedName = deriveBindingName(node.arguments[0])
+    ?? (paramName !== '_' ? paramName : null);
+  let base = derivedName ?? `#${registry.total}`;
+  if (derivedName) {
+    const occurrence = (registry.counts.get(derivedName) ?? 0) + 1;
+    registry.counts.set(derivedName, occurrence);
+    if (occurrence > 1) base = `${derivedName}#${occurrence}`;
   }
 
   // Create slots: array slot (server-sourced) and item slot

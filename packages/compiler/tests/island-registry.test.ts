@@ -9,9 +9,13 @@
  * 5. generateRealIr returns island info alongside binary
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { IrEmitContext } from '../src/ir-emit';
 import { walkHTree, walkCallExpression, type WalkContext } from '../src/ir-walk';
+import { generateRealIr } from '../src/esbuild-ssr-plugin';
 import { parse } from '@babel/parser';
 import type * as T from '@babel/types';
 import * as t from '@babel/types';
@@ -102,6 +106,24 @@ function readIslandTable(data: Uint8Array, offset: number, strings: string[]): A
     });
   }
   return islands;
+}
+
+/** Parse the slot table (v2) from binary, given access to the string table. */
+function readSlotTable(data: Uint8Array, offset: number, strings: string[]): Array<{ id: number; name: string; typeHint: number; default: string }> {
+  const count = readU16LE(data, offset);
+  const slots: Array<{ id: number; name: string; typeHint: number; default: string }> = [];
+  let pos = offset + 2;
+  for (let i = 0; i < count; i++) {
+    const id = readU16LE(data, pos); pos += 2;
+    const nameStrIdx = readU32LE(data, pos); pos += 4;
+    const typeHint = data[pos]!; pos += 1;
+    pos += 1; // source(u8)
+    const defaultLen = readU16LE(data, pos); pos += 2;
+    const defaultStr = new TextDecoder().decode(data.slice(pos, pos + defaultLen));
+    pos += defaultLen;
+    slots.push({ id, name: strings[nameStrIdx] || '', typeHint, default: defaultStr });
+  }
+  return slots;
 }
 
 function walkAndEmit(code: string, walkCtx: WalkContext = {}): Uint8Array {
@@ -781,6 +803,167 @@ describe('Island Registry', () => {
       expect(strings).toContain('Copyright');
     });
 
+    it('resolved island captures slot ids referenced in its subtree', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'StatsIsland') {
+          return {
+            source: `export function StatsIsland() {
+              return h('div', { class: () => panelClass() },
+                h('span', null, () => count()),
+                createList(() => rows(), (row) => row.id, (row) => h('li', null, row.name))
+              );
+            }`,
+            functionName: 'StatsIsland',
+          };
+        }
+        return null;
+      };
+
+      // Outer page has its own dynamic attr slot that must NOT leak into the island
+      const { binary, ctx } = walkAndEmitWithContext(
+        `h('div', { id: () => outerId() }, StatsIsland())`,
+        { resolveComponent, islandNames: new Set(['StatsIsland']) },
+      );
+
+      const islands = ctx.getIslands();
+      expect(islands).toHaveLength(1);
+
+      const slotIds = islands[0]!.slotIds;
+      expect(slotIds.length).toBeGreaterThan(0);
+      // Sorted ascending
+      expect(slotIds).toEqual([...slotIds].sort((a, b) => a - b));
+
+      // Resolve names via the module's slot table: the captured ids must be
+      // exactly the slots referenced inside the island span, MINUS the
+      // per-item list scratch slot (`list:rows:item`) — it holds the LAST
+      // rendered row after SSR, so serializing it into data-forma-props
+      // would leak that row into the page.
+      const sections = readSections(binary);
+      const strings = readStringTable(binary, sections.stringTableOffset);
+      const slots = readSlotTable(binary, sections.slotTableOffset, strings);
+      const idsByName = new Map(slots.map(s => [s.name, s.id]));
+      const expected = [
+        'attr:class',      // dynamic class on the island root
+        'text:0',          // signal-bound text () => count()
+        'list:rows:array', // createList array slot
+        'list:rows:name',  // createList extracted prop slot
+      ].map(n => idsByName.get(n)!).sort((a, b) => a - b);
+      expect(slotIds).toEqual(expected);
+      // The page-level attr slot stays out of the island's slot ids
+      expect(slotIds).not.toContain(idsByName.get('attr:id'));
+      // The per-item scratch slot is filtered out of the island props set
+      expect(slotIds).not.toContain(idsByName.get('list:rows:item'));
+
+      // And the binary island table round-trips the same slot ids
+      const tableIslands = readIslandTable(binary, sections.islandTableOffset, strings);
+      expect(tableIslands[0]!.slotIds).toEqual(expected);
+    });
+
+    it('island slot ids include reused signal slots registered before the walk', () => {
+      const resolveComponent = (name: string) => {
+        if (name === 'CounterIsland') {
+          return {
+            source: `export function CounterIsland() {
+              return h('span', null, () => count());
+            }`,
+            functionName: 'CounterIsland',
+          };
+        }
+        return null;
+      };
+
+      const expr = parseExpr(`h('div', null, CounterIsland())`);
+      const ctx = new IrEmitContext();
+      // Pre-register the signal slot BEFORE the walk (as generateRealIr does),
+      // so the island subtree reuses it without a fresh addSlot call.
+      const countSlotId = ctx.addSlot('count', 0x01);
+      if (t.isCallExpression(expr)) {
+        walkHTree(expr, 'h', ctx, {
+          resolveComponent,
+          islandNames: new Set(['CounterIsland']),
+          signalSlots: new Map([['count', countSlotId]]),
+        });
+      }
+
+      const islands = ctx.getIslands();
+      expect(islands).toHaveLength(1);
+      expect(islands[0]!.slotIds).toEqual([countSlotId]);
+    });
+
+    it('unresolved island fallback keeps empty slot ids', () => {
+      const { ctx } = walkAndEmitWithContext(
+        `h('div', null, ShellOnly())`,
+        { islandNames: new Set(['ShellOnly']) },
+      );
+
+      const islands = ctx.getIslands();
+      expect(islands).toHaveLength(1);
+      // Empty shell references no slots — the Rust walker skips props emission
+      expect(islands[0]!.slotIds).toEqual([]);
+    });
+
+    it('nested island resolution failure keeps the slot-capture stack balanced', () => {
+      // Inner is an island nested inside Outer's SSR span; a component INSIDE
+      // Inner throws during resolution, so Inner falls back to the empty
+      // shell. Without a balanced capture stack, Inner's leaked set would be
+      // popped by Outer's endSlotCapture and Outer would record the wrong
+      // (empty) slot ids.
+      const resolveComponent = (name: string) => {
+        if (name === 'Outer') {
+          return {
+            source: `export function Outer() {
+              return h('div', { class: () => outerClass() },
+                h('span', null, () => outerText()),
+                Inner()
+              );
+            }`,
+            functionName: 'Outer',
+          };
+        }
+        if (name === 'Inner') {
+          return {
+            source: `export function Inner() { return h('div', null, Broken()); }`,
+            functionName: 'Inner',
+          };
+        }
+        if (name === 'Broken') {
+          throw new Error('resolver exploded');
+        }
+        if (name === 'Tail') {
+          return {
+            source: `export function Tail() { return h('p', { id: () => tailId() }, 'tail'); }`,
+            functionName: 'Tail',
+          };
+        }
+        return null;
+      };
+
+      const { binary, ctx } = walkAndEmitWithContext(
+        `h('main', null, Outer(), Tail())`,
+        { resolveComponent, islandNames: new Set(['Outer', 'Inner', 'Tail']) },
+      );
+
+      const sections = readSections(binary);
+      const strings = readStringTable(binary, sections.stringTableOffset);
+      const slots = readSlotTable(binary, sections.slotTableOffset, strings);
+      const idsByName = new Map(slots.map(s => [s.name, s.id]));
+
+      const islands = ctx.getIslands();
+      const outer = islands.find(i => i.name === 'Outer')!;
+      const tail = islands.find(i => i.name === 'Tail')!;
+
+      // Outer still captures ITS OWN slots (dyn class + signal text), not
+      // the leaked capture set of the failed nested island.
+      const outerExpected = [
+        idsByName.get('attr:class')!,
+        idsByName.get('text:0')!,
+      ].sort((a, b) => a - b);
+      expect(outer.slotIds).toEqual(outerExpected);
+
+      // The island after the failure captures exactly its own slot.
+      expect(tail.slotIds).toEqual([idsByName.get('attr:id')!]);
+    });
+
     it('resolution failure for one island does not affect others', () => {
       const resolveComponent = (name: string) => {
         if (name === 'Good') {
@@ -805,5 +988,264 @@ describe('Island Registry', () => {
       // Good island's content should be in string table
       expect(strings).toContain('works');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateRealIr integration: island signal default extraction (finding 9)
+// ---------------------------------------------------------------------------
+
+describe('generateRealIr island signal defaults', () => {
+  const TYPE_TEXT = 0x01;
+  const TYPE_BOOL = 0x02;
+
+  let tmpDir: string;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'forma-island-signals-'));
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  /** Write project files into tmpDir and return the entry point path. */
+  function writeProject(files: Record<string, string>): string {
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(tmpDir, name), content);
+    }
+    return join(tmpDir, 'app.ts');
+  }
+
+  const entrySource = `
+    import { activateIslands } from 'formajs';
+    import { DashboardPage } from './DashboardPage';
+    import { CounterIsland } from './CounterIsland';
+    activateIslands({ CounterIsland });
+  `;
+
+  it('module-level island signals become named slots with correct defaults', () => {
+    const entryPath = writeProject({
+      'app.ts': entrySource,
+      'DashboardPage.ts': `
+        import { h } from 'formajs';
+        import { CounterIsland } from './CounterIsland';
+        export function DashboardPage() {
+          return h('div', { class: 'page' }, CounterIsland());
+        }
+      `,
+      'CounterIsland.ts': `
+        import { createSignal, h } from 'formajs';
+        const [pillRunning, setPillRunning] = createSignal(false);
+        const [statusText, setStatusText] = createSignal('idle');
+        export function CounterIsland() {
+          return h('section', null, () => statusText());
+        }
+      `,
+    });
+
+    const result = generateRealIr(entryPath);
+    expect(result).not.toBeNull();
+
+    const sections = readSections(result!.binary);
+    const strings = readStringTable(result!.binary, sections.stringTableOffset);
+    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const byName = new Map(slots.map(s => [s.name, s]));
+
+    // Slots are NAMED after the island's module-level signals, with defaults
+    expect(byName.get('pillRunning')).toMatchObject({ typeHint: TYPE_BOOL, default: 'false' });
+    expect(byName.get('statusText')).toMatchObject({ typeHint: TYPE_TEXT, default: 'idle' });
+
+    // The island's dynamic text reuses the named slot — no anonymous text:N slot
+    expect(slots.some(s => /^text:\d+$/.test(s.name))).toBe(false);
+
+    // The island metadata captures the reused signal slot
+    expect(result!.islands).toHaveLength(1);
+    expect(result!.islands[0]!.name).toBe('CounterIsland');
+    expect(result!.islands[0]!.slotIds).toContain(byName.get('statusText')!.id);
+  });
+
+  it('conflicting twin declaration warns and keeps the root default', () => {
+    const entryPath = writeProject({
+      'app.ts': entrySource,
+      'DashboardPage.ts': `
+        import { createSignal, h } from 'formajs';
+        import { CounterIsland } from './CounterIsland';
+        export function DashboardPage() {
+          const [statusText, setStatusText] = createSignal('busy');
+          return h('div', null, CounterIsland());
+        }
+      `,
+      'CounterIsland.ts': `
+        import { createSignal, h } from 'formajs';
+        const [statusText, setStatusText] = createSignal('idle');
+        export function CounterIsland() {
+          return h('section', null, () => statusText());
+        }
+      `,
+    });
+
+    const result = generateRealIr(entryPath);
+    expect(result).not.toBeNull();
+
+    // Conflicting default warned about
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("signal 'statusText'"));
+
+    // Root Page is authoritative — its default wins
+    const sections = readSections(result!.binary);
+    const strings = readStringTable(result!.binary, sections.stringTableOffset);
+    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const statusSlots = slots.filter(s => s.name === 'statusText');
+    expect(statusSlots).toHaveLength(1);
+    expect(statusSlots[0]!.default).toBe('busy');
+  });
+
+  it('identical twin declaration merges silently', () => {
+    const entryPath = writeProject({
+      'app.ts': entrySource,
+      'DashboardPage.ts': `
+        import { createSignal, h } from 'formajs';
+        import { CounterIsland } from './CounterIsland';
+        export function DashboardPage() {
+          const [statusText, setStatusText] = createSignal('idle');
+          return h('div', null, CounterIsland());
+        }
+      `,
+      'CounterIsland.ts': `
+        import { createSignal, h } from 'formajs';
+        const [statusText, setStatusText] = createSignal('idle');
+        export function CounterIsland() {
+          return h('section', null, () => statusText());
+        }
+      `,
+    });
+
+    const result = generateRealIr(entryPath);
+    expect(result).not.toBeNull();
+
+    // No warning for identical twin declarations (the ksx pattern)
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    const sections = readSections(result!.binary);
+    const strings = readStringTable(result!.binary, sections.stringTableOffset);
+    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const statusSlots = slots.filter(s => s.name === 'statusText');
+    expect(statusSlots).toHaveLength(1);
+    expect(statusSlots[0]!.default).toBe('idle');
+  });
+
+  it('conflict between two islands warns naming the earlier island whose default won', () => {
+    const entryPath = writeProject({
+      'app.ts': `
+        import { activateIslands } from 'formajs';
+        import { DashboardPage } from './DashboardPage';
+        import { AlphaIsland } from './AlphaIsland';
+        import { BetaIsland } from './BetaIsland';
+        activateIslands({ AlphaIsland, BetaIsland });
+      `,
+      'DashboardPage.ts': `
+        import { h } from 'formajs';
+        import { AlphaIsland } from './AlphaIsland';
+        import { BetaIsland } from './BetaIsland';
+        export function DashboardPage() {
+          return h('div', null, AlphaIsland(), BetaIsland());
+        }
+      `,
+      'AlphaIsland.ts': `
+        import { createSignal, h } from 'formajs';
+        const [shared, setShared] = createSignal('from-alpha');
+        export function AlphaIsland() {
+          return h('span', null, () => shared());
+        }
+      `,
+      'BetaIsland.ts': `
+        import { createSignal, h } from 'formajs';
+        const [shared, setShared] = createSignal('from-beta');
+        export function BetaIsland() {
+          return h('em', null, () => shared());
+        }
+      `,
+    });
+
+    const result = generateRealIr(entryPath);
+    expect(result).not.toBeNull();
+
+    // First-wins: AlphaIsland declared 'shared' first, so its default is kept
+    const sections = readSections(result!.binary);
+    const strings = readStringTable(result!.binary, sections.stringTableOffset);
+    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const sharedSlots = slots.filter(s => s.name === 'shared');
+    expect(sharedSlots).toHaveLength(1);
+    expect(sharedSlots[0]!.default).toBe('from-alpha');
+
+    // The warning names the ACTUAL earlier declarer (AlphaIsland), not the root
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("signal 'shared' in island 'BetaIsland'"),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("keeping the default from island 'AlphaIsland'"),
+    );
+  });
+
+  it('inline block-body mount path merges island signal defaults', () => {
+    const entryPath = writeProject({
+      'app.ts': `
+        import { h, mount, activateIslands } from 'formajs';
+        import { CounterIsland } from './CounterIsland';
+        mount(() => {
+          return h('div', { class: 'shell' }, CounterIsland());
+        }, '#app');
+        activateIslands({ CounterIsland });
+      `,
+      'CounterIsland.ts': `
+        import { createSignal, h } from 'formajs';
+        const [statusText, setStatusText] = createSignal('idle');
+        export function CounterIsland() {
+          return h('section', null, () => statusText());
+        }
+      `,
+    });
+
+    const result = generateRealIr(entryPath);
+    expect(result).not.toBeNull();
+
+    const sections = readSections(result!.binary);
+    const strings = readStringTable(result!.binary, sections.stringTableOffset);
+    const slots = readSlotTable(result!.binary, sections.slotTableOffset, strings);
+    const byName = new Map(slots.map(s => [s.name, s]));
+
+    // The island's module-level signal becomes a named slot with its default
+    expect(byName.get('statusText')).toMatchObject({ typeHint: TYPE_TEXT, default: 'idle' });
+
+    // The island registers via the inline path and captures the reused slot
+    expect(result!.islands).toHaveLength(1);
+    expect(result!.islands[0]!.name).toBe('CounterIsland');
+    expect(result!.islands[0]!.slotIds).toContain(byName.get('statusText')!.id);
+  });
+
+  it('unresolvable island source warns and skips without failing', () => {
+    const entryPath = writeProject({
+      'app.ts': `
+        import { activateIslands } from 'formajs';
+        import { DashboardPage } from './DashboardPage';
+        import { GhostIsland } from './GhostIsland';
+        activateIslands({ GhostIsland });
+      `,
+      'DashboardPage.ts': `
+        import { h } from 'formajs';
+        import { GhostIsland } from './GhostIsland';
+        export function DashboardPage() {
+          return h('div', null, GhostIsland());
+        }
+      `,
+      // GhostIsland.ts intentionally missing
+    });
+
+    const result = generateRealIr(entryPath);
+    expect(result).not.toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('GhostIsland'));
   });
 });

@@ -461,3 +461,30 @@ describe('emitIr', () => {
     expect(defaultLen).toBe(0); // empty default bytes
   });
 });
+
+// ---------------------------------------------------------------------------
+// u16 length guards — string table and slot defaults
+// ---------------------------------------------------------------------------
+// Both tables prefix variable-length payloads with a u16. Without a guard,
+// setUint16 silently wraps for payloads over 65535 bytes and desynchronizes
+// the whole table for the Rust parser — corrupt output must be impossible.
+
+describe('u16 length guards', () => {
+  it('toBinary throws a descriptive error for a string over 65535 UTF-8 bytes', () => {
+    const ctx = new IrEmitContext();
+    ctx.addString('x'.repeat(0x10000));
+    expect(() => ctx.toBinary()).toThrow(/65535-byte u16 length limit/);
+  });
+
+  it('toBinary throws a descriptive error for a slot default over 65535 bytes', () => {
+    const ctx = new IrEmitContext();
+    ctx.addSlot('attr:d', 0x01, 0x01, new Uint8Array(0x10000));
+    expect(() => ctx.toBinary()).toThrow(/slot 'attr:d'/);
+  });
+
+  it('accepts a string of exactly 65535 bytes', () => {
+    const ctx = new IrEmitContext();
+    ctx.addString('x'.repeat(0xffff));
+    expect(() => ctx.toBinary()).not.toThrow();
+  });
+});
