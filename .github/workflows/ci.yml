@@ -23,6 +23,87 @@ jobs:
       - run: npm test --workspaces
       - run: npm run build --workspaces
 
+  # Cross-implementation FMIR contract: the binary this compiler emits has to
+  # be readable — and render the same HTML — for the REAL Rust consumer.
+  #
+  # Everything else pinning the emitter's bytes is a hand-written FMIR reader
+  # inside this repo's own vitest suite, written from the same mental model as
+  # the emitter, so the two agree by construction — including where both are
+  # wrong about what forma-ir's parser requires. Over 32 binary mutation probes
+  # the JS suite killed 22 and a Rust reader killed 22, but the union killed 27.
+  #
+  # WHY CHECK OUT `forma` RATHER THAN CONSUME THE PUBLISHED forma-ir CRATE:
+  # the published crate is a release snapshot, so a compiler PR would be
+  # checked against a consumer that may be months behind the one it actually
+  # ships alongside. More importantly, either option still needs a Rust test
+  # somewhere — and writing that test HERE would recreate the exact blind spot
+  # this job exists to close, only mirrored: a Rust reader authored in the
+  # compiler's repo, from the compiler's mental model. Checking out `forma`
+  # runs the SAME `tests/js_emitter_contract.rs` the consumer's own CI runs, so
+  # there is exactly one definition of the contract and it lives with the
+  # consumer.
+  #
+  # Cost: forma-ir has three direct dependencies and this builds one test
+  # target, not the workspace — roughly a minute cold, seconds warm. Cheap
+  # enough for every PR.
+  #
+  # NOTE: this job is green only once the matching fixtures are on `forma`'s
+  # default branch. The contract lands when both halves land.
+  fmir-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check out the Rust consumer
+        uses: actions/checkout@v4
+        with:
+          repository: getforma-dev/forma
+          path: forma-checkout
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: forma-checkout
+
+      - run: npm install
+
+      # Emit straight over the consumer's committed fixtures, so `git diff`
+      # below is a byte-exact answer to "is what this compiler emits still what
+      # forma has pinned?".
+      - name: Emit the corpus with THIS compiler
+        run: npm run emit:corpus -- "$GITHUB_WORKSPACE/forma-checkout/crates/forma-ir/tests/fixtures/js-emitter"
+
+      # The substantive gate: parse, slot-name/id uniqueness, walk_to_html,
+      # walk_island, and the golden HTML — all under distinguishing slot data.
+      - name: The real Rust consumer must read what this compiler emits
+        working-directory: forma-checkout
+        run: cargo test -p forma-ir --test js_emitter_contract
+
+      # Byte drift with an unchanged render is still a change to a cross-repo
+      # artifact, and it silently rots forma's own suite (which tests the
+      # committed bytes). Report it separately from the render failure so the
+      # two never get confused for each other.
+      - name: The committed FMIR fixtures must still be what this compiler emits
+        working-directory: forma-checkout
+        run: |
+          # Stage first: a corpus case that is NEW here is untracked there, and
+          # `git diff` alone cannot see an untracked file. Nothing is committed.
+          git add -A -- crates/forma-ir/tests/fixtures/js-emitter
+          # `cmd && exit 0` would abort the step under `set -e` before the
+          # annotations below ever printed; an `if` condition is exempt.
+          if git diff --cached --stat --exit-code -- crates/forma-ir/tests/fixtures/js-emitter; then
+            exit 0
+          fi
+          echo "::error::This compiler no longer emits the .ir bytes committed in getforma-dev/forma."
+          echo "::error::Re-run 'npm run emit:corpus', copy packages/compiler/ir-corpus/*.ir into"
+          echo "::error::crates/forma-ir/tests/fixtures/js-emitter/, regenerate the goldens with"
+          echo "::error::UPDATE_GOLDEN=1 cargo test -p forma-ir --test js_emitter_contract, and open the paired PR."
+          exit 1
+
   e2e:
     runs-on: ubuntu-latest
     needs: test  # Only run E2E if unit tests pass

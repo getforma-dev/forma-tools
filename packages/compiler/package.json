@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
+    "emit:corpus": "npm run build && node scripts/emit-corpus.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },
