@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.9] - 2026-08-05
+
+### Fixed
+- Tailwind CSS step no longer fails on Windows. `execFileSync('npx', ...)` cannot spawn the `npx.cmd` shim there — the build now resolves the locally installed `@tailwindcss/cli` and runs its entry script with the current Node executable (no shell on any platform, so paths with spaces are safe and nothing is exposed to shell injection). `npx` remains as a fallback for projects without a local install, spawned through a shell on Windows with quoted arguments.
+
+### Added
+- Functional test for the Tailwind CSS entry path (uses a fake locally installed `@tailwindcss/cli`, no network)
+
 ## [0.1.5] - 2026-03-16
 
 ### Added

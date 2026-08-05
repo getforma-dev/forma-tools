@@ -345,7 +345,70 @@ describe('@getforma/build — functional', () => {
     expect(manifest.routes['/dashboard'].js).toEqual([hashedDash]);
   }, 15_000);
 
-  // ---- Test 6: Build creates output directory if it doesn't exist --------
+  // ---- Test 6: Tailwind entries run the locally installed CLI ------------
+  it('runs a locally installed @tailwindcss/cli via node (no npx, no shell)', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+
+    const cssFile = join(srcDir, 'main.css');
+    writeFileSync(cssFile, '.a { color: red; }\n');
+
+    // Fake @tailwindcss/cli installed in the project's node_modules — the
+    // build must resolve it from cwd and run its bin script with
+    // process.execPath, which works identically on POSIX and Windows.
+    const cliDir = join(tmpRoot, 'node_modules', '@tailwindcss', 'cli');
+    mkdirSync(cliDir, { recursive: true });
+    writeFileSync(
+      join(cliDir, 'package.json'),
+      JSON.stringify({
+        name: '@tailwindcss/cli',
+        version: '0.0.0-test',
+        bin: { tailwindcss: './cli.mjs' },
+      }),
+    );
+    writeFileSync(
+      join(cliDir, 'cli.mjs'),
+      [
+        `import { readFileSync, writeFileSync } from 'node:fs';`,
+        `const args = process.argv.slice(2);`,
+        `const input = args[args.indexOf('-i') + 1];`,
+        `const output = args[args.indexOf('-o') + 1];`,
+        `writeFileSync(output, '/* built-by-fake-tailwind */\\n' + readFileSync(input, 'utf8'));`,
+      ].join('\n'),
+    );
+
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: ['main'] } },
+      cssEntries: [{ input: cssFile, outfile: 'main.css', tailwind: true }],
+      outputDir: outDir,
+    };
+
+    // Resolution starts from cwd, so run the build from the fake project root
+    const prevCwd = process.cwd();
+    process.chdir(tmpRoot);
+    try {
+      await build(config);
+    } finally {
+      process.chdir(prevCwd);
+    }
+
+    const manifest: AssetManifest = JSON.parse(
+      readFileSync(join(outDir, 'manifest.json'), 'utf8'),
+    );
+
+    const hashedCss = manifest.assets['main.css'];
+    expect(hashedCss).toBeDefined();
+    expect(hashedCss).toMatch(/^main\.[0-9a-f]{8}\.css$/);
+
+    const cssOut = readFileSync(join(outDir, hashedCss), 'utf8');
+    expect(cssOut).toContain('/* built-by-fake-tailwind */');
+    expect(cssOut).toContain('.a { color: red; }');
+
+    expect(manifest.routes['/'].css).toEqual([hashedCss]);
+  }, 15_000);
+
+  // ---- Test 7: Build creates output directory if it doesn't exist --------
   it('creates outputDir if it does not already exist', async () => {
     const entryFile = join(srcDir, 'app.ts');
     writeFileSync(entryFile, 'export const x = 1;\n');

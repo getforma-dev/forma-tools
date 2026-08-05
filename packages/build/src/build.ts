@@ -20,9 +20,10 @@ import {
   statSync,
   existsSync,
 } from 'node:fs';
-import { join, extname, basename } from 'node:path';
+import { join, extname, basename, dirname } from 'node:path';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 
 import type {
   BuildConfig,
@@ -45,6 +46,54 @@ function contentHash(filePath: string): string {
 // CSS Generation
 // ---------------------------------------------------------------------------
 
+/**
+ * Locate the consuming project's installed @tailwindcss/cli entry script,
+ * resolving from the current working directory. Returns null if the package
+ * is not installed locally.
+ */
+function resolveTailwindCli(): string | null {
+  try {
+    const projectRequire = createRequire(join(process.cwd(), 'package.json'));
+    const pkgPath = projectRequire.resolve('@tailwindcss/cli/package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as {
+      bin?: string | Record<string, string>;
+    };
+    const bin = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin?.tailwindcss;
+    if (!bin) return null;
+    const cliPath = join(dirname(pkgPath), bin);
+    return existsSync(cliPath) ? cliPath : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Run @tailwindcss/cli on an input file. Prefers the locally installed CLI
+ * script executed with the current Node binary — no shell on any platform,
+ * so paths with spaces survive and nothing is exposed to shell injection.
+ * Falls back to npx for projects that rely on it fetching the CLI on demand;
+ * npx is a .cmd shim on Windows that can only be spawned through a shell
+ * (execFileSync throws ENOENT/EINVAL otherwise), and the shell does not
+ * escape arguments, so each one is quoted there ('"' cannot appear in
+ * Windows paths, which makes the quoting safe).
+ */
+function runTailwind(input: string, outPath: string): void {
+  const args = ['-i', input, '-o', outPath, '--minify'];
+
+  const cli = resolveTailwindCli();
+  if (cli) {
+    execFileSync(process.execPath, [cli, ...args], { stdio: 'inherit' });
+    return;
+  }
+
+  const windows = process.platform === 'win32';
+  const npxArgs = ['@tailwindcss/cli', ...args];
+  execFileSync('npx', windows ? npxArgs.map((a) => `"${a}"`) : npxArgs, {
+    stdio: 'inherit',
+    shell: windows,
+  });
+}
+
 function generateCss(
   config: BuildConfig,
 ): void {
@@ -55,12 +104,7 @@ function generateCss(
     const outPath = join(config.outputDir, entry.outfile);
 
     if (entry.tailwind && inputs.length > 0) {
-      // Run @tailwindcss/cli on the first input (use execFileSync to avoid shell injection)
-      execFileSync(
-        'npx',
-        ['@tailwindcss/cli', '-i', inputs[0], '-o', outPath, '--minify'],
-        { stdio: 'inherit' },
-      );
+      runTailwind(inputs[0], outPath);
     } else {
       // Concatenate all input CSS files
       const cssConcat = inputs
