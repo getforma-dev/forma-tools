@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-08-06
 
 ### Removed
 - **Breaking: the generated island registry (`<page>.islands.js`) is gone.** It could not work in any configuration and every consumer had to delete it by hand. It was written *after* the esbuild pass, so it shipped unbundled with a bare `import { activateIslands } from '@getforma/core'` no browser can resolve; it imported the page component as `'../<entry>'` — a source path, relative to the *output* directory, that resolves from nowhere; and it mapped every island name to the page ROOT component, which is the clobber pattern the islands protocol exists to avoid. It was then hashed, brotli+gzip compressed and registered in `manifest.json`, so it reached production bundles as dead weight. The registry was redundant by construction as well as broken: the compiler only knows an island exists *because* the entry point already calls `activateIslands({ ... })` with the real components, so the user's own bundle registers exactly the right set. Nothing replaces it — delete any scrubbing step you added.
