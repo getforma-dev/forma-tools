@@ -60,9 +60,15 @@ mkdirSync(outDir, { recursive: true });
 let failed = 0;
 
 for (const name of cases) {
-  const entryPoint = join(CORPUS_DIR, name, 'app.ts');
-  if (!existsSync(entryPoint)) {
-    console.error(`  FAIL ${name}: no app.ts entry point`);
+  // A real JSX project's entry point is `app.tsx`, and that extension is the
+  // ONLY thing that makes the compiler run esbuild over it — which is what
+  // rewrites `export function Page()` into the specifier form the analyzer has
+  // to resolve. A corpus that could only hold `app.ts` could not cover it.
+  const entryPoint = ['app.ts', 'app.tsx']
+    .map((f) => join(CORPUS_DIR, name, f))
+    .find((p) => existsSync(p));
+  if (!entryPoint) {
+    console.error(`  FAIL ${name}: no app.ts or app.tsx entry point`);
     failed++;
     continue;
   }

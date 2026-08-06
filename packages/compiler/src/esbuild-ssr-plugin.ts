@@ -7,8 +7,8 @@
  */
 
 import type { Plugin } from 'esbuild';
-import { readFileSync, writeFileSync, existsSync, statSync } from 'node:fs';
-import { join, dirname, resolve } from 'node:path';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 
 // ESM-compatible require for loading esbuild (which is CJS) from sync functions
@@ -17,6 +17,8 @@ import { parse } from '@babel/parser';
 import * as t from '@babel/types';
 import { IrEmitContext } from './ir-emit';
 import { ComponentAnalyzer, type EntryPointInfo, type SignalDefault } from './component-analyzer';
+import { readImportBindings, resolveExportedFunction } from './export-resolver';
+import { fsModuleLoader, loadComponentSource, resolveFilePath } from './module-loader';
 import { walkHTree, walkCallExpression, type WalkContext } from './ir-walk';
 
 export interface SsrPluginOptions {
@@ -34,7 +36,44 @@ export interface SsrPluginOptions {
 
 const TYPE_TEXT   = 0x01;
 const TYPE_BOOL   = 0x02;
+const TYPE_NUMBER = 0x03;
 const SOURCE_CLIENT = 0x01;
+
+/**
+ * Register one client-sourced slot per signal, carrying its SSR default.
+ *
+ * Both mount paths call this. They used to carry separate copies and the
+ * inline one had drifted: it handled only text and bool, so a numeric signal
+ * on an inline-mount page got a TYPE_TEXT slot with NO default bytes — the
+ * server rendered a blank where the number belongs.
+ * Verified by: packages/compiler/tests/ssr-emission.test.ts > "gives a numeric inline-mount signal its type and default"
+ */
+function registerSignalSlots(
+  ctx: IrEmitContext,
+  signalDefaults: Map<string, SignalDefault>,
+  signalSlots: Map<string, number>,
+): void {
+  for (const [name, sigDefault] of signalDefaults) {
+    let typeHint = TYPE_TEXT;
+    let defaultBytes = new Uint8Array(0);
+
+    if (sigDefault.type === 'text' && typeof sigDefault.default === 'string') {
+      typeHint = TYPE_TEXT;
+      defaultBytes = new TextEncoder().encode(sigDefault.default);
+    } else if (sigDefault.type === 'bool' && typeof sigDefault.default === 'boolean') {
+      typeHint = TYPE_BOOL;
+      defaultBytes = new TextEncoder().encode(String(sigDefault.default));
+    } else if (sigDefault.type === 'number' && typeof sigDefault.default === 'number') {
+      typeHint = TYPE_NUMBER;
+      defaultBytes = new TextEncoder().encode(String(sigDefault.default));
+    }
+    // type 'null' keeps TYPE_TEXT with no default bytes: the Rust walker omits
+    // the attribute entirely for an empty default, which is what null means.
+
+    const slotId = ctx.addSlot(name, typeHint, SOURCE_CLIENT, defaultBytes);
+    signalSlots.set(name, slotId);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Parser options
@@ -52,6 +91,85 @@ const PARSE_OPTS = {
 export interface IrResult {
   binary: Uint8Array;
   islands: Array<{ id: number; name: string; trigger: number; propsMode: number; slotIds: number[] }>;
+}
+
+/**
+ * Build the `resolveComponent` callback the walker uses for sub-component
+ * calls, rebasing on the file each call actually appears in.
+ *
+ * The import map used to be built ONCE from the entry point and captured in a
+ * closure, so `StatCard` imported by `pages/OverviewPage.tsx` was invisible
+ * unless `app.tsx` happened to import it too — a whole page's components
+ * degraded to empty island shells purely because of who imported them.
+ * Verified by: packages/compiler/tests/ssr-emission.test.ts > "resolves a sub-component against the file the call is in"
+ *
+ * `seed` lets the caller pre-register the in-memory source of a file the
+ * compiler has already transformed (the entry point), so it is not re-read
+ * from disk untransformed.
+ */
+function createComponentResolver(
+  seed: Array<{ path: string; source: string }>,
+): (name: string, fromFile?: string) => { source: string; functionName: string; path?: string } | null {
+  // Values are `string | null`; null caches "this file could not be read", so
+  // an unreadable file is not retried once per component reference AND is not
+  // mistaken for an empty module on the second lookup.
+  const sources = new Map<string, string | null>();
+  for (const { path, source } of seed) sources.set(path, source);
+
+  const sourceOf = (filePath: string): string | null => {
+    const cached = sources.get(filePath);
+    if (cached !== undefined) return cached;
+    const loaded = loadComponentSource(filePath);
+    sources.set(filePath, loaded);
+    return loaded;
+  };
+
+  const bindingsCache = new Map<string, Map<string, { source: string; imported: string }>>();
+  const bindingsOf = (filePath: string, source: string) => {
+    let bindings = bindingsCache.get(filePath);
+    if (!bindings) {
+      try {
+        bindings = readImportBindings(parse(source, PARSE_OPTS) as any);
+      } catch {
+        bindings = new Map();
+      }
+      bindingsCache.set(filePath, bindings);
+    }
+    return bindings;
+  };
+
+  return (name, fromFile) => {
+    if (!fromFile) return null;
+    const fromSource = sourceOf(fromFile);
+    if (fromSource === null) return null;
+
+    // 1. An import in the calling file wins: it names both the file and the
+    //    binding the target module exports it under (`import { CardImpl as
+    //    Card }` must be looked up as 'CardImpl' over there, not 'Card').
+    const binding = bindingsOf(fromFile, fromSource).get(name);
+    if (binding) {
+      if (binding.imported === '*') return null;
+      if (!binding.source.startsWith('.') && !binding.source.startsWith('/')) return null;
+      const path = resolveFilePath(dirname(fromFile), binding.source);
+      if (!path) return null;
+      const source = sourceOf(path);
+      if (source === null) return null;
+      return { source, functionName: binding.imported, path };
+    }
+
+    // 2. Otherwise the calling file may declare it itself — a file-local
+    //    helper component, exported or not, top-level or nested.
+    const local = resolveExportedFunction(fromSource, fromFile, name, {
+      loadModule: fsModuleLoader,
+      allowLocal: true,
+      allowNested: true,
+    });
+    if (local.kind === 'found') {
+      return { source: fromSource, functionName: name, path: fromFile };
+    }
+
+    return null;
+  };
 }
 
 /**
@@ -99,70 +217,31 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       const ctx = new IrEmitContext();
       const signalSlots = new Map<string, number>();
 
-      // Parse the entry point AST for imports and local function extraction
-      const entryAst = parse(entrySource, PARSE_OPTS);
-
-      // Build import map from the entry point file
+      // Import map from the entry point file (island signal extraction below)
       const importMap = new Map<string, string>();
-      for (const node of entryAst.program.body) {
-        if (t.isImportDeclaration(node)) {
-          const importPath = node.source.value;
-          for (const spec of node.specifiers) {
-            importMap.set(spec.local.name, importPath);
-          }
-        }
+      for (const [local, binding] of entryInfo.importBindings ?? []) {
+        importMap.set(local, binding.source);
       }
 
-      // Build resolve callback that handles BOTH imported AND locally-defined components
-      const resolveComponent = (name: string): { source: string; functionName: string; path?: string } | null => {
-        // 1. Check imports first (same as existing logic)
-        const importPathRaw = importMap.get(name);
-        if (importPathRaw && (importPathRaw.startsWith('.') || importPathRaw.startsWith('/'))) {
-          const resolvedPath = resolveFilePath(entryDir, importPathRaw);
-          if (resolvedPath) {
-            const src = loadComponentSource(resolvedPath);
-            if (src !== null) {
-              return { source: src, functionName: name, path: resolvedPath };
-            }
-            // read failed — fall through to local check
-          }
-        }
-
-        // 2. Check locally-defined functions in the entry point
-        for (const node of entryAst.program.body) {
-          // function Sidebar() { ... }
-          if (t.isFunctionDeclaration(node) && node.id?.name === name) {
-            return { source: entrySource, functionName: name, path: entryPointPath };
-          }
-          // const Sidebar = () => { ... } or const Sidebar = function() { ... }
-          if (t.isVariableDeclaration(node)) {
-            for (const decl of node.declarations) {
-              if (
-                t.isIdentifier(decl.id) &&
-                decl.id.name === name &&
-                decl.init &&
-                (t.isArrowFunctionExpression(decl.init) || t.isFunctionExpression(decl.init))
-              ) {
-                return { source: entrySource, functionName: name, path: entryPointPath };
-              }
-            }
-          }
-        }
-
-        return null;
-      };
+      const resolveComponent = createComponentResolver([
+        { path: entryPointPath, source: entrySource },
+      ]);
 
       // Extract file constants and signal defaults from entry point itself
       const fileConstants = analyzer.extractFileConstants(entrySource, entryPointPath);
       const stringConstants = analyzer.extractStringConstants(entrySource, entryPointPath);
 
-      // Signal defaults: look for createSignal calls at module scope in the entry file
-      let signalDefaults = new Map<string, any>();
-      try {
-        signalDefaults = analyzer.extractSignalDefaults(entrySource, entryPointPath, '__inline__');
-      } catch {
-        // extractSignalDefaults may not handle '__inline__' — that's fine, skip defaults
-      }
+      // Signal defaults: an inline mount has no exported component to look
+      // inside — its signals live at module scope and in the mount callback.
+      // This used to ask for an export literally named '__inline__', a lookup
+      // that could never match, so an inline-mount page got ZERO named signal
+      // slots and every binding landed in an anonymous `text:`/`attr:` slot
+      // that server-side injection cannot address by name.
+      // Verified by: packages/compiler/tests/ssr-emission.test.ts > "names signal slots on an inline-mount entry"
+      const signalDefaults = analyzer.extractInlineMountSignalDefaults(
+        entrySource,
+        entryPointPath,
+      ) as Map<string, SignalDefault>;
 
       // Merge signal defaults from island component files (finding F9) — the
       // inline block-body mount path can register islands via
@@ -178,19 +257,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         signalDefaults,
       );
 
-      for (const [sigName, sigDefault] of signalDefaults) {
-        let typeHint = TYPE_TEXT;
-        let defaultBytes = new Uint8Array(0);
-        if (sigDefault.type === 'text' && typeof sigDefault.default === 'string') {
-          typeHint = TYPE_TEXT;
-          defaultBytes = new TextEncoder().encode(sigDefault.default);
-        } else if (sigDefault.type === 'bool' && typeof sigDefault.default === 'boolean') {
-          typeHint = TYPE_BOOL;
-          defaultBytes = new TextEncoder().encode(String(sigDefault.default));
-        }
-        const slotId = ctx.addSlot(sigName, typeHint, SOURCE_CLIENT, defaultBytes);
-        signalSlots.set(sigName, slotId);
-      }
+      registerSignalSlots(ctx, signalDefaults, signalSlots);
 
       const walkCtx: WalkContext = {
         sourceFile: entryPointPath,
@@ -199,6 +266,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         signalSlots,
         signalDefaults,
         resolveComponent,
+        loadModule: fsModuleLoader,
         visited: new Set(),
         depth: 0,
         islandNames: entryInfo.islandNames,
@@ -246,33 +314,62 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       return null;
     }
 
-    // 5. Extract file constants (for Rule 9 static unroll) and string
-    // constants (for static attribute resolution)
-    const fileConstants = analyzer.extractFileConstants(componentSource, componentPath);
-    const stringConstants = analyzer.extractStringConstants(componentSource, componentPath);
+    // 4b. The entry's import binding names what the component module exports
+    // it under: `import { PageImpl as Page }` must be looked up as 'PageImpl'.
+    const exportedName =
+      entryInfo.importBindings?.get(entryInfo.componentName)?.imported
+      ?? entryInfo.componentName;
 
-    // 6. Extract signal defaults (for slot defaults)
+    // 5. Find the root component's h() tree. The function may be DECLARED in
+    // another file (a barrel forwarded the export), and everything scoped to
+    // the module — constants, imports, diagnostics — has to follow it there.
+    const componentInfo = analyzer.parseComponentFile(
+      componentSource,
+      componentPath,
+      exportedName,
+      {
+        loadModule: fsModuleLoader,
+        onUnresolved: (detail) => console.warn(
+          `   IR: ${detail} — the page falls back to placeholder IR, so it server-renders as an empty <div id="app"> and shows nothing at all until the client bundle hydrates`,
+        ),
+      },
+    );
+    if (!componentInfo) return null;
+
+    const rootPath = componentInfo.filePath;
+    const rootSource = componentInfo.source;
+
+    // 6. Extract file constants (for Rule 9 static unroll) and string
+    // constants (for static attribute resolution)
+    const fileConstants = analyzer.extractFileConstants(rootSource, rootPath);
+    const stringConstants = analyzer.extractStringConstants(rootSource, rootPath);
+
+    // 7. Extract signal defaults (for slot defaults). A failure here used to be
+    // the compiler's only fully silent one: the signals kept their bindings but
+    // lost their names, so the page shipped anonymous slots the server could
+    // not inject into and no build output said why.
     const signalDefaults = analyzer.extractSignalDefaults(
       componentSource,
       componentPath,
-      entryInfo.componentName,
+      exportedName,
+      {
+        loadModule: fsModuleLoader,
+        onUnresolved: (detail) => console.warn(
+          `   IR: ${detail} — its createSignal defaults cannot be read, so bindings to them land in anonymous 'text:'/'attr:' slots that cannot be injected by name`,
+        ),
+      },
     );
 
-    // 6b. Build import map from the component file (for island signal
-    // extraction below and sub-component resolution in step 10)
-    const componentAst = parse(componentSource, PARSE_OPTS);
-    const componentDir = dirname(componentPath);
+    // 8. Build import map from the root component's own file (for island
+    // signal extraction below)
+    const componentAst = parse(rootSource, PARSE_OPTS);
+    const componentDir = dirname(rootPath);
     const importMap = new Map<string, string>();
-    for (const node of componentAst.program.body) {
-      if (t.isImportDeclaration(node)) {
-        const importPath = node.source.value;
-        for (const spec of node.specifiers) {
-          importMap.set(spec.local.name, importPath);
-        }
-      }
+    for (const [local, binding] of readImportBindings(componentAst as any)) {
+      importMap.set(local, binding.source);
     }
 
-    // 6c. Merge signal defaults from ISLAND component files (first-wins,
+    // 9. Merge signal defaults from ISLAND component files (first-wins,
     // root component authoritative — see mergeIslandSignalDefaults).
     mergeIslandSignalDefaults(
       analyzer,
@@ -284,67 +381,28 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       signalDefaults,
     );
 
-    // 7. Parse the component file to find the return h() tree
-    const componentInfo = analyzer.parseComponentFile(
-      componentSource,
-      componentPath,
-      entryInfo.componentName,
-    );
-    if (!componentInfo) {
-      console.warn(`   IR: could not find return h() tree in ${entryInfo.componentName}`);
-      return null;
-    }
-
-    // 8. Create IrEmitContext and register signal slots with defaults
+    // 10. Create IrEmitContext and register signal slots with defaults
     const ctx = new IrEmitContext();
     const signalSlots = new Map<string, number>();
 
-    for (const [name, sigDefault] of signalDefaults) {
-      let typeHint = TYPE_TEXT;
-      let defaultBytes = new Uint8Array(0);
+    registerSignalSlots(ctx, signalDefaults, signalSlots);
 
-      if (sigDefault.type === 'text' && typeof sigDefault.default === 'string') {
-        typeHint = TYPE_TEXT;
-        defaultBytes = new TextEncoder().encode(sigDefault.default);
-      } else if (sigDefault.type === 'bool' && typeof sigDefault.default === 'boolean') {
-        typeHint = TYPE_BOOL;
-        defaultBytes = new TextEncoder().encode(String(sigDefault.default));
-      } else if (sigDefault.type === 'number' && typeof sigDefault.default === 'number') {
-        typeHint = 0x03; // TYPE_NUMBER
-        defaultBytes = new TextEncoder().encode(String(sigDefault.default));
-      } else if (sigDefault.type === 'null') {
-        typeHint = TYPE_TEXT;
-        // No default bytes for null
-      }
+    // 11. Build resolve callback for sub-components
+    const resolveComponent = createComponentResolver([
+      { path: entryPointPath, source: entrySource },
+      { path: componentPath, source: componentSource },
+      { path: rootPath, source: rootSource },
+    ]);
 
-      const slotId = ctx.addSlot(name, typeHint, SOURCE_CLIENT, defaultBytes);
-      signalSlots.set(name, slotId);
-    }
-
-    // 10. Build resolve callback for sub-components
-    const resolveComponent = (name: string): { source: string; functionName: string; path?: string } | null => {
-      const importPathRaw = importMap.get(name);
-      if (!importPathRaw) return null;
-
-      // Only resolve relative imports (not package imports like 'formajs')
-      if (!importPathRaw.startsWith('.') && !importPathRaw.startsWith('/')) return null;
-
-      const resolvedPath = resolveFilePath(componentDir, importPathRaw);
-      if (!resolvedPath) return null;
-
-      const source = loadComponentSource(resolvedPath);
-      if (source === null) return null;
-      return { source, functionName: name, path: resolvedPath };
-    };
-
-    // 11. Build WalkContext and walk the h() tree
+    // 12. Build WalkContext and walk the h() tree
     const walkCtx: WalkContext = {
-      sourceFile: componentPath,
+      sourceFile: rootPath,
       fileConstants,
       stringConstants,
       signalSlots,
       signalDefaults,
       resolveComponent,
+      loadModule: fsModuleLoader,
       visited: new Set(),
       depth: 0,
       islandNames: entryInfo.islandNames,
@@ -366,7 +424,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       return null;
     }
 
-    // 12. Return the binary and island metadata
+    // 13. Return the binary and island metadata
     return {
       binary: ctx.toBinary(),
       islands: ctx.getIslands(),
@@ -437,6 +495,12 @@ function mergeIslandSignalDefaults(
       islandSource,
       islandPath,
       islandName,
+      {
+        loadModule: fsModuleLoader,
+        onUnresolved: (detail) => console.warn(
+          `   IR: ${detail} — signals declared inside island '${islandName}' get no named slots, so bindings to them land in anonymous 'text:'/'attr:' slots that cannot be injected by name`,
+        ),
+      },
     );
     for (const [sigName, sigDefault] of islandDefaults) {
       const existing = signalDefaults.get(sigName);
@@ -450,65 +514,6 @@ function mergeIslandSignalDefaults(
         );
       }
     }
-  }
-}
-
-/**
- * Read a component source file, transforming JSX syntax to h() calls
- * when the file is .tsx/.jsx (the IR walker only understands h() trees).
- * Returns the (possibly transformed) source, or null if the read fails.
- */
-function loadComponentSource(filePath: string): string | null {
-  try {
-    let source = readFileSync(filePath, 'utf8');
-    if (filePath.endsWith('.tsx') || filePath.endsWith('.jsx')) {
-      try {
-        const esbuild = _require('esbuild');
-        source = esbuild.transformSync(source, {
-          loader: filePath.endsWith('.tsx') ? 'tsx' : 'jsx',
-          jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
-        }).code;
-      } catch { /* use raw source */ }
-    }
-    return source;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Resolve a relative import path to an absolute file path.
- * Tries the path as-is, then with .ts extension.
- */
-function resolveFilePath(fromDir: string, importPath: string): string | null {
-  const base = resolve(fromDir, importPath);
-
-  // Try exact path
-  if (existsSync(base) && !isDirectory(base)) return base;
-
-  // Try with .ts extension
-  const withTs = base + '.ts';
-  if (existsSync(withTs)) return withTs;
-
-  // Try with .tsx extension
-  const withTsx = base + '.tsx';
-  if (existsSync(withTsx)) return withTsx;
-
-  // Try with /index.ts
-  const indexTs = join(base, 'index.ts');
-  if (existsSync(indexTs)) return indexTs;
-
-  return null;
-}
-
-/**
- * Check if a path is a directory (to avoid accidentally reading dirs).
- */
-function isDirectory(filePath: string): boolean {
-  try {
-    return statSync(filePath).isDirectory();
-  } catch {
-    return false;
   }
 }
 

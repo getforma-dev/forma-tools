@@ -11,6 +11,14 @@ import type * as T from '@babel/types';
 import * as t from '@babel/types';
 import _traverse from '@babel/traverse';
 
+import type { ModuleLoader } from './module-loader';
+import {
+  readImportBindings,
+  resolveExportedFunction,
+  returnExpressionOf,
+  type ImportBinding,
+} from './export-resolver';
+
 // Handle CJS/ESM compatibility for @babel/traverse
 const traverse = (typeof _traverse === 'function' ? _traverse : (_traverse as any).default) as typeof _traverse;
 
@@ -29,6 +37,10 @@ export interface EntryPointInfo {
   /** Import mappings from the entry file: local name -> import source string.
    *  Used to resolve island component files imported by the entry. */
   importMap?: Map<string, string>;
+  /** Full import bindings from the entry file: local name -> { source,
+   *  imported }. `import { PageImpl as Page }` binds local `Page` to the name
+   *  `PageImpl` in the target module; looking up `Page` there finds nothing. */
+  importBindings?: Map<string, ImportBinding>;
   /** For inline mount returns: the AST node of the return expression.
    *  When set, componentName is '__inline__' and importPath is ''. */
   inlineReturnNode?: import('@babel/types').Expression;
@@ -39,6 +51,26 @@ export interface ComponentInfo {
   functionName: string;
   /** The AST Expression node from the function's return statement. */
   returnNode: T.Expression;
+  /** File the function is DECLARED in. Differs from the file that was asked
+   *  when a barrel (`export { X } from './x'`) forwarded the export — the
+   *  caller must read constants and imports from THIS file, not the barrel. */
+  filePath: string;
+  /** Source of `filePath` (JSX already transformed to h() calls). */
+  source: string;
+}
+
+/**
+ * Shared options for the lookups that have to answer "which function does this
+ * module export under this name?".
+ */
+export interface AnalyzerLookupOptions {
+  /** Follows `export … from './x'` re-exports across files. Without it those
+   *  forms are reported to `onUnresolved` instead of being followed. */
+  loadModule?: ModuleLoader;
+  /** Receives the reason a name could not be followed to a function, naming
+   *  the file and the construct. The caller adds the consequence, which
+   *  differs by call site. Nothing about a failed lookup is silent. */
+  onUnresolved?: (detail: string) => void;
 }
 
 export interface SignalDefault {
@@ -79,15 +111,12 @@ export class ComponentAnalyzer {
   parseEntryPoint(source: string, filename: string): EntryPointInfo | null {
     const ast = parse(source, PARSE_OPTS);
 
-    // Step 1: Collect import mappings: localName -> importPath
+    // Step 1: Collect import mappings: localName -> importPath (plus the name
+    // the target module exports it under, which an alias makes different).
+    const importBindings = readImportBindings(ast);
     const importMap = new Map<string, string>();
-    for (const node of ast.program.body) {
-      if (t.isImportDeclaration(node)) {
-        const importPath = node.source.value;
-        for (const spec of node.specifiers) {
-          importMap.set(spec.local.name, importPath);
-        }
-      }
+    for (const [local, binding] of importBindings) {
+      importMap.set(local, binding.source);
     }
 
     // Step 2: Find mount(() => Component(), '#app') call
@@ -112,7 +141,13 @@ export class ComponentAnalyzer {
           if (t.isIdentifier(innerCall.callee)) {
             const componentName = innerCall.callee.name;
             const importPath = importMap.get(componentName);
-            if (importPath) {
+            // Only a RELATIVE import is a component file this compiler can
+            // open. `mount(() => h('div', …), '#app')` matched here too and
+            // sent the plugin looking for a file called 'formajs', which fails
+            // — and a failure at this step drops the WHOLE page to placeholder
+            // IR. It is an inline mount; Pattern 3 below is where it belongs.
+            // Verified by: packages/compiler/tests/ssr-emission.test.ts > "treats an expression-bodied mount as an inline mount"
+            if (importPath && (importPath.startsWith('.') || importPath.startsWith('/'))) {
               result = { componentName, importPath };
               path.stop();
             }
@@ -123,7 +158,7 @@ export class ComponentAnalyzer {
         if (!result && t.isIdentifier(firstArg)) {
           const componentName = firstArg.name;
           const importPath = importMap.get(componentName);
-          if (importPath) {
+          if (importPath && (importPath.startsWith('.') || importPath.startsWith('/'))) {
             result = { componentName, importPath };
             path.stop();
           }
@@ -148,11 +183,31 @@ export class ComponentAnalyzer {
             }
           }
         }
+
+        // Pattern 3b: mount(() => <expr>, '#app') — an expression-bodied arrow
+        // that Pattern 1 did not claim, because the thing it calls is not an
+        // imported component: `mount(() => h('div', …), '#app')` or a page
+        // component declared in the entry file itself. The arrow's body IS the
+        // tree; the entry file is the module scope it resolves against.
+        // Verified by: packages/compiler/tests/ssr-emission.test.ts > "treats an expression-bodied mount as an inline mount"
+        if (
+          !result &&
+          t.isArrowFunctionExpression(firstArg) &&
+          !t.isBlockStatement(firstArg.body)
+        ) {
+          result = {
+            componentName: '__inline__',
+            importPath: '',
+            inlineReturnNode: firstArg.body,
+          };
+          path.stop();
+        }
       },
     });
 
     if (result) {
       (result as EntryPointInfo).importMap = importMap;
+      (result as EntryPointInfo).importBindings = importBindings;
       // The mount() patterns (including inline block-body mounts) can ALSO
       // register islands via activateIslands({...}) — scan for them so the
       // walker never inlines an island component and the SSR plugin can
@@ -212,86 +267,55 @@ export class ComponentAnalyzer {
   }
 
   /**
-   * Parse a component file and find the named export function.
-   * Extracts the return statement's expression (the h() call tree AST node).
+   * Parse a component file and find the function it exports under
+   * `functionName`, then extract that function's returned expression (the h()
+   * call tree AST node).
    *
-   * Returns the function name and return node, or null if not found.
+   * Every export form resolveExportedFunction understands works here —
+   * including `export { Page }`, which is what esbuild rewrites EVERY
+   * `export function Page()` in a .tsx file into. This used to read
+   * `ExportNamedDeclaration.declaration` only, so a JSX page resolved to
+   * nothing and the whole page fell back to placeholder IR.
+   * Verified by: packages/compiler/tests/component-analyzer.test.ts > "resolves the specifier export shape esbuild emits for .tsx"
+   *
+   * A non-exported top-level declaration is deliberately NOT accepted: the
+   * name got here through an `import`, and a binding the entry cannot import
+   * must not be server-rendered as though it could.
+   *
+   * Returns null when the name cannot be followed to a function; the reason
+   * goes to `options.onUnresolved` rather than nowhere.
    */
   parseComponentFile(
     source: string,
     filename: string,
     functionName: string,
+    options: AnalyzerLookupOptions = {},
   ): ComponentInfo | null {
-    const ast = parse(source, PARSE_OPTS);
-
-    let returnNode: T.Expression | null = null;
-
-    traverse(ast, {
-      // Match: export function ComponentName() { ... return h(...); }
-      ExportNamedDeclaration(path) {
-        const decl = path.node.declaration;
-
-        // Case 1: export function Name() { ... }
-        if (t.isFunctionDeclaration(decl) && decl.id?.name === functionName) {
-          // Walk the function body for return statements
-          const funcPath = path.get('declaration') as any;
-          funcPath.traverse({
-            ReturnStatement(retPath: any) {
-              if (retPath.node.argument) {
-                returnNode = retPath.node.argument;
-                retPath.stop();
-              }
-            },
-            // Don't descend into nested functions
-            FunctionDeclaration(p: any) { p.skip(); },
-            FunctionExpression(p: any) { p.skip(); },
-            ArrowFunctionExpression(p: any) { p.skip(); },
-          });
-          path.stop();
-          return;
-        }
-
-        // Case 2: export const Name = function() { ... }
-        // or:     export const Name = () => { ... }
-        if (t.isVariableDeclaration(decl)) {
-          for (const declarator of decl.declarations) {
-            if (
-              t.isIdentifier(declarator.id) &&
-              declarator.id.name === functionName &&
-              declarator.init
-            ) {
-              const init = declarator.init;
-
-              // Arrow with expression body: export const Name = () => h(...)
-              if (t.isArrowFunctionExpression(init) && !t.isBlockStatement(init.body)) {
-                returnNode = init.body;
-                path.stop();
-                return;
-              }
-
-              // Arrow/function with block body
-              if (
-                (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) &&
-                t.isBlockStatement(init.body)
-              ) {
-                for (const stmt of init.body.body) {
-                  if (t.isReturnStatement(stmt) && stmt.argument) {
-                    returnNode = stmt.argument;
-                    break;
-                  }
-                }
-                path.stop();
-                return;
-              }
-            }
-          }
-        }
-      },
+    const lookup = resolveExportedFunction(source, filename, functionName, {
+      loadModule: options.loadModule,
+      allowLocal: false,
+      allowNested: false,
     });
 
-    if (!returnNode) return null;
+    if (lookup.kind === 'unresolved') {
+      options.onUnresolved?.(lookup.detail);
+      return null;
+    }
 
-    return { functionName, returnNode };
+    const returnNode = returnExpressionOf(lookup.fn);
+    if (!returnNode) {
+      options.onUnresolved?.(
+        `'${functionName}' in ${lookup.filePath} has no return statement the compiler can follow to an h() call`,
+      );
+      return null;
+    }
+
+    return {
+      functionName,
+      returnNode,
+      filePath: lookup.filePath,
+      source: lookup.source,
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -543,7 +567,7 @@ export class ComponentAnalyzer {
 
   /**
    * Find `const [name, setName] = createSignal(initialValue)` patterns
-   * inside a named exported function.
+   * inside the function a module exports under `functionName`.
    *
    * Returns a Map from signal name to its default info.
    */
@@ -551,22 +575,48 @@ export class ComponentAnalyzer {
     source: string,
     filename: string,
     functionName: string,
+    options: AnalyzerLookupOptions = {},
+  ): Map<string, SignalDefault> {
+    const signals = new Map<string, SignalDefault>();
+    const body = this.findExportedFunctionBody(source, filename, functionName, options);
+    if (body) this.collectSignalDefaults(body.body, signals, filename);
+    return signals;
+  }
+
+  /**
+   * Find `const [name, setName] = createSignal(initialValue)` patterns in an
+   * entry point that mounts inline: `mount(() => { … }, '#app')`.
+   *
+   * There is no exported component to look inside, so the component's scope is
+   * the module's top level plus the mount callback's own body — both are
+   * collected. Asking for an exported function instead (the old code asked for
+   * one literally named `__inline__`) could only ever come back empty, and an
+   * inline-mount page therefore got ZERO named signal slots.
+   * Verified by: packages/compiler/tests/component-analyzer.test.ts > "collects module-scope and mount-callback signals for an inline mount"
+   *
+   * Returns a Map from signal name to its default info.
+   */
+  extractInlineMountSignalDefaults(
+    source: string,
+    filename: string,
   ): Map<string, SignalDefault> {
     const ast = parse(source, PARSE_OPTS);
     const signals = new Map<string, SignalDefault>();
 
-    // Capture reference for use inside traverse callback
+    this.collectSignalDefaults(ast.program.body, signals, filename);
+
     const self = this;
-
-    // Find the target function
     traverse(ast, {
-      ExportNamedDeclaration(path) {
-        const funcBody = self.findExportedFunctionBody(path.node, functionName);
-        if (!funcBody) return;
-
-        // Walk the function body for createSignal calls
-        self.collectSignalDefaults(funcBody.body, signals, filename);
-
+      CallExpression(path) {
+        if (!t.isIdentifier(path.node.callee) || path.node.callee.name !== 'mount') return;
+        const firstArg = path.node.arguments[0];
+        if (
+          firstArg
+          && t.isArrowFunctionExpression(firstArg)
+          && t.isBlockStatement(firstArg.body)
+        ) {
+          self.collectSignalDefaults(firstArg.body.body, signals, filename);
+        }
         path.stop();
       },
     });
@@ -589,65 +639,75 @@ export class ComponentAnalyzer {
     source: string,
     filename: string,
     componentName: string,
+    options: AnalyzerLookupOptions = {},
   ): Map<string, SignalDefault> {
     const ast = parse(source, PARSE_OPTS);
     const signals = new Map<string, SignalDefault>();
 
-    // (a) Module top-level createSignal declarations
+    // (a) Module top-level createSignal declarations of the file we were
+    //     pointed at.
     this.collectSignalDefaults(ast.program.body, signals, filename);
 
-    // (b) Top-level statements of the exported component function
-    const self = this;
-    traverse(ast, {
-      ExportNamedDeclaration(path) {
-        const funcBody = self.findExportedFunctionBody(path.node, componentName);
-        if (!funcBody) return;
-
-        self.collectSignalDefaults(funcBody.body, signals, filename);
-
-        path.stop();
-      },
+    const lookup = resolveExportedFunction(source, filename, componentName, {
+      loadModule: options.loadModule,
+      allowLocal: false,
+      allowNested: false,
     });
+    if (lookup.kind === 'unresolved') {
+      options.onUnresolved?.(lookup.detail);
+      return signals;
+    }
+
+    // (b) When a barrel forwarded the export, the island's code — and its
+    //     module-scope signals — live in ANOTHER file. Reading only the
+    //     barrel's module scope would find nothing there.
+    if (lookup.filePath !== filename) {
+      this.collectSignalDefaults(lookup.ast.program.body, signals, lookup.filePath);
+    }
+
+    // (c) Top-level statements of the component function itself.
+    if (t.isBlockStatement(lookup.fn.body)) {
+      this.collectSignalDefaults(lookup.fn.body.body, signals, lookup.filePath);
+    }
 
     return signals;
   }
 
   /**
-   * Match an ExportNamedDeclaration against a function name and return its
-   * block body. Handles `export function Name() {}`, `export const Name =
-   * () => {}`, and `export const Name = function() {}`.
+   * Body of the function a module exports under `functionName`, through the
+   * one shared export resolver — so a `.tsx` island, whose
+   * `export function Counter()` esbuild has rewritten to `export { Counter }`,
+   * is read the same as its `.ts` twin.
+   *
+   * This was the SILENT instance of the export-form defect: byte-identical
+   * `.ts` and `.tsx` islands produced different IR (named slot `hits` with its
+   * default vs. anonymous `text:0` with none) and neither build said a word.
+   * Failing to find the body now reports why.
+   * Verified by: packages/compiler/tests/component-analyzer.test.ts > "reads a .tsx island's in-function signal through the esbuild specifier shape"
    */
   private findExportedFunctionBody(
-    node: T.ExportNamedDeclaration,
+    source: string,
+    filename: string,
     functionName: string,
+    options: AnalyzerLookupOptions,
   ): T.BlockStatement | null {
-    const decl = node.declaration;
+    const lookup = resolveExportedFunction(source, filename, functionName, {
+      loadModule: options.loadModule,
+      allowLocal: false,
+      allowNested: false,
+    });
 
-    // export function Name() { ... }
-    if (t.isFunctionDeclaration(decl) && decl.id?.name === functionName) {
-      return decl.body;
+    if (lookup.kind === 'unresolved') {
+      options.onUnresolved?.(lookup.detail);
+      return null;
     }
 
-    // export const Name = () => { ... } or export const Name = function() { ... }
-    if (t.isVariableDeclaration(decl)) {
-      for (const declarator of decl.declarations) {
-        if (
-          t.isIdentifier(declarator.id) &&
-          declarator.id.name === functionName &&
-          declarator.init
-        ) {
-          const init = declarator.init;
-          if (
-            (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) &&
-            t.isBlockStatement(init.body)
-          ) {
-            return init.body;
-          }
-        }
-      }
+    if (!t.isBlockStatement(lookup.fn.body)) {
+      // An expression-bodied arrow declares no signals — nothing to report.
+      return null;
     }
 
-    return null;
+    return lookup.fn.body;
   }
 
   /**

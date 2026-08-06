@@ -22,6 +22,10 @@ describe('parseEntryPoint', () => {
         ['mount', 'formajs'],
         ['OnboardingPage', './OnboardingPage'],
       ]),
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['OnboardingPage', { source: './OnboardingPage', imported: 'OnboardingPage' }],
+      ]),
     });
   });
 
@@ -48,6 +52,13 @@ describe('parseEntryPoint', () => {
         ['mount', 'formajs'],
         ['Dashboard', './Dashboard'],
       ]),
+      // A DEFAULT import binds the local name to the module's `default`
+      // export, not to an export named 'Dashboard' — the resolver has to look
+      // for the right one over there.
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['Dashboard', { source: './Dashboard', imported: 'default' }],
+      ]),
     });
   });
 
@@ -64,6 +75,10 @@ describe('parseEntryPoint', () => {
       importMap: new Map([
         ['mount', 'formajs'],
         ['UserProfile', './pages/UserProfile'],
+      ]),
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['UserProfile', { source: './pages/UserProfile', imported: 'UserProfile' }],
       ]),
     });
   });
@@ -82,17 +97,41 @@ describe('parseEntryPoint', () => {
         ['mount', 'formajs'],
         ['App', './App'],
       ]),
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['App', { source: './App', imported: 'App' }],
+      ]),
     });
   });
 
-  it('returns null when component is not imported', () => {
+  it('treats a mount of a locally-declared component as an inline mount', () => {
+    // There is no component FILE to open — the component is right here. This
+    // used to return null, which drops the whole page to placeholder IR; the
+    // arrow's body is the tree, and the entry file is the scope it resolves
+    // against.
     const source = `
       import { mount } from 'formajs';
       function LocalComponent() { return null; }
       mount(() => LocalComponent(), '#app');
     `;
     const result = analyzer.parseEntryPoint(source, 'app.ts');
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.inlineReturnNode!.type).toBe('CallExpression');
+  });
+
+  it('does not treat a PACKAGE import as a component file', () => {
+    // `mount(() => h('div', …), '#app')` matched the named-component pattern
+    // because `h` is an imported identifier — so the plugin went looking for a
+    // component file named 'formajs', failed, and dropped the page to
+    // placeholder IR. Only a relative import names a file this compiler opens.
+    const source = `
+      import { h, mount } from 'formajs';
+      mount(() => h('div', { id: 'app' }, 'hi'), '#app');
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.ts');
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.importPath).toBe('');
   });
 
   it('handles re-exported named import', () => {
@@ -108,6 +147,12 @@ describe('parseEntryPoint', () => {
       importMap: new Map([
         ['mount', 'formajs'],
         ['Page', './LoginPage'],
+      ]),
+      // The ALIAS is the whole point: local `Page` is exported as `LoginPage`
+      // by ./LoginPage, so looking up 'Page' over there would find nothing.
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['Page', { source: './LoginPage', imported: 'LoginPage' }],
       ]),
     });
   });
@@ -275,6 +320,45 @@ describe('parseComponentFile', () => {
     const result = analyzer.parseComponentFile(source, 'Widget.ts', 'Widget');
     expect(result).not.toBeNull();
     expect(result!.returnNode.type).toBe('CallExpression');
+  });
+
+  it('resolves the specifier export shape esbuild emits for .tsx', () => {
+    // Every `export function X()` in a .tsx file arrives here as a bare
+    // declaration plus `export { X }`. Reading only
+    // ExportNamedDeclaration.declaration finds nothing, and the page falls
+    // back to placeholder IR.
+    const source = `
+      import { h } from 'formajs';
+      function Page() { return h('main', null, 'hi'); }
+      export { Page };
+    `;
+    const result = analyzer.parseComponentFile(source, 'page.tsx', 'Page');
+    expect(result).not.toBeNull();
+    expect(result!.returnNode.type).toBe('CallExpression');
+  });
+
+  it('follows an export alias to the real declaration', () => {
+    const source = `
+      import { h } from 'formajs';
+      function PageImpl() { return h('main', null, 'hi'); }
+      export { PageImpl as Page };
+    `;
+    expect(analyzer.parseComponentFile(source, 'page.ts', 'Page')).not.toBeNull();
+  });
+
+  it('reports WHY a name could not be followed instead of returning a bare null', () => {
+    const details: string[] = [];
+    const result = analyzer.parseComponentFile(
+      `export const Page = 'not a component';`,
+      'page.ts',
+      'Page',
+      { onUnresolved: (d) => details.push(d) },
+    );
+    expect(result).toBeNull();
+    // The file and the construct: "no export named Page" would send the author
+    // looking for a missing export that is right there.
+    expect(details.join('\n')).toContain('page.ts');
+    expect(details.join('\n')).toContain('StringLiteral');
   });
 
   it('does not extract return from nested function', () => {
@@ -777,5 +861,92 @@ describe('extractIslandSignalDefaults', () => {
     const result = analyzer.extractIslandSignalDefaults(source, 'island.ts', 'ExportedSignalIsland');
     expect(result.size).toBe(1);
     expect(result.get('count')).toEqual({ type: 'number', default: 0 });
+  });
+
+  it("reads a .tsx island's in-function signal through the esbuild specifier shape", () => {
+    // This was the compiler's one fully SILENT failure: the .ts and .tsx twins
+    // are byte-identical source, but only the .tsx one arrives rewritten — and
+    // the old lookup could not see the rewrite, so the slot was renamed
+    // `text:0`, lost its default, and no build output said a word.
+    const rewritten = `
+      import { createSignal, h } from 'formajs';
+      function Counter() {
+        const [hits] = createSignal(42);
+        return h('button', null, () => hits());
+      }
+      export { Counter };
+    `;
+    const result = analyzer.extractIslandSignalDefaults(rewritten, 'counter.tsx', 'Counter');
+    expect(result.get('hits')).toEqual({ type: 'number', default: 42 });
+  });
+
+  it("reads module-scope signals from the file a barrel forwards to", () => {
+    // Pointed at the barrel, the island's module scope is one file away.
+    // Reading only the barrel's own top level finds nothing there.
+    const modules: Record<string, string> = {
+      './chip': `
+        import { createSignal, h } from 'formajs';
+        const [state] = createSignal('degraded');
+        function ChipImpl() { return h('em', null, () => state()); }
+        export { ChipImpl as StatusChip };
+      `,
+    };
+    const result = analyzer.extractIslandSignalDefaults(
+      `export { StatusChip } from './chip';`,
+      'index.ts',
+      'StatusChip',
+      { loadModule: (_from, importPath) =>
+        importPath in modules ? { path: importPath, source: modules[importPath]! } : null },
+    );
+    expect(result.get('state')).toEqual({ type: 'text', default: 'degraded' });
+  });
+
+  it('reports a component whose body it cannot reach instead of returning empty', () => {
+    const details: string[] = [];
+    const result = analyzer.extractIslandSignalDefaults(
+      `import { h } from 'formajs';\nexport function Other() { return h('div', null); }`,
+      'island.ts',
+      'Missing',
+      { onUnresolved: (d) => details.push(d) },
+    );
+    expect(result.size).toBe(0);
+    expect(details.join('\n')).toContain("no export named 'Missing'");
+  });
+});
+
+// ===========================================================================
+// Inline mount signal defaults — extractInlineMountSignalDefaults
+// ===========================================================================
+
+describe('extractInlineMountSignalDefaults', () => {
+  it('collects module-scope and mount-callback signals for an inline mount', () => {
+    // An inline mount has no exported component. The old code asked for one
+    // named `__inline__` — a lookup that could never match — so an
+    // inline-mount page got ZERO named signal slots and every binding landed
+    // in an anonymous `text:`/`attr:` slot no handler can address by name.
+    const source = `
+      import { h, mount, createSignal } from 'formajs';
+      const [status] = createSignal('idle');
+      mount(() => {
+        const [open] = createSignal(false);
+        return h('div', { id: 'app' }, () => status(), () => open());
+      }, '#app');
+    `;
+    const result = analyzer.extractInlineMountSignalDefaults(source, 'app.ts');
+    expect([...result]).toEqual([
+      ['status', { type: 'text', default: 'idle' }],
+      ['open', { type: 'bool', default: false }],
+    ]);
+  });
+
+  it('does not reach into a component function that is not the mount callback', () => {
+    // Signals inside a sub-component belong to that component's scope; the
+    // walk registers them where it inlines it, not on the page.
+    const source = `
+      import { h, mount, createSignal } from 'formajs';
+      function Sidebar() { const [collapsed] = createSignal(true); return h('nav', null); }
+      mount(() => h('div', { id: 'app' }, Sidebar()), '#app');
+    `;
+    expect([...analyzer.extractInlineMountSignalDefaults(source, 'app.ts')]).toEqual([]);
   });
 });

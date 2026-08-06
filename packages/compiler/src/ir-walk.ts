@@ -19,15 +19,12 @@
  *  12. null/undefined/false      -> skip
  */
 
-import { parse } from '@babel/parser';
 import * as t from '@babel/types';
-import _traverse from '@babel/traverse';
 import { IrEmitContext } from './ir-emit.js';
 import { ComponentAnalyzer } from './component-analyzer.js';
+import { resolveExportedFunction, returnExpressionOf } from './export-resolver.js';
+import type { ModuleLoader } from './module-loader.js';
 import { VOID_TAGS, isEventProp, isStaticLiteral, isUndefinedIdentifier } from './utils.js';
-
-// Handle CJS/ESM compatibility for @babel/traverse
-const traverse = (typeof _traverse === 'function' ? _traverse : (_traverse as any).default) as typeof _traverse;
 
 /** Maximum depth for sub-component resolution. Prevents unbounded AST parsing. */
 export const MAX_RESOLVE_DEPTH = 3;
@@ -277,8 +274,22 @@ export interface WalkContext {
    *  the author has to edit, not the page that included it. */
   sourceFile?: string;
   /** Resolve a sub-component call to its source file and function name.
+   *
+   *  `fromFile` is the file the CALL appears in, and the resolver must read
+   *  that file's imports — not the entry point's. A resolver closed over the
+   *  entry's import map could only see components the entry itself imported,
+   *  so anything a page file imported became an empty island shell the moment
+   *  the entry did not happen to import it too.
+   *  Verified by: packages/compiler/tests/ir-walk.test.ts > "asks the resolver for the file the CALL is in, not the entry point"
+   *
    *  `path` is optional and only feeds diagnostics (see sourceFile). */
-  resolveComponent?: (name: string) => { source: string; functionName: string; path?: string } | null;
+  resolveComponent?: (
+    name: string,
+    fromFile?: string,
+  ) => { source: string; functionName: string; path?: string } | null;
+  /** Follows `export … from './x'` re-exports when resolving a sub-component,
+   *  so a component imported through an index barrel still inlines. */
+  loadModule?: ModuleLoader;
   /** Set of visited component names for cycle detection. */
   visited?: Set<string>;
   /** Current depth for sub-component resolution (max 3). */
@@ -318,15 +329,6 @@ export interface WalkContext {
    *  Island components are NEVER inlined — they always emit ISLAND_START/ISLAND_END. */
   islandNames?: Set<string>;
 }
-
-// ---------------------------------------------------------------------------
-// Parser Options
-// ---------------------------------------------------------------------------
-
-const PARSE_OPTS = {
-  sourceType: 'module' as const,
-  plugins: ['typescript' as const],
-};
 
 // ---------------------------------------------------------------------------
 // Per-file Constant Scoping
@@ -724,13 +726,19 @@ export function walkCallExpression(
       let reason = 'could not be resolved to a source file (the compiler follows relative imports only)';
       if (walkCtx.resolveComponent) {
         try {
-          const resolved = walkCtx.resolveComponent(componentName);
+          const resolved = walkCtx.resolveComponent(componentName, walkCtx.sourceFile);
           if (!resolved) {
             reason = 'could not be resolved to a source file (the compiler follows relative imports only)';
           } else {
-            const componentReturn = resolveSubComponent(
-              resolved.source, resolved.functionName, node, hName,
+            const sub = resolveSubComponent(
+              resolved.source,
+              resolved.path ?? walkCtx.sourceFile ?? '<unknown>',
+              resolved.functionName,
+              node,
+              hName,
+              walkCtx.loadModule,
             );
+            const componentReturn = sub?.returnNode;
             if (!componentReturn || !t.isCallExpression(componentReturn)) {
               reason = 'has no return statement the compiler can follow to an h() call';
             } else {
@@ -751,8 +759,8 @@ export function walkCallExpression(
                 newVisited.add(componentName);
                 const islandWalkCtx: WalkContext = {
                   ...walkCtx,
-                  ...extractResolvedConstants(resolved.source, walkCtx),
-                  sourceFile: resolved.path ?? walkCtx.sourceFile,
+                  ...extractResolvedConstants(sub.source, walkCtx),
+                  sourceFile: sub.filePath,
                   visited: newVisited,
                   depth: (walkCtx.depth ?? 0) + 1,
                 };
@@ -813,7 +821,7 @@ export function walkCallExpression(
     };
 
     if (walkCtx.resolveComponent) {
-      const resolved = walkCtx.resolveComponent(componentName);
+      const resolved = walkCtx.resolveComponent(componentName, walkCtx.sourceFile);
       if (resolved) {
         // Cycle detection
         const visited = walkCtx.visited || new Set<string>();
@@ -856,21 +864,23 @@ export function walkCallExpression(
 
         // Try to resolve and walk the sub-component
         try {
-          const componentReturn = resolveSubComponent(
+          const sub = resolveSubComponent(
             resolved.source,
+            resolved.path ?? walkCtx.sourceFile ?? '<unknown>',
             resolved.functionName,
             node,
             hName,
+            walkCtx.loadModule,
           );
 
-          if (componentReturn && t.isCallExpression(componentReturn)) {
+          if (sub && t.isCallExpression(sub.returnNode)) {
             const newVisited = new Set(visited);
             newVisited.add(componentName);
 
-            walkHTree(componentReturn, hName, ctx, {
+            walkHTree(sub.returnNode, hName, ctx, {
               ...walkCtx,
-              ...extractResolvedConstants(resolved.source, walkCtx),
-              sourceFile: resolved.path ?? walkCtx.sourceFile,
+              ...extractResolvedConstants(sub.source, walkCtx),
+              sourceFile: sub.filePath,
               visited: newVisited,
               depth: depth + 1,
             });
@@ -1624,160 +1634,53 @@ function substituteInExpr(
 // Rule 10: Sub-component Resolution
 // ---------------------------------------------------------------------------
 
+interface ResolvedSubComponent {
+  /** The h() call expression the component returns, props already substituted. */
+  returnNode: t.Expression;
+  /** File the component is DECLARED in — the barrel a page imports through is
+   *  not where the code lives, and module-scope constants must be read from
+   *  the file that actually holds it. */
+  filePath: string;
+  /** Source of `filePath`. */
+  source: string;
+}
+
 /**
- * Resolve a sub-component by parsing its source and finding the function.
- * Checks exported functions first, then falls back to non-exported (local)
- * function declarations — enabling inlining of file-local helpers like
- * Sidebar() or TopBar() that are defined but not exported.
+ * Resolve a sub-component to the tree it returns, through the one shared
+ * export resolver (export-resolver.ts) — the same code path the root page and
+ * the signal-default extractors use, so the three can no longer disagree about
+ * which export forms exist.
  *
- * Returns the h() call expression from the function's return statement, with
- * prop substitutions applied.
+ * `allowLocal`/`allowNested` are on because a sub-component call CAN name a
+ * file-local helper: `function Sidebar()` beside the mount, or a `navItem`
+ * arrow declared inside the mount callback. Those are not importable, but
+ * nothing imported them — the call site is in the same file.
+ *
+ * Returns the h() call expression from the function's return statement with
+ * prop substitutions applied, plus the file it actually came from.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "inlines a sub-component re-exported through an index barrel"
  */
 function resolveSubComponent(
   source: string,
+  filePath: string,
   functionName: string,
   callNode: t.CallExpression,
   hName: string,
-): t.Expression | null {
-  let ast;
-  try {
-    ast = parse(source, PARSE_OPTS);
-  } catch {
-    return null;
-  }
+  loadModule?: ModuleLoader,
+): ResolvedSubComponent | null {
+  const lookup = resolveExportedFunction(source, filePath, functionName, {
+    loadModule,
+    allowLocal: true,
+    allowNested: true,
+  });
+  if (lookup.kind === 'unresolved') return null;
 
-  let returnNode: t.Expression | null = null;
+  const returnNode = returnExpressionOf(lookup.fn);
+  if (!returnNode) return null;
+
   /** The component's first parameter — its props binding, needed to substitute
    *  call-site prop values into the returned tree (see substituteProps). */
-  let paramNode: t.Node | null = null;
-
-  // Pass 1: Check exported declarations
-  traverse(ast, {
-    ExportNamedDeclaration(path) {
-      const decl = path.node.declaration;
-
-      // export function Name() { ... }
-      if (t.isFunctionDeclaration(decl) && decl.id?.name === functionName) {
-        paramNode = decl.params[0] ?? null;
-        const funcPath = path.get('declaration') as any;
-        funcPath.traverse({
-          ReturnStatement(retPath: any) {
-            if (retPath.node.argument) {
-              returnNode = retPath.node.argument;
-              retPath.stop();
-            }
-          },
-          FunctionDeclaration(p: any) { p.skip(); },
-          FunctionExpression(p: any) { p.skip(); },
-          ArrowFunctionExpression(p: any) { p.skip(); },
-        });
-        path.stop();
-        return;
-      }
-
-      // export const Name = () => ...
-      if (t.isVariableDeclaration(decl)) {
-        for (const declarator of decl.declarations) {
-          if (
-            t.isIdentifier(declarator.id)
-            && declarator.id.name === functionName
-            && declarator.init
-          ) {
-            const init = declarator.init;
-            if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
-              paramNode = init.params[0] ?? null;
-            }
-
-            if (t.isArrowFunctionExpression(init) && !t.isBlockStatement(init.body)) {
-              returnNode = init.body;
-              path.stop();
-              return;
-            }
-
-            if (
-              (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init))
-              && t.isBlockStatement(init.body)
-            ) {
-              for (const stmt of init.body.body) {
-                if (t.isReturnStatement(stmt) && stmt.argument) {
-                  returnNode = stmt.argument;
-                  break;
-                }
-              }
-              path.stop();
-              return;
-            }
-          }
-        }
-      }
-    },
-  });
-
-  // Pass 2: If not found as an export, check non-exported (local) declarations.
-  // This enables inlining of file-local component helpers like Sidebar/TopBar.
-  if (!returnNode) {
-    traverse(ast, {
-      // function Name() { ... }  (top-level, non-exported)
-      FunctionDeclaration(path) {
-        if (path.parent.type !== 'Program') return;
-        if (path.node.id?.name !== functionName) return;
-
-        paramNode = path.node.params[0] ?? null;
-        path.traverse({
-          ReturnStatement(retPath: any) {
-            if (retPath.node.argument) {
-              returnNode = retPath.node.argument;
-              retPath.stop();
-            }
-          },
-          FunctionDeclaration(p: any) { p.skip(); },
-          FunctionExpression(p: any) { p.skip(); },
-          ArrowFunctionExpression(p: any) { p.skip(); },
-        });
-        path.stop();
-      },
-
-      // const Name = () => ... or const Name = function() { ... }  (top-level, non-exported)
-      VariableDeclaration(path) {
-        if (path.parent.type !== 'Program') return;
-
-        for (const declarator of path.node.declarations) {
-          if (
-            t.isIdentifier(declarator.id)
-            && declarator.id.name === functionName
-            && declarator.init
-          ) {
-            const init = declarator.init;
-            if (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init)) {
-              paramNode = init.params[0] ?? null;
-            }
-
-            if (t.isArrowFunctionExpression(init) && !t.isBlockStatement(init.body)) {
-              returnNode = init.body;
-              path.stop();
-              return;
-            }
-
-            if (
-              (t.isArrowFunctionExpression(init) || t.isFunctionExpression(init))
-              && t.isBlockStatement(init.body)
-            ) {
-              for (const stmt of init.body.body) {
-                if (t.isReturnStatement(stmt) && stmt.argument) {
-                  returnNode = stmt.argument;
-                  break;
-                }
-              }
-              path.stop();
-              return;
-            }
-          }
-        }
-      },
-    });
-  }
-
-  if (!returnNode) return null;
+  const paramNode: t.Node | null = lookup.fn.params[0] ?? null;
 
   // Apply prop substitutions from the call arguments
   // Pattern: Alert({ message: 'Saved', variant: 'success' })
@@ -1788,7 +1691,7 @@ function resolveSubComponent(
     }
   }
 
-  return returnNode;
+  return { returnNode, filePath: lookup.filePath, source: lookup.source };
 }
 
 /**

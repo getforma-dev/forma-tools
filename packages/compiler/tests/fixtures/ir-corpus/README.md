@@ -1,10 +1,10 @@
 # FMIR cross-implementation contract corpus
 
-Each subdirectory is a complete miniature Forma app: `app.ts` is the entry
-point (the file the esbuild SSR plugin points `generateRealIr` at), plus the
-component files it imports. `npm run emit:corpus` runs the REAL compiler over
-every case and writes `<case>.ir` — the same FMIR binary a production build
-would ship.
+Each subdirectory is a complete miniature Forma app: `app.ts` (or `app.tsx`) is
+the entry point (the file the esbuild SSR plugin points `generateRealIr` at),
+plus the component files it imports. `npm run emit:corpus` runs the REAL
+compiler over every case and writes `<case>.ir` — the same FMIR binary a
+production build would ship.
 
 These files are never imported by the TypeScript build or by any vitest suite;
 they are read off disk exactly as the plugin reads a real page, so the corpus
@@ -48,6 +48,41 @@ the same byte. Only the Rust side turns the wrong byte into missing rows.
 | `list-same-source` | `createList` over the same source twice — `LIST` + `PROP`, array/item/prop slots |
 | `nested-islands` | an island whose subtree contains another island, plus the same island again at page level |
 | `unicode-emoji` | non-ASCII and emoji in text, static attrs and a signal default (UTF-8 length prefixes) |
+| `jsx-page` | an **all-`.tsx`** app: entry, page, sibling sub-component and island, every one of them reaching the analyzer through esbuild's `export { X }` rewrite |
+| `barrel-exports` | every component reached through an `index.ts` barrel: `export { X } from`, `export * from`, and `export { XImpl as X }` |
+
+### Why the last two exist
+
+These two are not new opcodes — they are new *ways of reaching* the compiler,
+and the compiler could not follow either one. The lookup that answers "which
+function does this module export under this name?" existed in three
+disagreeing copies, and all three read only `ExportNamedDeclaration.declaration`.
+That is the one form esbuild never emits: it rewrites every
+`export function Card() {}` in a `.tsx` file into
+
+```js
+function Card() { … }
+export { Card };
+```
+
+so **every** `.tsx` page compiled to placeholder IR — `<div id="app"></div>`,
+no slots, no islands, no server-rendered content — while the build printed one
+misleading line (`could not find return h() tree`) and exited 0. Barrels failed
+the same way, silently.
+
+The old corpus could not have caught it: all 22 fixture files were `.ts`, every
+one used `export function`, and `.tsx` appeared in the suite only as a
+hand-written filename label on already-transformed source. The extension is the
+entire trigger — it is what makes the compiler run esbuild over the file at all
+— so a fixture that is not really on disk with that extension tests nothing.
+
+`crates/forma-ir/tests/js_emitter_contract.rs` gives these two cases an extra
+assertion (`resolution_cases_ship_named_islands_over_named_slots`): the islands
+must carry their real component names rather than a minted `island_<n>`, must
+carry non-empty slot ids, and the page must have slots named after its signals
+carrying their defaults. The golden alone would not catch a relapse — a
+degraded emit is still a valid, walkable module, and `UPDATE_GOLDEN` would
+happily bless the empty div.
 
 ## What the consumer side asserts
 

@@ -732,6 +732,61 @@ describe('IR Walk Engine', () => {
       expect(getIslands(binary)).toEqual([]);
     });
 
+    it('asks the resolver for the file the CALL is in, not the entry point', () => {
+      // A resolver closed over the entry's imports could only ever see what
+      // the entry imported. Passing the current file is what lets a page
+      // resolve its own components — the context is spread-copied on every
+      // nested walk, so a closure captured once cannot be rebased.
+      const asked: Array<string | undefined> = [];
+      const resolveComponent = (name: string, fromFile?: string) => {
+        asked.push(fromFile);
+        return name === 'Alert'
+          ? {
+            source: `export function Alert() { return h('div', { class: 'alert' }, 'ok'); }`,
+            functionName: 'Alert',
+            path: '/proj/alert.ts',
+          }
+          : null;
+      };
+
+      walkAndEmit(`h('div', null, Alert())`, {
+        resolveComponent,
+        sourceFile: '/proj/page.ts',
+      });
+
+      expect(asked).toEqual(['/proj/page.ts']);
+    });
+
+    it('inlines a sub-component re-exported through an index barrel', () => {
+      // The resolver lands on the barrel; the code is one file further on.
+      const modules: Record<string, string> = {
+        '/proj/card.ts': `export function Card() { return h('article', { class: 'card' }, 'body'); }`,
+      };
+      const binary = walkAndEmit(`h('div', null, Card())`, {
+        sourceFile: '/proj/page.ts',
+        resolveComponent: (name: string) => name === 'Card'
+          ? {
+            source: `export { Card } from './card';`,
+            functionName: 'Card',
+            path: '/proj/index.ts',
+          }
+          : null,
+        loadModule: (_from: string, importPath: string) =>
+          importPath === './card'
+            ? { path: '/proj/card.ts', source: modules['/proj/card.ts']! }
+            : null,
+      });
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG div',
+        'OPEN_TAG article class="card"',
+        'TEXT "body"',
+        'CLOSE_TAG article',
+        'CLOSE_TAG div',
+      ]);
+      expect(getIslands(binary)).toEqual([]);
+    });
+
     // Call-site props must reach the inlined body. Until they did, the
     // substitution helper returned its input unchanged on every path, so
     // `props.label` arrived at the walker unresolved and became an EMPTY

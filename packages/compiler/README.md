@@ -159,6 +159,41 @@ named slot). A page the compiler fully understands prints nothing.
 Component children (`h(Card, null, 'body')`) are not represented in the IR — the
 compiler cannot know where a component places its children — and warn.
 
+### How a component is found
+
+Before the compiler can inline anything it has to answer "which function does
+this module export under this name?". One resolver answers that for the SSR
+root page, for `createSignal` default extraction, and for sub-component
+inlining — they used to be three copies that disagreed.
+
+| Form | Resolved? |
+|---|---|
+| `export function Card() {}` | Yes |
+| `export const Card = () => …` / `= function () {}` | Yes |
+| `export { Card }` | Yes — **this is what esbuild rewrites every `export function` in a `.tsx` file into** |
+| `export { CardImpl as Card }` | Yes, following the alias to the declaration |
+| `import { Card } from './card'; export { Card };` | Yes, following the import |
+| `export default function Card() {}` | Yes, for a default import (`import Card from './card'`) or when the function's own name matches |
+| `export { Card } from './card'` (index barrel) | Yes, following the re-export across files |
+| `export * from './card'` (index barrel) | Yes, searching each spread module in order |
+| `import { CardImpl as Card } from './card'` at the CALL site | Yes — looked up as `CardImpl` in the target module |
+| A non-exported top-level `function Card() {}` | Only for a call in the **same file**; a name that arrived through an `import` is not importable and is refused |
+| A helper declared **inside** another function | Only for a call in the same file, and only when the file declares that name exactly once |
+| `export * as NS from './card'` / `import * as NS` | No — a namespace object is not a function. Warns. |
+| `export { Button } from 'some-ui-kit'` | No — the compiler follows relative imports only, never package code. Warns. |
+| A circular re-export chain | No — resolution stops and warns |
+
+Anything in the "No" rows warns at build time naming the file, the construct
+and the consequence. A root page that cannot be resolved falls back to
+**placeholder IR** — `<div id="app"></div>`, no slots, no islands — so the page
+server-renders empty; that is now said in the warning rather than left for the
+reader to discover in the browser.
+
+`.tsx`/`.jsx` files are transformed by esbuild before parsing, which is what
+makes the `export { … }` specifier row load-bearing: under the old resolver
+every JSX page compiled to placeholder IR and every `.tsx` island silently lost
+its named signal slots and their SSR defaults.
+
 ### Slot Naming
 
 Slot names are a **compile contract**: the server injects `SlotData` by name (via `forma_ir::SlotData::from_json`), so the compiler derives stable, human-meaningful names for every binding. Names are visible in the emitted `.ir` string table.
