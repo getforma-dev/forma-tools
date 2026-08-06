@@ -6,6 +6,35 @@ Build tooling for [FormaJS](https://github.com/getforma-dev/formajs) — the rea
 
 **These tools are optional.** FormaJS works without them. Add them when you want faster rendering (compiled templates), server functions (`"use server"`), or the full Rust SSR pipeline.
 
+> **Where this sits.** One product, four repos:
+>
+> ```
+> TS/JSX → @getforma/compiler → FMIR (binary) → forma-ir walker → HTML → @getforma/core adopts it
+>          THIS REPO                            forma                    formajs
+> ```
+>
+> **You are here:** the compiler that turns TypeScript components into the FMIR
+> binary, and the build pipeline that ships it. Everything downstream reads
+> what this repo emits, so a change here is usually a cross-repo change. New to
+> the stack? Read
+> **[the stack architecture](https://github.com/getforma-dev/forma/blob/main/docs/ARCHITECTURE.md)**
+> first. Neighbours:
+> [formajs](https://github.com/getforma-dev/formajs) (client runtime) ·
+> [forma](https://github.com/getforma-dev/forma) (Rust parser, walker, server) ·
+> [create-forma-app](https://github.com/getforma-dev/create-forma-app)
+> (scaffolder).
+
+## Documentation
+
+| Document | What it is |
+|---|---|
+| [Stack architecture](https://github.com/getforma-dev/forma/blob/main/docs/ARCHITECTURE.md) | The pipeline end to end and the reasoning behind it. **Start here.** |
+| [`packages/compiler/README.md`](packages/compiler/README.md) | The compiler: Vite plugin, server functions, SSR plugin, what renders server-side, and the slot-naming contract |
+| [`packages/build/README.md`](packages/build/README.md) | The build pipeline: bundling, hashing, compression, manifest, IR emission |
+| [`docs/README.md`](docs/README.md) | Index of this repo's documentation, including the cross-implementation corpus and the E2E suite |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Setup, the gates, and what a reviewer will ask you |
+| [FMIR format](https://github.com/getforma-dev/forma/blob/main/docs/FMIR-FORMAT.md) | The binary layout this compiler emits, and which bytes are frozen |
+
 ## Packages
 
 | Package | npm | What it does |
@@ -87,9 +116,18 @@ See the full stack at [getforma.dev](https://getforma.dev).
 git clone https://github.com/getforma-dev/forma-tools.git
 cd forma-tools
 npm install
-npm test                    # run all workspace tests (162 tests)
+npm test                    # every workspace's unit tests
+npm run emit:corpus         # re-emit the FMIR corpus the Rust parser checks
+npm run test:e2e            # Playwright, against a real FormaJS build
 npm run build --workspaces  # build all packages
 ```
+
+What the compiler emits is checked by a second implementation, not only by this
+repo's own readers: `npm run emit:corpus` runs the real compiler over
+[`packages/compiler/tests/fixtures/ir-corpus/`](packages/compiler/tests/fixtures/ir-corpus/)
+and `forma`'s `crates/forma-ir/tests/js_emitter_contract.rs` parses the result
+and diffs the rendered HTML against committed goldens. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) before changing emitted bytes.
 
 ## License
 

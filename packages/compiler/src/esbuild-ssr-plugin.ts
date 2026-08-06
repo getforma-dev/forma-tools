@@ -114,7 +114,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       }
 
       // Build resolve callback that handles BOTH imported AND locally-defined components
-      const resolveComponent = (name: string): { source: string; functionName: string } | null => {
+      const resolveComponent = (name: string): { source: string; functionName: string; path?: string } | null => {
         // 1. Check imports first (same as existing logic)
         const importPathRaw = importMap.get(name);
         if (importPathRaw && (importPathRaw.startsWith('.') || importPathRaw.startsWith('/'))) {
@@ -122,7 +122,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
           if (resolvedPath) {
             const src = loadComponentSource(resolvedPath);
             if (src !== null) {
-              return { source: src, functionName: name };
+              return { source: src, functionName: name, path: resolvedPath };
             }
             // read failed — fall through to local check
           }
@@ -132,7 +132,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         for (const node of entryAst.program.body) {
           // function Sidebar() { ... }
           if (t.isFunctionDeclaration(node) && node.id?.name === name) {
-            return { source: entrySource, functionName: name };
+            return { source: entrySource, functionName: name, path: entryPointPath };
           }
           // const Sidebar = () => { ... } or const Sidebar = function() { ... }
           if (t.isVariableDeclaration(node)) {
@@ -143,7 +143,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
                 decl.init &&
                 (t.isArrowFunctionExpression(decl.init) || t.isFunctionExpression(decl.init))
               ) {
-                return { source: entrySource, functionName: name };
+                return { source: entrySource, functionName: name, path: entryPointPath };
               }
             }
           }
@@ -193,6 +193,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       }
 
       const walkCtx: WalkContext = {
+        sourceFile: entryPointPath,
         fileConstants,
         stringConstants,
         signalSlots,
@@ -321,7 +322,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
     }
 
     // 10. Build resolve callback for sub-components
-    const resolveComponent = (name: string): { source: string; functionName: string } | null => {
+    const resolveComponent = (name: string): { source: string; functionName: string; path?: string } | null => {
       const importPathRaw = importMap.get(name);
       if (!importPathRaw) return null;
 
@@ -333,11 +334,12 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
 
       const source = loadComponentSource(resolvedPath);
       if (source === null) return null;
-      return { source, functionName: name };
+      return { source, functionName: name, path: resolvedPath };
     };
 
     // 11. Build WalkContext and walk the h() tree
     const walkCtx: WalkContext = {
+      sourceFile: componentPath,
       fileConstants,
       stringConstants,
       signalSlots,
@@ -592,12 +594,14 @@ export function formaSsrPlugin(options: SsrPluginOptions): Plugin {
           const irPath = join(options.outDir, `${options.page}.ir`);
           writeFileSync(irPath, irBytes);
 
-          // Write island metadata alongside IR if any islands were discovered
-          if (irIslands.length > 0) {
-            const islandMetaPath = join(options.outDir, `${options.page}.islands.json`);
-            writeFileSync(islandMetaPath, JSON.stringify(irIslands, null, 2) + '\n');
-            console.log(`   Islands metadata: ${options.page}.islands.json (${irIslands.length} islands)`);
-          }
+          // The island table is INSIDE the .ir binary, and generateRealIr
+          // returns it to programmatic callers. This step used to also drop a
+          // `<page>.islands.json` next to it, which nothing read: its only
+          // consumer was @getforma/build's island-registry generator, itself
+          // removed as unusable (see that package's CHANGELOG). Emitting build
+          // metadata into the SERVED asset directory made every consumer clean
+          // up after the compiler — ksx Studio had to delete both byproducts by
+          // hand to keep them out of its rust-embed binary.
         } catch (err) {
           // IR emission failure is non-fatal -- page falls back to Phase 1
           console.warn(

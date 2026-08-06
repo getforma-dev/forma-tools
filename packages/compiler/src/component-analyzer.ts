@@ -565,7 +565,7 @@ export class ComponentAnalyzer {
         if (!funcBody) return;
 
         // Walk the function body for createSignal calls
-        self.collectSignalDefaults(funcBody.body, signals);
+        self.collectSignalDefaults(funcBody.body, signals, filename);
 
         path.stop();
       },
@@ -594,7 +594,7 @@ export class ComponentAnalyzer {
     const signals = new Map<string, SignalDefault>();
 
     // (a) Module top-level createSignal declarations
-    this.collectSignalDefaults(ast.program.body, signals);
+    this.collectSignalDefaults(ast.program.body, signals, filename);
 
     // (b) Top-level statements of the exported component function
     const self = this;
@@ -603,7 +603,7 @@ export class ComponentAnalyzer {
         const funcBody = self.findExportedFunctionBody(path.node, componentName);
         if (!funcBody) return;
 
-        self.collectSignalDefaults(funcBody.body, signals);
+        self.collectSignalDefaults(funcBody.body, signals, filename);
 
         path.stop();
       },
@@ -653,11 +653,20 @@ export class ComponentAnalyzer {
   /**
    * Scan a statement list for `const [name, setName] = createSignal(literal)`
    * declarations (including `export const` at module level) and record their
-   * defaults into the given map. Non-literal initializers are skipped.
+   * defaults into the given map.
+   *
+   * A signal whose initial value is not a string/number/boolean/null literal
+   * cannot be given an SSR default, so it gets NO named slot — every binding to
+   * it falls back to an anonymous `text:<n>`/`attr:<key>` slot and can no
+   * longer be addressed by name for server-side injection. That used to happen
+   * in silence; it now warns, because the consequence (a slot key that quietly
+   * does not exist) is invisible until injection fails at runtime.
+   * Verified by: packages/compiler/tests/ir-diagnostics.test.ts > "warns that a non-literal signal default gets no named slot"
    */
   private collectSignalDefaults(
     statements: T.Statement[],
     signals: Map<string, SignalDefault>,
+    filename?: string,
   ): void {
     for (const stmt of statements) {
       const decl = ComponentAnalyzer.asVariableDeclaration(stmt);
@@ -694,6 +703,10 @@ export class ComponentAnalyzer {
         const signalDefault = this.evaluateSignalDefault(initArg as T.Expression);
         if (signalDefault) {
           signals.set(signalName, signalDefault);
+        } else {
+          console.warn(
+            `   IR: signal '${signalName}'${filename ? ` in ${filename}` : ''} is initialized with a ${(initArg as T.Expression).type} the compiler cannot evaluate — it gets no named slot, so bindings to it land in anonymous 'text:'/'attr:' slots and cannot be injected by name; initialize it with a string, number, boolean or null literal to get one`,
+          );
         }
       }
     }

@@ -177,8 +177,13 @@ describe('IR roundtrip validation', () => {
       expect(ops).toContain('OPEN_TAG article class="summary"');
       expect(ops).toContain('ISLAND_START StatusPanel#0');
       expect(ops).toContain('ISLAND_END StatusPanel#0');
-      // The static NAV_ITEMS spread is unrolled, not deferred to an island.
-      expect(ops.filter(o => o === 'OPEN_TAG a')).toHaveLength(2);
+      // The static NAV_ITEMS spread is unrolled, not deferred to an island —
+      // with each row's href substituted into the ATTRIBUTE, not just its
+      // label into the child text.
+      expect(ops.filter(o => /^OPEN_TAG a(\s|$)/.test(o))).toEqual([
+        'OPEN_TAG a href="/"',
+        'OPEN_TAG a href="/reports"',
+      ]);
       expect(ops).toContain('TEXT "Home"');
       expect(ops).toContain('TEXT "Reports"');
       // List, show and event-handler elision all survive the real pipeline.
@@ -193,15 +198,14 @@ describe('IR roundtrip validation', () => {
       const { binary } = compileFixture();
 
       // The page mints four `class` attribute slots (root, sub-component,
-      // island, list body), two `href` slots from the unrolled spread, and
-      // three text children at child index 0 under different parents. Before
-      // the attr/text occurrence registries these collapsed into three names.
+      // island, list body) and three text children at child index 0 under
+      // different parents. Before the attr/text occurrence registries these
+      // collapsed into two names. The unrolled NAV_ITEMS spread mints NO slot:
+      // both hrefs resolve to static attributes at compile time.
       expect(getSlots(binary).map(s => s.name)).toEqual([
         'statusText',
         'attr:class',
         'text:0',
-        'attr:href',
-        'attr:href#2',
         'attr:class#2',
         'attr:class#3',
         'text:0#2',

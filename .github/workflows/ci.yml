@@ -7,11 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  # The matrix includes Windows because this toolchain's first field-reported
+  # bug was Windows-only and structural: the tailwind step spawned `npx` with
+  # execFileSync and no shell, which CreateProcess cannot use to run the
+  # `npx.cmd` shim. Every test passed on Linux. The same shape recurred for
+  # `wasm-pack`, and module-id matching in the Vite plugin never handled
+  # backslash-separated paths. A Linux-only matrix cannot see any of it, and
+  # the primary consumer develops on Windows.
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node-version: [20, 22]
+        include:
+          - os: windows-latest
+            node-version: 22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

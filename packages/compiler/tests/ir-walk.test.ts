@@ -585,6 +585,63 @@ describe('IR Walk Engine', () => {
   // -------------------------------------------------------------------------
 
   describe('Rule 9: Spread .map() unroll', () => {
+    it('unrolls item properties in attribute position', () => {
+      // Substitution used to descend into CHILD arguments only, so the props
+      // object passed through untouched: every attribute taken from the row
+      // reached the walker as an unresolvable `item.href` and was emitted as
+      // an EMPTY dynamic attribute. The links rendered with no href and
+      // nothing said so — the same failure shape as ledger finding #10.
+      const binary = walkAndEmit(
+        `h('nav', null, ...NAV.map((item) => h('a', { href: item.href, class: 'nav-link' }, item.label)))`,
+        {
+          fileConstants: new Map<string, any[]>([
+            ['NAV', [
+              { href: '/', label: 'Home' },
+              { href: '/reports', label: 'Reports' },
+            ]],
+          ]),
+        },
+      );
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG nav',
+        'OPEN_TAG a href="/" class="nav-link"',
+        'TEXT "Home"',
+        'CLOSE_TAG a',
+        'OPEN_TAG a href="/reports" class="nav-link"',
+        'TEXT "Reports"',
+        'CLOSE_TAG a',
+        'CLOSE_TAG nav',
+      ]);
+      // Fully static: no slot to inject, nothing deferred to the client.
+      expect(getSlotNames(binary)).toEqual([]);
+      expect(getIslands(binary)).toEqual([]);
+    });
+
+    it('unrolls numeric and boolean item properties in attribute position', () => {
+      const binary = walkAndEmit(
+        `h('ul', null, ...ROWS.map((r) => h('li', { 'data-n': r.n, hidden: r.off }, 'x')))`,
+        {
+          fileConstants: new Map<string, any[]>([
+            ['ROWS', [{ n: 1, off: false }, { n: 2, off: true }]],
+          ]),
+        },
+      );
+
+      // `hidden: false` drops the attribute (HTML boolean semantics);
+      // `hidden: true` renders it valueless.
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG ul',
+        'OPEN_TAG li data-n="1"',
+        'TEXT "x"',
+        'CLOSE_TAG li',
+        'OPEN_TAG li data-n="2" hidden=""',
+        'TEXT "x"',
+        'CLOSE_TAG li',
+        'CLOSE_TAG ul',
+      ]);
+    });
+
     it('unrolls static .map() with fileConstants', () => {
       const fileConstants = new Map<string, any[]>([
         ['CAPABILITIES', [
@@ -673,6 +730,88 @@ describe('IR Walk Engine', () => {
         'CLOSE_TAG div',
       ]);
       expect(getIslands(binary)).toEqual([]);
+    });
+
+    // Call-site props must reach the inlined body. Until they did, the
+    // substitution helper returned its input unchanged on every path, so
+    // `props.label` arrived at the walker unresolved and became an EMPTY
+    // island nested inside the component's own markup — the text silently
+    // absent from the server render.
+    describe('call-site props', () => {
+      function propsComponent(body: string, param = 'props') {
+        return (name: string) => name === 'Badge'
+          ? { source: `export function Badge(${param}) { return ${body}; }`, functionName: 'Badge' }
+          : null;
+      }
+
+      it('substitutes a call-site prop into an inlined component', () => {
+        const binary = walkAndEmit(`h('div', null, Badge({ label: 'New' }))`, {
+          resolveComponent: propsComponent(`h('span', { class: 'badge' }, props.label)`),
+        });
+
+        expect(parseOpcodeList(binary)).toEqual([
+          'OPEN_TAG div',
+          'OPEN_TAG span class="badge"',
+          'TEXT "New"',
+          'CLOSE_TAG span',
+          'CLOSE_TAG div',
+        ]);
+        // Two-sided: the value arrived AND nothing degraded to an island.
+        expect(getIslands(binary)).toEqual([]);
+      });
+
+      it('substitutes a destructured prop, including one with a default', () => {
+        const binary = walkAndEmit(`h('div', null, Badge({ label: 'New' }))`, {
+          resolveComponent: propsComponent(
+            `h('span', null, label, tone)`,
+            `{ label, tone = 'plain' }`,
+          ),
+        });
+
+        // `label` comes from the call site; `tone` is not passed, so its
+        // reference stays unresolved and degrades visibly to an island.
+        expect(parseOpcodeList(binary)).toEqual([
+          'OPEN_TAG div',
+          'OPEN_TAG span',
+          'TEXT "New"',
+          'ISLAND_START island_0#0',
+          'OPEN_TAG div',
+          'CLOSE_TAG div',
+          'ISLAND_END island_0#0',
+          'CLOSE_TAG span',
+          'CLOSE_TAG div',
+        ]);
+      });
+
+      it('substitutes into attribute values as well as children', () => {
+        const binary = walkAndEmit(`h('div', null, Badge({ tone: 'warn', count: 3 }))`, {
+          resolveComponent: propsComponent(`h('span', { class: props.tone, 'data-n': props.count })`),
+        });
+
+        expect(parseOpcodeList(binary)).toEqual([
+          'OPEN_TAG div',
+          'OPEN_TAG span class="warn" data-n="3"',
+          'CLOSE_TAG span',
+          'CLOSE_TAG div',
+        ]);
+        // Static attributes, not slots: nothing to inject at runtime.
+        expect(getSlotNames(binary)).toEqual([]);
+      });
+
+      it('leaves a name alone where a nested function rebinds it', () => {
+        const binary = walkAndEmit(`h('div', null, Badge({ label: 'New' }))`, {
+          resolveComponent: propsComponent(
+            `h('ul', null, createList(rows, (label) => label.id, (label) => h('li', null, label.label)))`,
+            `{ label }`,
+          ),
+        });
+
+        // The list's own `label` row parameter shadows the prop, so the row
+        // template still reads from the list slot rather than the literal.
+        expect(parseOpcodeList(binary)).toContain('PROP list:rows:item.label -> list:rows:label');
+        expect(parseOpcodeList(binary)).toContain('DYN_TEXT list:rows:label marker=0');
+        expect(getStrings(binary)).not.toContain('New');
+      });
     });
 
     it('emits island when resolveComponent returns null', () => {
@@ -771,6 +910,67 @@ describe('IR Walk Engine', () => {
         'CLOSE_TAG div',
         'ISLAND_END island_0#0',
       ]);
+    });
+
+    // A capitalized tag is what BOTH JSX transforms emit for <Card/>, so the
+    // tag position holding an identifier is a component reference, not an
+    // unknown expression. It used to fall through to the anonymous island
+    // shell, which is unhydratable: the client registry is keyed by component
+    // name, and `island_0` matches nothing in it.
+    describe('component tags (what JSX compiles <Card/> to)', () => {
+      const source = `export function Card() { return h('article', { class: 'card' }, 'Body'); }`;
+      const resolveComponent = (name: string) =>
+        name === 'Card' ? { source, functionName: 'Card' } : null;
+
+      it('registers a JSX component tag under its own name', () => {
+        // Unresolvable: still an island, but one the client can find.
+        const binary = walkAndEmit(`h('main', null, h(Card, null))`);
+
+        expect(parseOpcodeList(binary)).toEqual([
+          'OPEN_TAG main',
+          'ISLAND_START Card#0',
+          'OPEN_TAG div',
+          'CLOSE_TAG div',
+          'ISLAND_END Card#0',
+          'CLOSE_TAG main',
+        ]);
+        expect(getIslands(binary).map(i => i.name)).toEqual(['Card']);
+      });
+
+      it('inlines a resolvable component tag exactly like a Card() call', () => {
+        const viaTag = parseOpcodeList(walkAndEmit(`h(Card, null)`, { resolveComponent }));
+        const viaCall = parseOpcodeList(walkCallAndEmit(`Card()`, { resolveComponent }));
+
+        expect(viaTag).toEqual([
+          'OPEN_TAG article class="card"',
+          'TEXT "Body"',
+          'CLOSE_TAG article',
+        ]);
+        expect(viaTag).toEqual(viaCall);
+      });
+
+      it('honours the island registry for a component tag', () => {
+        const binary = walkAndEmit(`h(Card, null)`, {
+          resolveComponent,
+          islandNames: new Set(['Card']),
+        });
+
+        // Registered islands are never inlined — but their SSR content is
+        // still emitted inside the island span.
+        expect(parseOpcodeList(binary)).toEqual([
+          'ISLAND_START Card#0',
+          'OPEN_TAG article class="card"',
+          'TEXT "Body"',
+          'CLOSE_TAG article',
+          'ISLAND_END Card#0',
+        ]);
+      });
+
+      it('keeps a lower-case identifier tag as a dynamic-tag island', () => {
+        // `h(tagName, ...)` with a runtime tag string is not a component.
+        expect(getIslands(walkAndEmit(`h(tagName, null)`)).map(i => i.name))
+          .toEqual(['island_0']);
+      });
     });
 
     it('emits ISLAND for unknown call in child position', () => {
@@ -1157,6 +1357,68 @@ describe('IR Walk Engine', () => {
         'TEXT "Y"',
         'CLOSE_TAG p',
         'CLOSE_TAG main',
+      ]);
+    });
+
+    // A Fragment's children must go through the SAME emitChild path as an
+    // element's. Until they did, anything that was not an h() call or a string
+    // literal was dropped with no opcode, no island marker and no warning —
+    // content that simply vanished from the page. These four run the same
+    // constructs through an element and a Fragment and require identical
+    // opcodes: a divergence is the bug returning.
+    describe.each([
+      ['a dynamic text child', `() => title()`, ['DYN_TEXT text:0 marker=0']],
+      ['a numeric child', `7`, ['TEXT "7"']],
+      [
+        // Structurally asymmetric branches, so a swap of then_len/else_len is
+        // detectable (equal-length branches hide it).
+        'a ternary show child',
+        `() => (ok() ? h('a', null, 'y') : h('b', null, h('i', null, 'no')))`,
+        [
+          'SHOW_IF show:ok then=17 else=29',
+          'OPEN_TAG a', 'TEXT "y"', 'CLOSE_TAG a',
+          'SHOW_ELSE',
+          'OPEN_TAG b', 'OPEN_TAG i', 'TEXT "no"', 'CLOSE_TAG i', 'CLOSE_TAG b',
+        ],
+      ],
+      [
+        'a createList child',
+        `createList(todos, (r) => r.id, (r) => h('li', null, r.name))`,
+        [
+          'LIST array=list:todos:array item=list:todos:item body=26',
+          'PROP list:todos:item.name -> list:todos:name',
+          'OPEN_TAG li',
+          'DYN_TEXT list:todos:name marker=0',
+          'CLOSE_TAG li',
+        ],
+      ],
+    ])('emits %s of a Fragment', (_label, child, expected) => {
+      it('the same way an element child is emitted', () => {
+        expect(parseOpcodeList(walkAndEmit(`h(Fragment, null, ${child})`))).toEqual(expected);
+      });
+
+      it('and identically in the bare Fragment(...) call form', () => {
+        expect(parseOpcodeList(walkCallAndEmit(`Fragment(${child})`))).toEqual(expected);
+      });
+
+      it('matching what the same child emits inside a real element', () => {
+        expect(parseOpcodeList(walkAndEmit(`h('div', null, ${child})`))).toEqual([
+          'OPEN_TAG div', ...expected, 'CLOSE_TAG div',
+        ]);
+      });
+    });
+
+    it('emits every child of a Fragment, not just the ones it understands', () => {
+      // The original defect in one line: the h() call survived, the binding
+      // beside it disappeared.
+      expect(parseOpcodeList(walkAndEmit(
+        `h(Fragment, null, h('p', null, 'kept'), () => alsoKept(), 'and this')`,
+      ))).toEqual([
+        'OPEN_TAG p',
+        'TEXT "kept"',
+        'CLOSE_TAG p',
+        'DYN_TEXT text:1 marker=0',
+        'TEXT "and this"',
       ]);
     });
   });

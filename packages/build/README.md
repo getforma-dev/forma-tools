@@ -40,19 +40,19 @@ await build({
 npx tsx build.ts
 ```
 
-This bundles your app with esbuild, applies the FormaJS compiler transforms, content-hashes all assets, generates Brotli + gzip compressed versions, and writes an asset manifest.
+This bundles your app with esbuild, content-hashes all assets, generates Brotli + gzip compressed versions, and writes an asset manifest.
 
 ## What It Does
 
 | Step | What happens |
 |------|-------------|
+| **Validate** | Rejects an `outfile` that is a path, or a route naming an asset no entry produces, before touching `outputDir` |
 | **Bundle** | esbuild bundles each entry point with JSX transform (`jsxFactory: "h"`) |
-| **Compile** | `@getforma/compiler` transforms `h()` calls to `template()` + `cloneNode()` |
 | **CSS** | Runs Tailwind CLI or concatenates CSS files |
 | **Hash** | SHA-256 content hash appended to filenames (`app.a1b2c3d4.js`) |
 | **Compress** | Brotli (level 11) + gzip (level 9) for `.js` and `.css` |
 | **Manifest** | Writes `manifest.json` mapping source filenames → hashed filenames |
-| **SSR** | (Optional) Emits FMIR binary for Rust server-side rendering |
+| **SSR** | (Optional) Emits one `<page>.ir` FMIR binary per entry for Rust server-side rendering |
 | **WASM** | (Optional) Runs `wasm-pack build` for the Rust IR walker |
 | **Budget** | Warns if route brotli size exceeds threshold (default 200KB) |
 
@@ -75,18 +75,22 @@ const config: BuildConfig = {
 
   // Optional
   cssEntries: [
-    { type: "tailwind", input: "src/app.css", output: "app.css" },
+    // Tailwind: runs @tailwindcss/cli on the first input
+    { input: "src/app.css", outfile: "app.css", tailwind: true },
+    // Otherwise: concatenates the inputs in order
+    { input: ["src/reset.css", "src/theme.css"], outfile: "dashboard.css" },
   ],
   fontDir: "src/fonts",              // Copy .woff2 files to dist
   ssr: true,                          // Enable FMIR emission
-  ssrEntryPoints: {
-    home: "src/home/HomeIsland.tsx",
-    dashboard: "src/dashboard/DashboardIsland.tsx",
+  ssrEntryPoints: {                   // page name (outfile minus .js) -> entry
+    home: "src/home/app.tsx",         // the file with mount()/activateIslands()
+    dashboard: "src/dashboard/app.tsx",
   },
   wasm: { crateDir: "../crates/forma-ir" },  // Build WASM walker
+  watch: false,                       // Rebuild on change; writes a dev manifest
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
-  formaAlias: "./node_modules/@getforma/core/dist/index.js",
-  serverInlined: ["sw.js"],           // Files to keep unhashed copies of
+  formaAlias: "@getforma/core",       // What bare 'formajs' imports resolve to
+  serverInlined: ["app.js"],          // Also keep the unhashed name on disk
 };
 
 await build(config);
@@ -105,11 +109,15 @@ dist/
 ├── home.m3n4o5p6.ir          # FMIR binary (if ssr: true)
 ├── forma_ir.q7r8s9t0.js      # WASM loader (if wasm configured)
 ├── forma_ir_bg.u1v2w3x4.wasm # WASM binary
-├── inter.woff2                # Copied fonts
-├── sw.js                      # Service worker (unhashed copy)
-├── manifest.json              # Asset manifest
-└── manifest.json.br
+├── inter.woff2                # Copied fonts (never hashed)
+├── sw.js                      # Service worker (generated last, never hashed)
+└── manifest.json              # Asset manifest (generated last, never compressed)
 ```
+
+Nothing else is written. In particular an SSR build emits **only** `<page>.ir`
+per entry: no island registry, no island metadata sidecar. (Through 0.1.9 it
+also wrote `<page>.islands.js` and `<page>.islands.json`, which every consumer
+had to delete by hand — see the CHANGELOG.)
 
 ## Asset Manifest
 
@@ -153,12 +161,12 @@ The Rust server (`forma-server`) reads this manifest to serve assets with correc
 |---|---|---|
 | What it is | Vite/esbuild plugins | Full build pipeline |
 | Use case | Add to existing Vite config | Replace your build script |
-| Includes compiler? | — | Optional peer dependency (needed for SSR only) |
+| `h()` → `template()` transform | Yes (Vite plugin) | No — bundles your source as written |
 | Content hashing | No | Yes |
 | Compression | No | Yes (Brotli + gzip) |
 | Manifest | No | Yes |
-| SSR IR emission | Plugin only | Integrated |
-| Install separately? | Yes | Yes (pulls in compiler) |
+| SSR IR emission | Plugin only | Integrated (loads the compiler when `ssr: true`) |
+| Install | On its own | Alongside the compiler if you need SSR (optional peer dependency) |
 
 ## Part of the Forma Stack
 

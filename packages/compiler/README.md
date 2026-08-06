@@ -46,11 +46,18 @@ createEffect(() => { _root.querySelector("p").textContent = description(); });
 
 ```ts
 formaCompiler({
-  // Include/exclude file patterns (default: all .ts/.tsx/.js/.jsx)
+  // Default: ["**/*.ts", "**/*.tsx"] — .js/.jsx are NOT transformed unless listed
   include: ["src/**/*.tsx"],
-  exclude: ["node_modules"],
+  // Default: ["**/node_modules/**"]
+  exclude: ["**/generated/**"],
 })
 ```
+
+Patterns are matched against the module id with `\` normalized to `/` and any
+Vite query suffix (`?v=hash`) dropped. A `**` segment matches any number of path
+segments (including none) and `*` matches within one segment. A file is
+transformed only if it matches an include pattern, no exclude pattern, and
+imports from `formajs` / `forma/`.
 
 ## Server Functions — `formaServer`
 
@@ -102,6 +109,56 @@ import { formaSsrPlugin } from "@getforma/compiler";
 // Used by @getforma/build, not typically called directly
 ```
 
+The plugin writes exactly one file per page: `<page>.ir`. The island table lives
+inside that binary; callers who want it as data use `generateRealIr(entry)`,
+which returns `{ binary, islands }`. (Through 0.2.0 the plugin also dropped a
+`<page>.islands.json` sidecar into the output directory — build metadata in the
+served asset tree, read by nothing but a since-removed `@getforma/build` step.)
+
+### Build diagnostics
+
+The compiler renders what it can prove and defers the rest to the client. The
+deferral is the dangerous part: an unrecognised construct becomes an empty
+island shell (or, for an unresolvable attribute value, an empty attribute), and
+a page that *looks* built can be missing content. **Every such degradation now
+warns**, naming the file, the construct, and what the page loses:
+
+```
+   IR: child a bare '&&' expression (not wrapped in a function) in src/HomePage.ts
+       — emitted as an empty island shell, so it renders nothing server-side and
+       only appears once the client bundle hydrates — wrap it in a function
+       (`() => …`) for a reactive binding, or use createShow/createList for
+       conditionals and lists
+```
+
+Warnings are emitted for: a dynamic tag (`h(tagName, ...)`); a child the walker
+cannot translate (bare identifier, template literal, unwrapped ternary or `&&`);
+a spread that will not statically unroll; each way a `createList` call can fail
+to compile (too few arguments, a non-inline map function, a destructured or
+missing row parameter, no visible return); a `createShow` branch that is not an
+`h()` call; a component that cannot be resolved, is recursive, exceeds the
+3-level inlining depth, is passed a prop that is not a literal, or has no
+followable return; an island component whose content cannot be compiled; and a
+`createSignal` whose initial value is not a literal (which is why it has no
+named slot). A page the compiler fully understands prints nothing.
+
+### What renders server-side
+
+| Construct | SSR |
+|---|---|
+| `h('div', { class: 'x' }, 'text')` | Static markup |
+| `h('div', { class: () => cls() }, () => text())` | Slot-backed attribute / text |
+| `createShow` / a ternary inside `() => …` | `SHOW_IF` with both branches |
+| `createList(src, keyFn, (row) => …)` | `LIST` + per-row `PROP`s |
+| `h(Fragment, null, …)` / `Fragment(…)` | Children inline, no wrapper — every child kind, same as an element's |
+| `Card({ title: 'Reports' })` | Inlined, with literal props substituted into the component body (`props.title` and destructured `{ title }`) |
+| `h(Card, { title: 'Reports' })` (what JSX `<Card/>` compiles to) | Same as `Card({...})`: inlined when resolvable, otherwise an island **named `Card`** so the client registry can hydrate it |
+| `...NAV.map(i => h('a', { href: i.href }, i.label))` over a module-level const | Unrolled, with row values substituted into attributes *and* children |
+| Anything else | Empty island shell + a build warning (above) |
+
+Component children (`h(Card, null, 'body')`) are not represented in the IR — the
+compiler cannot know where a component places its children — and warn.
+
 ### Slot Naming
 
 Slot names are a **compile contract**: the server injects `SlotData` by name (via `forma_ir::SlotData::from_json`), so the compiler derives stable, human-meaningful names for every binding. Names are visible in the emitted `.ir` string table.
@@ -126,10 +183,15 @@ The four families keep separate registries, and each registry is **page-wide**: 
 
 A dynamic attribute or text child that binds a **known signal** (`() => count()` where `count` is a `createSignal` the analyzer found) reuses that signal's named slot instead and mints no `attr:`/`text:` name at all.
 
-**Migration**:
-- (0.2.1) Pages with two dynamic attributes sharing a key, or two dynamic text children at the same child index, previously emitted the SAME slot name twice and the earlier slot was unreachable. Those later occurrences are now suffixed (`attr:class#2`, `text:0#2`). Server code that injected such a key was, before this change, always addressing the LAST occurrence; it now addresses the first, and the later ones need the suffixed keys. Single-occurrence names are unchanged.
-- (0.2.x) `createShow` slots were previously all named `show:createShow` (and ternary shows `show:<index>`) — server code injecting those keys must move to the name-keyed scheme above.
-- (0.2.x) Lists over literal sources were previously positional (`list:#N:array`) — where the map function has a named parameter they are now map-param-derived (`list:tile:array`). Unknown keys fail soft (silently ignored), so check names after upgrading.
+**Migration.** All three changes below are in `[Unreleased]` — they are in the
+repo and not yet on npm, where the current version is 0.2.0. `CHANGELOG.md` is
+the authority for which release each one ships in; do not re-date them here
+from memory.
+
+- (unreleased) Pages with two dynamic attributes sharing a key, or two dynamic text children at the same child index, previously emitted the SAME slot name twice and the earlier slot was unreachable. Those later occurrences are now suffixed (`attr:class#2`, `text:0#2`). Server code that injected such a key was, before this change, always addressing the LAST occurrence; it now addresses the first, and the later ones need the suffixed keys. Single-occurrence names are unchanged.
+- (unreleased) `createShow` slots were previously all named `show:createShow` (and ternary shows `show:<index>`) — server code injecting those keys must move to the name-keyed scheme above.
+- (unreleased) Lists over literal sources were previously positional (`list:#N:array`) — where the map function has a named parameter they are now map-param-derived (`list:tile:array`). Unknown keys fail soft (silently ignored), so check names after upgrading.
+- (0.2.0) Every `createList` previously emitted `list:array` / `list:item` / `list:<prop>`, so on a page with more than one list only the first was reachable by name. Slots are now `list:<base>:…` with the base derived as described above.
 
 ### Islands: slot ids and props injection
 
@@ -159,6 +221,17 @@ The recommended pattern is **single-source**: declare the signal once at module 
 
 Island signal merging runs on every entry-point pattern: `activateIslands`-only entries, named `mount(() => Page(), ...)` entries, and inline block-body `mount(() => { ... return h(...); }, ...)` entries — the `activateIslands({...})` registry is scanned in all cases.
 
+**Scope rules differ between the two files, deliberately:**
+
+| Where the signal is declared | Named slot? |
+|---|---|
+| Inside the exported root `*Page` component | Yes |
+| At module scope in the root page file | **No** — bindings to it get anonymous `text:`/`attr:` slots |
+| At module scope in an island component file | Yes |
+| Inside the exported island component | Yes |
+
+The root page's module scope is excluded because that file is also where page-level helpers live; a signal there is not part of the component's declared surface. Declare page signals **inside** the component function, or in the island file that owns them. A `createSignal` whose initial value is not a string, number, boolean or null literal never yields a named slot either — that case warns (see Build diagnostics).
+
 ### Static attributes from module constants
 
 Module-level string constants fold into **static attributes**. A top-level `const` (plain or `export const`) whose initializer is a string literal, an expression-less template literal, a `+` concatenation chain, or a reference to an earlier string const is resolved at compile time:
@@ -183,12 +256,23 @@ An attribute value that is a bare identifier or member expression the compiler *
 Parses entry points to extract component trees, signal defaults, and island boundaries for IR emission.
 
 ```ts
+import { readFileSync } from "node:fs";
 import { ComponentAnalyzer } from "@getforma/compiler";
 
-const analyzer = new ComponentAnalyzer();
-const entry = analyzer.parseEntryPoint("src/app.tsx");
-const component = analyzer.parseComponentFile(entry.importPath, entry.componentName);
+// Every method takes SOURCE TEXT plus the filename it came from — the analyzer
+// never reads the filesystem itself. The constructor's baseDir is the directory
+// relative imports are resolved against by the caller.
+const analyzer = new ComponentAnalyzer("src");
+
+const entrySource = readFileSync("src/app.ts", "utf8");
+const entry = analyzer.parseEntryPoint(entrySource, "src/app.ts");
+
+const pageSource = readFileSync("src/HomePage.ts", "utf8");
+const page = analyzer.parseComponentFile(pageSource, "src/HomePage.ts", entry.componentName);
 ```
+
+Most projects want `generateRealIr(entryPointPath)` instead, which drives the
+whole pipeline (analyzer + walker + emitter) and returns `{ binary, islands }`.
 
 ## When Do You Need This?
 

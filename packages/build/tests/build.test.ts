@@ -1,14 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { build } from '../src/build';
-import type {
-  BuildConfig,
-  BuildEntry,
-  BuildResult,
-  CssEntry,
-  RouteMapping,
-  AssetManifest,
-  RouteManifest,
-} from '../src/types';
+import * as publicApi from '../src/index';
+import type { BuildConfig, AssetManifest } from '../src/types';
 import {
   mkdtempSync,
   writeFileSync,
@@ -17,132 +10,26 @@ import {
   rmSync,
   mkdirSync,
   readdirSync,
+  chmodSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
-// Type-only checks (existing)
+// Public surface
 // ---------------------------------------------------------------------------
+//
+// This replaces ten "exports X type" tests that assigned an object literal to a
+// typed const and asserted a field of the literal they had just written. Vitest
+// strips types without checking them, so those ran as `expect('app.js').toBe(
+// 'app.js')` — they passed with build.ts deleted. Types are checked by
+// `tsc --noEmit` in CI; what a runtime test can pin is the VALUE surface.
 
-describe('@getforma/build', () => {
-  describe('type exports', () => {
-    it('exports BuildConfig type', () => {
-      const config: BuildConfig = {
-        entryPoints: [],
-        routes: {},
-        outputDir: '/tmp/test-dist',
-      };
-      expect(config).toBeDefined();
-      expect(config.outputDir).toBe('/tmp/test-dist');
-    });
-
-    it('exports BuildEntry type', () => {
-      const entry: BuildEntry = {
-        entry: 'src/app.ts',
-        outfile: 'app.js',
-      };
-      expect(entry.entry).toBe('src/app.ts');
-      expect(entry.outfile).toBe('app.js');
-    });
-
-    it('exports CssEntry type', () => {
-      const css: CssEntry = {
-        input: ['src/styles/main.css'],
-        outfile: 'main.css',
-        tailwind: true,
-      };
-      expect(css.tailwind).toBe(true);
-    });
-
-    it('exports RouteMapping type', () => {
-      const route: RouteMapping = {
-        js: ['app'],
-        css: ['main'],
-        fonts: ['inter.woff2'],
-      };
-      expect(route.js).toEqual(['app']);
-    });
-
-    it('exports AssetManifest type', () => {
-      const manifest: AssetManifest = {
-        version: 1,
-        build_hash: 'abc123',
-        assets: { 'app.js': 'app.abc123.js' },
-        routes: {},
-      };
-      expect(manifest.version).toBe(1);
-    });
-
-    it('exports RouteManifest type', () => {
-      const route: RouteManifest = {
-        js: ['app.abc123.js'],
-        css: ['main.def456.css'],
-        fonts: ['inter.woff2'],
-        total_size_br: 50000,
-        budget_warn_threshold: 200000,
-      };
-      expect(route.total_size_br).toBe(50000);
-    });
-
-    it('exports BuildResult type', () => {
-      const result: BuildResult = {
-        manifest: {
-          version: 1,
-          build_hash: 'abc123',
-          assets: {},
-          routes: {},
-        },
-        buildHash: 'abc123',
-        warnings: [],
-      };
-      expect(result.warnings).toEqual([]);
-    });
-  });
-
-  describe('build function', () => {
-    it('is exported and is an async function', () => {
-      expect(typeof build).toBe('function');
-    });
-
-    it('accepts a minimal BuildConfig', () => {
-      // Just verify the function signature accepts the config type
-      // without actually running the build (that would need real files)
-      const config: BuildConfig = {
-        entryPoints: [
-          { entry: 'src/app.ts', outfile: 'app.js' },
-        ],
-        routes: {
-          '/': { js: ['app'], css: ['main'] },
-        },
-        outputDir: '/tmp/forma-build-test',
-        budgetThreshold: 200_000,
-      };
-      expect(config).toBeDefined();
-    });
-
-    it('supports all optional config fields', () => {
-      const config: BuildConfig = {
-        entryPoints: [],
-        routes: {},
-        outputDir: '/tmp/test',
-        cssEntries: [
-          { input: 'src/main.css', outfile: 'main.css', tailwind: true },
-          { input: ['a.css', 'b.css'], outfile: 'bundle.css' },
-        ],
-        formaAlias: './node_modules/@getforma/core/dist/index.js',
-        fontDir: 'src/fonts',
-        ssr: true,
-        ssrEntryPoints: { 'login': 'src/login/app.ts' },
-        wasm: { crateDir: '../crates/forma-ir' },
-        watch: false,
-        budgetThreshold: 150_000,
-        serverInlined: ['tenant-login.js', 'forma-platform.css'],
-      };
-      expect(config.ssr).toBe(true);
-      expect(config.budgetThreshold).toBe(150_000);
-      expect(config.serverInlined).toHaveLength(2);
-    });
+describe('@getforma/build public API', () => {
+  it('exports exactly the documented runtime surface', () => {
+    // Two-sided: a dropped export fails, and so does an undocumented addition.
+    expect(Object.keys(publicApi).sort()).toEqual(['build']);
+    expect(typeof publicApi.build).toBe('function');
   });
 });
 
@@ -429,4 +316,326 @@ describe('@getforma/build — functional', () => {
     expect(existsSync(deepOutDir)).toBe(true);
     expect(existsSync(join(deepOutDir, 'manifest.json'))).toBe(true);
   }, 15_000);
+
+  // ---- Test 8: serverInlined keeps the unhashed copy ----------------------
+  it('keeps an unhashed copy of a serverInlined asset and hashes it too', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+      serverInlined: ['app.js'],
+    };
+
+    await build(config);
+
+    const manifest: AssetManifest = JSON.parse(
+      readFileSync(join(outDir, 'manifest.json'), 'utf8'),
+    );
+
+    // Both names exist and hold identical bytes — the server inlines the
+    // unhashed one, the browser fetches the hashed one.
+    expect(existsSync(join(outDir, 'app.js'))).toBe(true);
+    expect(readFileSync(join(outDir, manifest.assets['app.js']!), 'utf8')).toBe(
+      readFileSync(join(outDir, 'app.js'), 'utf8'),
+    );
+    // The route still points at the hashed name, not the inlined copy.
+    expect(manifest.routes['/']!.js).toEqual([manifest.assets['app.js']]);
+  }, 15_000);
+
+  // ---- Test 9: budget warnings ------------------------------------------
+  it('reports a budget warning on the result AND still writes the manifest', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(
+      entryFile,
+      Array.from({ length: 400 }, (_, i) => `export const v${i} = "${i}-${'x'.repeat(40)}";`).join('\n'),
+    );
+
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+      budgetThreshold: 128,
+    };
+
+    const result = await build(config);
+
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain('Budget exceeded: /');
+    // A budget warning is advisory: the build still completes.
+    const manifest: AssetManifest = JSON.parse(
+      readFileSync(join(outDir, 'manifest.json'), 'utf8'),
+    );
+    expect(manifest.routes['/']!.total_size_br).toBeGreaterThan(128);
+    expect(manifest.routes['/']!.budget_warn_threshold).toBe(128);
+  }, 15_000);
+
+  // ---- Test 10/11: config validation ------------------------------------
+  it('rejects a route that names an asset no entry produces', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    writeFileSync(join(outDir, '..', 'sentinel'), 'x'); // outDir does not exist yet
+
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      // 'dashboard' is a typo for 'app', and 'main' has no cssEntry.
+      routes: { '/': { js: ['dashboard'], css: ['main'] } },
+      outputDir: outDir,
+    };
+
+    await expect(build(config)).rejects.toThrow(
+      /routes\['\/'\]\.js names 'dashboard'[\s\S]*routes\['\/'\]\.css names 'main'/,
+    );
+    // Validation runs BEFORE the output directory is cleaned, so a config typo
+    // never destroys the previous build.
+    expect(existsSync(outDir)).toBe(false);
+  }, 15_000);
+
+  it('rejects an outfile that is a path rather than a filename', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+
+    const config: BuildConfig = {
+      // esbuild would happily write dist/pages/app.js, but the hashing pass
+      // only reads the top level of outputDir — the asset would vanish from
+      // the manifest and the route would 404 in production.
+      entryPoints: [{ entry: entryFile, outfile: 'pages/app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+
+    await expect(build(config)).rejects.toThrow(/contains a path separator/);
+  }, 15_000);
+
+  // ---- Test 12: WASM build through a .cmd-shimmed tool -------------------
+  it('runs a .cmd-shimmed wasm-pack (the Windows npm install shape)', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+
+    const crateDir = join(tmpRoot, 'crate');
+    const pkgDir = join(crateDir, 'pkg');
+    mkdirSync(crateDir, { recursive: true });
+
+    // `npm i -g wasm-pack` installs a .cmd shim on Windows, which
+    // CreateProcess (execFileSync without a shell) cannot exec — the exact
+    // shape of dogfood finding #1, where the tailwind step spawned npx.cmd.
+    // Without shell:true this build reports "wasm-pack not found" and silently
+    // ships no WASM.
+    const binDir = join(tmpRoot, 'bin');
+    mkdirSync(binDir, { recursive: true });
+    if (process.platform === 'win32') {
+      writeFileSync(
+        join(binDir, 'wasm-pack.cmd'),
+        [
+          '@echo off',
+          'if "%~1"=="--version" ( echo wasm-pack 0.0.0-test & exit /b 0 )',
+          `if not exist "${pkgDir}" mkdir "${pkgDir}"`,
+          `> "${join(pkgDir, 'forma_ir_bg.wasm')}" echo fake-wasm-binary`,
+          `> "${join(pkgDir, 'forma_ir.js')}" echo export const init = 1;`,
+          'exit /b 0',
+          '',
+        ].join('\r\n'),
+      );
+    } else {
+      const shim = join(binDir, 'wasm-pack');
+      writeFileSync(
+        shim,
+        [
+          '#!/bin/sh',
+          'if [ "$1" = "--version" ]; then echo "wasm-pack 0.0.0-test"; exit 0; fi',
+          `mkdir -p "${pkgDir}"`,
+          `echo fake-wasm-binary > "${join(pkgDir, 'forma_ir_bg.wasm')}"`,
+          `echo "export const init = 1;" > "${join(pkgDir, 'forma_ir.js')}"`,
+          '',
+        ].join('\n'),
+      );
+      chmodSync(shim, 0o755);
+    }
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = binDir + delimiter + prevPath;
+    try {
+      await build({
+        entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+        routes: { '/': { js: ['app'], css: [] } },
+        outputDir: outDir,
+        wasm: { crateDir },
+      });
+    } finally {
+      process.env.PATH = prevPath;
+    }
+
+    const manifest: AssetManifest = JSON.parse(
+      readFileSync(join(outDir, 'manifest.json'), 'utf8'),
+    );
+
+    // The tool ran, its outputs were copied, hashed, and wired into the manifest.
+    expect(manifest.wasm).toBeDefined();
+    expect(manifest.wasm!.binary).toMatch(/^forma_ir_bg\.[0-9a-f]{8}\.wasm$/);
+    expect(manifest.wasm!.loader).toMatch(/^forma_ir\.[0-9a-f]{8}\.js$/);
+    expect(existsSync(join(outDir, manifest.wasm!.binary))).toBe(true);
+    expect(readFileSync(join(outDir, manifest.wasm!.binary), 'utf8').trim())
+      .toBe('fake-wasm-binary');
+  }, 20_000);
+});
+
+// ---------------------------------------------------------------------------
+// SSR builds: the .ir is the only island artifact
+// ---------------------------------------------------------------------------
+
+describe('@getforma/build — SSR output', () => {
+  let tmpRoot: string;
+  let srcDir: string;
+  let outDir: string;
+
+  /**
+   * A page with one registered island, wired the way the compiler requires:
+   * `activateIslands({ StatusPanel })` in the entry, the root `*Page` component
+   * imported from a relative path. Returns the entry file path.
+   *
+   * `formajs` is aliased to a local stub so esbuild can bundle without the real
+   * runtime installed; the compiler reads the SOURCE, so the stub is invisible
+   * to IR emission.
+   */
+  function writeIslandPage(): string {
+    writeFileSync(
+      join(srcDir, 'forma-stub.js'),
+      [
+        'export const h = () => {};',
+        'export const mount = () => {};',
+        'export const activateIslands = () => {};',
+        'export const createSignal = (v) => [() => v, () => {}];',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(srcDir, 'StatusPanel.ts'),
+      [
+        `import { h, createSignal } from 'formajs';`,
+        `export const [statusText, setStatusText] = createSignal('idle');`,
+        `export function StatusPanel() {`,
+        `  return h('section', { class: 'status' }, h('span', null, () => statusText()));`,
+        `}`,
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(srcDir, 'HomePage.ts'),
+      [
+        `import { h } from 'formajs';`,
+        `import { StatusPanel } from './StatusPanel';`,
+        `export function HomePage() {`,
+        `  return h('main', { id: 'app' }, h('h1', null, 'Home'), StatusPanel());`,
+        `}`,
+        '',
+      ].join('\n'),
+    );
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(
+      entryFile,
+      [
+        `import { activateIslands } from 'formajs';`,
+        `import { HomePage } from './HomePage';`,
+        `import { StatusPanel } from './StatusPanel';`,
+        `activateIslands({ StatusPanel });`,
+        `export { HomePage };`,
+        '',
+      ].join('\n'),
+    );
+    return entryFile;
+  }
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'forma-build-ssr-'));
+    srcDir = join(tmpRoot, 'src');
+    outDir = join(tmpRoot, 'dist');
+    mkdirSync(srcDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('emits the .ir and NO island byproducts', async () => {
+    const entryFile = writeIslandPage();
+
+    await build({
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+      formaAlias: join(srcDir, 'forma-stub.js'),
+      ssr: true,
+      ssrEntryPoints: { app: entryFile },
+    });
+
+    const manifest: AssetManifest = JSON.parse(
+      readFileSync(join(outDir, 'manifest.json'), 'utf8'),
+    );
+
+    // The page really does have an island, so this test is not vacuous: the
+    // IR is bigger than the ~136-byte placeholder and the route is wired to it.
+    const irName = manifest.assets['app.ir'];
+    expect(irName).toMatch(/^app\.[0-9a-f]{8}\.ir$/);
+    expect(manifest.routes['/']!.ir).toBe(irName);
+    const ir = readFileSync(join(outDir, irName!));
+    expect(String.fromCharCode(ir[0]!, ir[1]!, ir[2]!, ir[3]!)).toBe('FMIR');
+    expect(ir.length).toBeGreaterThan(200);
+    // Island table entry count (u16 at the islands section offset) is 1.
+    const islandTableOffset = ir.readUInt32LE(40);
+    expect(ir.readUInt16LE(islandTableOffset)).toBe(1);
+
+    // …and NOTHING island-shaped is left in the output directory or the
+    // manifest. The generated `<page>.islands.js` registry was unusable in
+    // every dimension — an unbundled bare `@getforma/core` import, a
+    // `../src/...` path that cannot resolve from the output directory, and a
+    // mapping of every island to the page ROOT component — while
+    // `<page>.islands.json` was build metadata nothing read. Both were hashed,
+    // compressed and manifested, so consumers had to delete them by hand.
+    const stray = readdirSync(outDir).filter((f) => f.includes('.islands.'));
+    expect(stray).toEqual([]);
+    expect(Object.keys(manifest.assets).filter((k) => k.includes('.islands.'))).toEqual([]);
+  }, 30_000);
+
+  it('emits one .ir per entry for a multi-route build', async () => {
+    const entryFile = writeIslandPage();
+    const secondEntry = join(srcDir, 'about.ts');
+    writeFileSync(
+      secondEntry,
+      [
+        `import { h, mount } from 'formajs';`,
+        `mount(() => h('main', { id: 'app' }, h('h1', null, 'About')), '#app');`,
+        '',
+      ].join('\n'),
+    );
+
+    const manifestResult = await build({
+      entryPoints: [
+        { entry: entryFile, outfile: 'app.js' },
+        { entry: secondEntry, outfile: 'about.js' },
+      ],
+      routes: {
+        '/': { js: ['app'], css: [] },
+        '/about': { js: ['about'], css: [] },
+      },
+      outputDir: outDir,
+      formaAlias: join(srcDir, 'forma-stub.js'),
+      ssr: true,
+      ssrEntryPoints: { app: entryFile, about: secondEntry },
+    });
+
+    // Per-route IR, each addressed by its own hashed name — and still no
+    // per-entry byproducts to clean up (the ksx ledger's #12: the scrub had to
+    // be repeated for every entry).
+    expect(manifestResult.manifest.routes['/']!.ir).toBe(
+      manifestResult.manifest.assets['app.ir'],
+    );
+    expect(manifestResult.manifest.routes['/about']!.ir).toBe(
+      manifestResult.manifest.assets['about.ir'],
+    );
+    expect(manifestResult.manifest.routes['/']!.ir)
+      .not.toBe(manifestResult.manifest.routes['/about']!.ir);
+    expect(readdirSync(outDir).filter((f) => f.includes('.islands.'))).toEqual([]);
+  }, 30_000);
 });
