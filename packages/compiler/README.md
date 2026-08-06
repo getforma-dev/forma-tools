@@ -140,7 +140,17 @@ missing row parameter, no visible return); a `createShow` branch that is not an
 3-level inlining depth, is passed a prop that is not a literal, or has no
 followable return; an island component whose content cannot be compiled; and a
 `createSignal` whose initial value is not a literal (which is why it has no
-named slot). A page the compiler fully understands prints nothing.
+named slot).
+
+Bindings warn too, because a binding the compiler cannot evaluate is a page
+whose server render disagrees with its client render:
+
+- a **dynamic attribute** whose expression will not evaluate — the attribute is omitted server-side and appears only after hydration;
+- a **dynamic text child** whose expression will not evaluate — it renders empty and fills in after hydration;
+- a **conditional** whose condition will not evaluate — the server renders its ELSE branch, and if the client would render THEN, hydration adopts the wrong one *silently* (both branches have content, so neither mismatch-repair arm fires);
+- a signal whose name is **also declared in another scope**, naming the `#N` slot it actually got.
+
+A page the compiler fully understands prints nothing.
 
 ### What renders server-side
 
@@ -212,18 +222,24 @@ Slots are then `list:<base>:array`, `list:<base>:item`, and `list:<base>:<prop>`
 
 **Dynamic attributes** (`class: () => cls()`) are named `attr:<key>` and **dynamic text children** (`h('p', null, () => msg())`) are named `text:<childIndex>`, where the index counts children of the immediate parent element from 0. Neither is derived from a page-unique source: two sibling elements can bind the same attribute key, and every element restarts its child indexing at 0 — so both run the same occurrence scheme over their own page-wide registry.
 
-**Occurrence suffixes** are per-base in document order: the first occurrence of a base is unsuffixed, the second reuse of the same base gets `#2` (`show:visible`, `show:visible#2`; `attr:class`, `attr:class#2`; `text:0`, `text:0#2`), and so on. A name that occurs once on a page is **never** suffixed, so single-occurrence keys keep the spelling downstream consumers pin.
+**Signals** are named after the getter: `const [count] = createSignal(0)` → slot `count`. Two different scopes declaring the same name run the same occurrence scheme (`count`, `count#2`) — see Signal scopes.
 
-The four families keep separate registries, and each registry is **page-wide**: constructs inside island subtrees, inlined sub-components, list bodies and show branches dedup against the same namespace as page-level ones, in document order — two islands that each bind `visible` yield `show:visible` and `show:visible#2`, and a dynamic `class` inside a list body dedups against one on the page root, never a duplicate name.
+**Occurrence suffixes** are per-base in document order: the first occurrence of a base is unsuffixed, the second reuse of the same base gets `#2` (`show:visible`, `show:visible#2`; `attr:class`, `attr:class#2`; `text:0`, `text:0#2`; `count`, `count#2`), and so on. A name that occurs once on a page is **never** suffixed, so single-occurrence keys keep the spelling downstream consumers pin.
 
-A dynamic attribute or text child that binds a **known signal** (`() => count()` where `count` is a `createSignal` the analyzer found) reuses that signal's named slot instead and mints no `attr:`/`text:` name at all.
+The five families keep separate registries, and each registry is **page-wide**: constructs inside island subtrees, inlined sub-components, list bodies and show branches dedup against the same namespace as page-level ones, in document order — two islands that each bind `visible` yield `show:visible` and `show:visible#2`, and a dynamic `class` inside a list body dedups against one on the page root, never a duplicate name.
 
-**Migration.** All three changes below are in `[Unreleased]` — they are in the
+A dynamic attribute or text child that binds a **signal in scope** (`() => count()`) reuses that signal's named slot instead and mints no `attr:`/`text:` name at all. Widening which signals are in scope therefore REMOVES `attr:`/`text:` names and renumbers the `#N` suffixes on the ones that remain — see the migration notes below.
+
+**Slot ids are not addresses.** They are handed out in the order the walk reaches each construct, so adding a signal renumbers everything after it. Nothing on the wire depends on the value: the client matches hydration markers positionally (`adoptNode` advances to the next `f:sN`/`f:tN`/`f:lN` of the right kind) and `DYN_TEXT` carries an independent `marker_id`. Address slots by NAME.
+
+**Migration.** All the changes below are in `[Unreleased]` — they are in the
 repo and not yet on npm, where the current version is 0.2.0. `CHANGELOG.md` is
 the authority for which release each one ships in; do not re-date them here
 from memory.
 
-- (unreleased) Pages with two dynamic attributes sharing a key, or two dynamic text children at the same child index, previously emitted the SAME slot name twice and the earlier slot was unreachable. Those later occurrences are now suffixed (`attr:class#2`, `text:0#2`). Server code that injected such a key was, before this change, always addressing the LAST occurrence; it now addresses the first, and the later ones need the suffixed keys. Single-occurrence names are unchanged.
+- (unreleased) Signals in scopes the compiler previously did not read now get named slots, which **removes** the anonymous `attr:`/`text:` slots those bindings used to mint and renumbers the `#N` suffixes on the ones that remain. Measured over the shipped corpus: `dynamic-text` lost all four `text:*` names for four signal names, and `dynamic-attrs` lost `attr:value` (its `value: () => query()` binding now reuses `query`). Server code injecting a removed key fails **soft** — `SlotData::from_json` ignores unknown keys — so re-check every injected name against the emitted slot table after upgrading.
+- (unreleased) `show:*` slots now carry an SSR default, so a conditional whose condition is statically truthy server-renders its THEN branch. Pages that were shipping the wrong branch (and staying wrong through hydration) change their rendered HTML.
+- (unreleased) A page "twin" declaration of an island's signal is now a separate slot (`x` for the page's, `x#2` for the island's), and warns. Delete the twin.
 - (unreleased) `createShow` slots were previously all named `show:createShow` (and ternary shows `show:<index>`) — server code injecting those keys must move to the name-keyed scheme above.
 - (unreleased) Lists over literal sources were previously positional (`list:#N:array`) — where the map function has a named parameter they are now map-param-derived (`list:tile:array`). Unknown keys fail soft (silently ignored), so check names after upgrading.
 - (0.2.0) Every `createList` previously emitted `list:array` / `list:item` / `list:<prop>`, so on a page with more than one list only the first was reachable by name. Slots are now `list:<base>:…` with the base derived as described above.
@@ -248,24 +264,70 @@ With `slot_ids` populated, `forma-ir` natively emits the `data-forma-props` attr
 
 The per-item scratch slot (`list:<base>:item`) is working storage the LIST opcode overwrites on every row; after SSR it holds the **last rendered row**, so serializing it into `data-forma-props` would leak that row into the page. It is filtered out of `slot_ids` at emission time.
 
-### Island signal defaults
+### Signal scopes
 
-Signal defaults are extracted from **island component files** as well as the page entry: both module-level `const [count, setCount] = createSignal(0)` declarations (plain or `export const`) and declarations at the top level of the exported island function are picked up.
+A `createSignal` becomes a **named slot carrying its SSR default** whenever the
+signal is in lexical scope at the binding that reads it — and "in scope" is
+decided by the same traversal that decides what gets inlined into the page:
 
-The recommended pattern is **single-source**: declare the signal once at module scope in the island's own file. Page "twin" declarations (re-declaring the island's signal in the Page component so the compiler could see the default) are no longer required. When both exist, merging is first-wins with the root Page authoritative — identical twin declarations merge silently, and only a conflicting default warns at build time. The conflict warning names the declarer whose default actually won, which under first-wins may be an **earlier island** rather than the root.
+> **If the walk inlined the code, its signals are in scope. If it did not, there
+> is nothing to name.**
 
-Island signal merging runs on every entry-point pattern: `activateIslands`-only entries, named `mount(() => Page(), ...)` entries, and inline block-body `mount(() => { ... return h(...); }, ...)` entries — the `activateIslands({...})` registry is scanned in all cases.
-
-**Scope rules differ between the two files, deliberately:**
+That covers every scope the walk enters, without a list to keep in sync:
 
 | Where the signal is declared | Named slot? |
 |---|---|
 | Inside the exported root `*Page` component | Yes |
-| At module scope in the root page file | **No** — bindings to it get anonymous `text:`/`attr:` slots |
+| At module scope in the root page **file** | Yes |
 | At module scope in an island component file | Yes |
 | Inside the exported island component | Yes |
+| Inside an inlined sub-component (file-local or imported) | Yes |
+| At module scope of an inlined sub-component's own file | Yes |
+| In the entry file / mount callback of an inline `mount(() => {…})` | Yes |
+| Below the top level of any of those (inside `if`, `try`, a loop, a block) | Yes |
+| Inside a **nested function** that the walk does not inline | No — that function is its own scope, and gets its own frame if and when the walk inlines it |
+| In a module reached only through an `import` of the signal itself | No — the walk never inlined that module's code. Warns. |
 
-The root page's module scope is excluded because that file is also where page-level helpers live; a signal there is not part of the component's declared surface. Declare page signals **inside** the component function, or in the island file that owns them. A `createSignal` whose initial value is not a string, number, boolean or null literal never yields a named slot either — that case warns (see Build diagnostics).
+Lookup is lexical and searches **outward**: a component's own body shadows its
+file's module scope, which shadows nothing else. A sub-component's signals are
+NOT visible to the page around it, and two sibling components cannot see each
+other's.
+
+Only literal initial values yield a default: strings, numbers (including
+negative ones), booleans, `null`, expression-less template literals, and a
+module-level `const` that folds to a string (`createSignal(SEL_TOGGLE_OFF)`).
+Anything else warns and yields no named slot (see Build diagnostics).
+
+**Name collisions.** Two components can each declare `count`; they are
+different signals at runtime and must not share a slot. The **first** scope the
+walk enters that declares a name gets `count`, the next gets `count#2` — the
+same occurrence scheme every other slot family uses (see Slot Naming). Order is
+the walk's document order, so it does not depend on file system order. Every
+suffixed name is reported at build time, because injecting `count` would
+otherwise silently fill only the first.
+
+One slot per **declaration site**, not per instance: a component inlined (or
+islanded) twice shares its signals' slots. Their SSR defaults are identical by
+construction, so name-addressed injection reaches every instance.
+
+**Page "twin" declarations are now harmful.** Re-declaring an island's signal
+in the Page component — the workaround for the old extractor — creates a
+SECOND, unread slot and pushes the island's own signal to `count#2`. Delete the
+twin; the island's own declaration is what the walk reads.
+
+### Conditionals get an SSR default too
+
+`createShow(() => visible(), …)` and a ternary inside `() => …` mint a
+`show:<condition>` slot whose default is the branch the CLIENT would render on
+first paint, evaluated from the signals in scope. Without it the slot is Null,
+every conditional on the page server-rendered its ELSE branch, and hydration
+did **not** repair a wrong branch whose two sides both produce content — the
+page stayed wrong until the condition changed value.
+
+The slot name and id are unchanged: shows keep their own `show:*` slot rather
+than reusing the condition signal's, because servers inject shows by that name.
+A condition the compiler cannot evaluate keeps the old behaviour (ELSE
+server-side) and now warns.
 
 ### Static attributes from module constants
 

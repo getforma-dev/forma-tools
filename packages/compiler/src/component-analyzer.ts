@@ -1,9 +1,14 @@
 /**
  * Forma Compiler - Component Analyzer
  *
- * Parses entry points (app.ts), resolves component imports, extracts
- * h() call trees, file-level constants, and signal defaults.
- * This feeds into the IR walk engine.
+ * Parses entry points (app.ts), resolves component imports, and extracts
+ * h() call trees and file-level constants. This feeds into the IR walk engine.
+ *
+ * Signal defaults are NOT extracted here. They are resolved by the walk itself
+ * (see signal-scope.ts): this file used to carry three scope-specific
+ * extractors — root function body, island file, inline mount — that the walk
+ * knew nothing about, and every scope the walk learned to inline without a
+ * matching fourth extractor lost its signals silently.
  */
 
 import { parse } from '@babel/parser';
@@ -16,6 +21,7 @@ import {
   readImportBindings,
   resolveExportedFunction,
   returnExpressionOf,
+  type ComponentFunction,
   type ImportBinding,
 } from './export-resolver';
 
@@ -43,7 +49,11 @@ export interface EntryPointInfo {
   importBindings?: Map<string, ImportBinding>;
   /** For inline mount returns: the AST node of the return expression.
    *  When set, componentName is '__inline__' and importPath is ''. */
-  inlineReturnNode?: import('@babel/types').Expression;
+  inlineReturnNode?: T.Expression;
+  /** For a BLOCK-bodied inline mount: the callback's own statements. That
+   *  block is a real lexical scope — the signals an inline-mount page declares
+   *  live there — so the walk needs its statements, not just its return. */
+  inlineMountBody?: T.Statement[];
 }
 
 export interface ComponentInfo {
@@ -57,6 +67,11 @@ export interface ComponentInfo {
   filePath: string;
   /** Source of `filePath` (JSX already transformed to h() calls). */
   source: string;
+  /** Parsed AST of `source`, so the caller does not re-parse it. */
+  ast: T.File;
+  /** The component function itself. Its body is a lexical scope: the signals
+   *  declared inside it are resolved from here, not from a separate pass. */
+  fn: ComponentFunction;
 }
 
 /**
@@ -71,11 +86,6 @@ export interface AnalyzerLookupOptions {
    *  the file and the construct. The caller adds the consequence, which
    *  differs by call site. Nothing about a failed lookup is silent. */
   onUnresolved?: (detail: string) => void;
-}
-
-export interface SignalDefault {
-  type: 'text' | 'bool' | 'number' | 'null';
-  default: string | boolean | number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +187,8 @@ export class ComponentAnalyzer {
                 componentName: '__inline__',
                 importPath: '',
                 inlineReturnNode: stmt.argument,
+                // The callback body is the page's innermost lexical scope.
+                inlineMountBody: firstArg.body.body,
               };
               path.stop();
               break;
@@ -230,7 +242,7 @@ export class ComponentAnalyzer {
     // and is NOT one of the island components in the registry.
     for (const [name, importPath] of importMap) {
       if (!islandNames.has(name) && name.endsWith('Page') && importPath.startsWith('.')) {
-        return { componentName: name, importPath, islandNames, importMap };
+        return { componentName: name, importPath, islandNames, importMap, importBindings };
       }
     }
 
@@ -315,6 +327,8 @@ export class ComponentAnalyzer {
       returnNode,
       filePath: lookup.filePath,
       source: lookup.source,
+      ast: lookup.ast,
+      fn: lookup.fn,
     };
   }
 
@@ -559,237 +573,5 @@ export class ComponentAnalyzer {
     }
 
     return obj;
-  }
-
-  // -------------------------------------------------------------------------
-  // Task 8: Signal Initial Value Detection
-  // -------------------------------------------------------------------------
-
-  /**
-   * Find `const [name, setName] = createSignal(initialValue)` patterns
-   * inside the function a module exports under `functionName`.
-   *
-   * Returns a Map from signal name to its default info.
-   */
-  extractSignalDefaults(
-    source: string,
-    filename: string,
-    functionName: string,
-    options: AnalyzerLookupOptions = {},
-  ): Map<string, SignalDefault> {
-    const signals = new Map<string, SignalDefault>();
-    const body = this.findExportedFunctionBody(source, filename, functionName, options);
-    if (body) this.collectSignalDefaults(body.body, signals, filename);
-    return signals;
-  }
-
-  /**
-   * Find `const [name, setName] = createSignal(initialValue)` patterns in an
-   * entry point that mounts inline: `mount(() => { … }, '#app')`.
-   *
-   * There is no exported component to look inside, so the component's scope is
-   * the module's top level plus the mount callback's own body — both are
-   * collected. Asking for an exported function instead (the old code asked for
-   * one literally named `__inline__`) could only ever come back empty, and an
-   * inline-mount page therefore got ZERO named signal slots.
-   * Verified by: packages/compiler/tests/component-analyzer.test.ts > "collects module-scope and mount-callback signals for an inline mount"
-   *
-   * Returns a Map from signal name to its default info.
-   */
-  extractInlineMountSignalDefaults(
-    source: string,
-    filename: string,
-  ): Map<string, SignalDefault> {
-    const ast = parse(source, PARSE_OPTS);
-    const signals = new Map<string, SignalDefault>();
-
-    this.collectSignalDefaults(ast.program.body, signals, filename);
-
-    const self = this;
-    traverse(ast, {
-      CallExpression(path) {
-        if (!t.isIdentifier(path.node.callee) || path.node.callee.name !== 'mount') return;
-        const firstArg = path.node.arguments[0];
-        if (
-          firstArg
-          && t.isArrowFunctionExpression(firstArg)
-          && t.isBlockStatement(firstArg.body)
-        ) {
-          self.collectSignalDefaults(firstArg.body.body, signals, filename);
-        }
-        path.stop();
-      },
-    });
-
-    return signals;
-  }
-
-  /**
-   * Find `const [name, setName] = createSignal(initialValue)` patterns
-   * in an ISLAND component file.
-   *
-   * Unlike extractSignalDefaults, this covers BOTH:
-   * (a) module top-level declarations (island files typically declare their
-   *     signals at module scope so the Page twin can single-source defaults),
-   * (b) the top-level statements of the exported function named componentName.
-   *
-   * Returns a Map from signal name to its default info.
-   */
-  extractIslandSignalDefaults(
-    source: string,
-    filename: string,
-    componentName: string,
-    options: AnalyzerLookupOptions = {},
-  ): Map<string, SignalDefault> {
-    const ast = parse(source, PARSE_OPTS);
-    const signals = new Map<string, SignalDefault>();
-
-    // (a) Module top-level createSignal declarations of the file we were
-    //     pointed at.
-    this.collectSignalDefaults(ast.program.body, signals, filename);
-
-    const lookup = resolveExportedFunction(source, filename, componentName, {
-      loadModule: options.loadModule,
-      allowLocal: false,
-      allowNested: false,
-    });
-    if (lookup.kind === 'unresolved') {
-      options.onUnresolved?.(lookup.detail);
-      return signals;
-    }
-
-    // (b) When a barrel forwarded the export, the island's code — and its
-    //     module-scope signals — live in ANOTHER file. Reading only the
-    //     barrel's module scope would find nothing there.
-    if (lookup.filePath !== filename) {
-      this.collectSignalDefaults(lookup.ast.program.body, signals, lookup.filePath);
-    }
-
-    // (c) Top-level statements of the component function itself.
-    if (t.isBlockStatement(lookup.fn.body)) {
-      this.collectSignalDefaults(lookup.fn.body.body, signals, lookup.filePath);
-    }
-
-    return signals;
-  }
-
-  /**
-   * Body of the function a module exports under `functionName`, through the
-   * one shared export resolver — so a `.tsx` island, whose
-   * `export function Counter()` esbuild has rewritten to `export { Counter }`,
-   * is read the same as its `.ts` twin.
-   *
-   * This was the SILENT instance of the export-form defect: byte-identical
-   * `.ts` and `.tsx` islands produced different IR (named slot `hits` with its
-   * default vs. anonymous `text:0` with none) and neither build said a word.
-   * Failing to find the body now reports why.
-   * Verified by: packages/compiler/tests/component-analyzer.test.ts > "reads a .tsx island's in-function signal through the esbuild specifier shape"
-   */
-  private findExportedFunctionBody(
-    source: string,
-    filename: string,
-    functionName: string,
-    options: AnalyzerLookupOptions,
-  ): T.BlockStatement | null {
-    const lookup = resolveExportedFunction(source, filename, functionName, {
-      loadModule: options.loadModule,
-      allowLocal: false,
-      allowNested: false,
-    });
-
-    if (lookup.kind === 'unresolved') {
-      options.onUnresolved?.(lookup.detail);
-      return null;
-    }
-
-    if (!t.isBlockStatement(lookup.fn.body)) {
-      // An expression-bodied arrow declares no signals — nothing to report.
-      return null;
-    }
-
-    return lookup.fn.body;
-  }
-
-  /**
-   * Scan a statement list for `const [name, setName] = createSignal(literal)`
-   * declarations (including `export const` at module level) and record their
-   * defaults into the given map.
-   *
-   * A signal whose initial value is not a string/number/boolean/null literal
-   * cannot be given an SSR default, so it gets NO named slot — every binding to
-   * it falls back to an anonymous `text:<n>`/`attr:<key>` slot and can no
-   * longer be addressed by name for server-side injection. That used to happen
-   * in silence; it now warns, because the consequence (a slot key that quietly
-   * does not exist) is invisible until injection fails at runtime.
-   * Verified by: packages/compiler/tests/ir-diagnostics.test.ts > "warns that a non-literal signal default gets no named slot"
-   */
-  private collectSignalDefaults(
-    statements: T.Statement[],
-    signals: Map<string, SignalDefault>,
-    filename?: string,
-  ): void {
-    for (const stmt of statements) {
-      const decl = ComponentAnalyzer.asVariableDeclaration(stmt);
-      if (!decl) continue;
-
-      for (const varDecl of decl.declarations) {
-        // Must be array destructuring: const [name, setName] = ...
-        if (!t.isArrayPattern(varDecl.id)) continue;
-        if (!varDecl.init) continue;
-
-        // Must be a createSignal(...) call
-        if (
-          !t.isCallExpression(varDecl.init) ||
-          !t.isIdentifier(varDecl.init.callee) ||
-          varDecl.init.callee.name !== 'createSignal'
-        ) {
-          continue;
-        }
-
-        // Extract signal name from first element of array pattern
-        const elements = varDecl.id.elements;
-        if (elements.length < 1 || !elements[0] || !t.isIdentifier(elements[0])) {
-          continue;
-        }
-        const signalName = elements[0].name;
-
-        // Extract initial value from first argument
-        const initArgs = varDecl.init.arguments;
-        if (initArgs.length < 1) continue;
-
-        const initArg = initArgs[0];
-        if (!initArg || t.isSpreadElement(initArg)) continue;
-
-        const signalDefault = this.evaluateSignalDefault(initArg as T.Expression);
-        if (signalDefault) {
-          signals.set(signalName, signalDefault);
-        } else {
-          console.warn(
-            `   IR: signal '${signalName}'${filename ? ` in ${filename}` : ''} is initialized with a ${(initArg as T.Expression).type} the compiler cannot evaluate — it gets no named slot, so bindings to it land in anonymous 'text:'/'attr:' slots and cannot be injected by name; initialize it with a string, number, boolean or null literal to get one`,
-          );
-        }
-      }
-    }
-  }
-
-  /**
-   * Evaluate a signal's initial value expression to a SignalDefault.
-   * Supports: string, number, boolean, null literals.
-   */
-  private evaluateSignalDefault(node: T.Expression): SignalDefault | null {
-    if (t.isStringLiteral(node)) {
-      return { type: 'text', default: node.value };
-    }
-    if (t.isNumericLiteral(node)) {
-      return { type: 'number', default: node.value };
-    }
-    if (t.isBooleanLiteral(node)) {
-      return { type: 'bool', default: node.value };
-    }
-    if (t.isNullLiteral(node)) {
-      return { type: 'null', default: null };
-    }
-    // Unsupported expression type
-    return null;
   }
 }

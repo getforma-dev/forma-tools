@@ -15,8 +15,18 @@ export {
   type AnalyzerLookupOptions,
   type ComponentInfo,
   type EntryPointInfo,
-  type SignalDefault,
 } from './component-analyzer.js';
+export {
+  collectSignalDeclarations,
+  enterComponentScope,
+  enterSignalScope,
+  lookupSignal,
+  newSignalRegistry,
+  type SignalBinding,
+  type SignalDefault,
+  type SignalRegistry,
+  type SignalScope,
+} from './signal-scope.js';
 export {
   resolveExportedFunction,
   readImportBindings,

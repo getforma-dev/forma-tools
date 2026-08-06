@@ -737,11 +737,14 @@ describe('Island Registry', () => {
       expect(tableIslands[0]!.slotIds).toEqual(expected);
     });
 
-    it('island slot ids include reused signal slots registered before the walk', () => {
+    it('island slot ids include the signal slots its own scope minted', () => {
       const resolveComponent = (name: string) => {
         if (name === 'CounterIsland') {
           return {
-            source: `export function CounterIsland() {
+            source: `import { createSignal, h } from 'formajs';
+            export function CounterIsland() {
+              const [count] = createSignal(0);
+              const [unread] = createSignal('never bound');
               return h('span', null, () => count());
             }`,
             functionName: 'CounterIsland',
@@ -752,20 +755,21 @@ describe('Island Registry', () => {
 
       const expr = parseExpr(`h('div', null, CounterIsland())`);
       const ctx = new IrEmitContext();
-      // Pre-register the signal slot BEFORE the walk (as generateRealIr does),
-      // so the island subtree reuses it without a fresh addSlot call.
-      const countSlotId = ctx.addSlot('count', 0x01);
       if (t.isCallExpression(expr)) {
         walkHTree(expr, 'h', ctx, {
           resolveComponent,
           islandNames: new Set(['CounterIsland']),
-          signalSlots: new Map([['count', countSlotId]]),
         });
       }
 
+      const slots = getSlots(ctx.toBinary());
       const islands = ctx.getIslands();
       expect(islands).toHaveLength(1);
-      expect(islands[0]!.slotIds).toEqual([countSlotId]);
+      // The island's own scope is entered by the WALK, so `count` is named,
+      // defaulted and captured — and `unread`, which no binding reads, is
+      // declared but stays OUT of the props payload.
+      expect(slots.map(s => s.name)).toEqual(['count', 'unread']);
+      expect(islands[0]!.slotIds).toEqual([slots.find(s => s.name === 'count')!.id]);
     });
 
     it('unresolved island fallback keeps empty slot ids', () => {
@@ -953,7 +957,12 @@ describe('generateRealIr island signal defaults', () => {
     expect(result!.islands[0]!.slotIds).toEqual([byName.get('statusText')!.id]);
   });
 
-  it('conflicting twin declaration warns and keeps the root default', () => {
+  it('a page "twin" declaration is a SEPARATE signal, and the island renders its own', () => {
+    // The twin pattern — re-declaring an island's signal in the Page component
+    // so the old pre-pass could see the default — is no longer needed, and is
+    // now actively wrong: the two declarations are different lexical bindings,
+    // which is what they are at RUNTIME too. The page's copy gets `statusText`,
+    // the island's gets `statusText#2`, and the island's binding reads its own.
     const entryPath = writeProject({
       'app.ts': entrySource,
       'DashboardPage.ts': `
@@ -976,24 +985,30 @@ describe('generateRealIr island signal defaults', () => {
     const result = generateRealIr(entryPath);
     expect(result).not.toBeNull();
 
-    // Conflicting default warned about
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("signal 'statusText'"));
-
-    // Root Page is authoritative — its default wins
     const slots = getSlots(result!.binary);
-    const statusSlots = slots.filter(s => s.name === 'statusText');
-    expect(statusSlots).toHaveLength(1);
-    expect(statusSlots[0]!.default).toBe('busy');
+    expect(slots.map(s => [s.name, s.default])).toEqual([
+      ['statusText', 'busy'],     // the page's own, which nothing on the page reads
+      ['statusText#2', 'idle'],   // the island's, which its DYN_TEXT binds
+    ]);
+    expect(result!.islands[0]!.slotIds)
+      .toEqual([slots.find(s => s.name === 'statusText#2')!.id]);
+
+    // …and the rename is reported, because injecting `statusText` would now
+    // fill a slot nothing renders.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("signal 'statusText' is also declared in another scope"),
+    );
   });
 
-  it('identical twin declaration merges silently', () => {
+  it('deleting the twin leaves exactly the island\'s signal, unsuffixed and silent', () => {
+    // The migration this makes possible: one declaration, in the file that
+    // owns it. Nothing about the page's slot table needs the twin.
     const entryPath = writeProject({
       'app.ts': entrySource,
       'DashboardPage.ts': `
-        import { createSignal, h } from 'formajs';
+        import { h } from 'formajs';
         import { CounterIsland } from './CounterIsland';
         export function DashboardPage() {
-          const [statusText, setStatusText] = createSignal('idle');
           return h('div', null, CounterIsland());
         }
       `,
@@ -1008,17 +1023,13 @@ describe('generateRealIr island signal defaults', () => {
 
     const result = generateRealIr(entryPath);
     expect(result).not.toBeNull();
-
-    // No warning for identical twin declarations (the ksx pattern)
     expect(warnSpy).not.toHaveBeenCalled();
 
     const slots = getSlots(result!.binary);
-    const statusSlots = slots.filter(s => s.name === 'statusText');
-    expect(statusSlots).toHaveLength(1);
-    expect(statusSlots[0]!.default).toBe('idle');
+    expect(slots.map(s => [s.name, s.default])).toEqual([['statusText', 'idle']]);
   });
 
-  it('conflict between two islands warns naming the earlier island whose default won', () => {
+  it('two islands declaring the same name get one slot each, and the rename is reported', () => {
     const entryPath = writeProject({
       'app.ts': `
         import { activateIslands } from 'formajs';
@@ -1054,19 +1065,28 @@ describe('generateRealIr island signal defaults', () => {
     const result = generateRealIr(entryPath);
     expect(result).not.toBeNull();
 
-    // First-wins: AlphaIsland declared 'shared' first, so its default is kept
+    // Two files, two module-scope declarations, two runtime signals — so two
+    // slots, each carrying its OWN default. The old flat map merged them
+    // first-wins and BetaIsland server-rendered Alpha's text.
     const slots = getSlots(result!.binary);
-    const sharedSlots = slots.filter(s => s.name === 'shared');
-    expect(sharedSlots).toHaveLength(1);
-    expect(sharedSlots[0]!.default).toBe('from-alpha');
+    expect(slots.map(s => [s.name, s.default])).toEqual([
+      ['shared', 'from-alpha'],
+      ['shared#2', 'from-beta'],
+    ]);
 
-    // The warning names the ACTUAL earlier declarer (AlphaIsland), not the root
+    // Each island binds its own slot.
+    expect(result!.islands.map(i => i.slotIds)).toEqual([
+      [slots.find(s => s.name === 'shared')!.id],
+      [slots.find(s => s.name === 'shared#2')!.id],
+    ]);
+
+    // The second declaration's slot name is not the one in the source, so it
+    // is named in a warning rather than left for a failed injection to reveal.
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("signal 'shared' in island 'BetaIsland'"),
+      expect.stringContaining("signal 'shared' is also declared in another scope"),
     );
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("keeping the default from island 'AlphaIsland'"),
-    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("'shared#2'"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('BetaIsland.ts'));
   });
 
   it('inline block-body mount path merges island signal defaults', () => {

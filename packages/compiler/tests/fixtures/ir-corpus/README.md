@@ -50,8 +50,34 @@ the same byte. Only the Rust side turns the wrong byte into missing rows.
 | `unicode-emoji` | non-ASCII and emoji in text, static attrs and a signal default (UTF-8 length prefixes) |
 | `jsx-page` | an **all-`.tsx`** app: entry, page, sibling sub-component and island, every one of them reaching the analyzer through esbuild's `export { X }` rewrite |
 | `barrel-exports` | every component reached through an `index.ts` barrel: `export { X } from`, `export * from`, and `export { XImpl as X }` |
+| `sub-component-scopes` | signals declared in the four scopes the old hand-written extractors did not look in, plus the same-name **collision** rule and a truthy `SHOW_IF` default |
 
-### Why the last two exist
+### Why `sub-component-scopes` exists
+
+Every other case declares its signals where the old pre-pass happened to look:
+the root component's body, or a registered island's file. Signal defaults were
+gathered by a pass that enumerated scopes BY HAND, one method per shape, while
+the WALK independently decided what got inlined — so each time the walk learned
+to inline something new, the extractor had to be taught it separately, and when
+it was not the failure was silent.
+
+This case declares its signals in the four places nobody had written a method
+for: the root page FILE's module scope, an inlined file-local sub-component's
+body, an inlined cross-file sub-component's module scope, and below the top
+level of a scope (inside an `if`). It also declares `count` twice, in two
+different components, which is the collision the `#N` occurrence suffix
+resolves.
+
+The `@page defaults` render is what makes it a real check. Before the fix, that
+section of the golden was four zero-width spaces, a missing `class`, a missing
+boolean attribute, and — the one that does not repair itself — `<p class="off">`
+for a `createShow` whose condition defaults to `true`. Hydration adopts that
+wrong branch silently: both branches produce a `<p>`, the tags match,
+`adoptNode` takes the server's element, and neither mismatch-repair arm fires
+because both arms test "one side has content and the other does not". The page
+stays wrong until the signal changes value.
+
+### Why `jsx-page` and `barrel-exports` exist
 
 These two are not new opcodes — they are new *ways of reaching* the compiler,
 and the compiler could not follow either one. The lookup that answers "which

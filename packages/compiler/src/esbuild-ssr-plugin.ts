@@ -16,9 +16,16 @@ const _require = createRequire(import.meta.url);
 import { parse } from '@babel/parser';
 import * as t from '@babel/types';
 import { IrEmitContext } from './ir-emit';
-import { ComponentAnalyzer, type EntryPointInfo, type SignalDefault } from './component-analyzer';
+import { ComponentAnalyzer } from './component-analyzer';
 import { readImportBindings, resolveExportedFunction } from './export-resolver';
 import { fsModuleLoader, loadComponentSource, resolveFilePath } from './module-loader';
+import {
+  collectSignalDeclarations,
+  enterComponentScope,
+  enterSignalScope,
+  newSignalRegistry,
+  type SignalScope,
+} from './signal-scope';
 import { walkHTree, walkCallExpression, type WalkContext } from './ir-walk';
 
 export interface SsrPluginOptions {
@@ -28,51 +35,6 @@ export interface SsrPluginOptions {
   outDir: string;
   /** Entry point path (e.g., 'src/platform/onboarding/app.ts') for real IR emission */
   entryPoint?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Slot type hints (must match ir-walk.ts)
-// ---------------------------------------------------------------------------
-
-const TYPE_TEXT   = 0x01;
-const TYPE_BOOL   = 0x02;
-const TYPE_NUMBER = 0x03;
-const SOURCE_CLIENT = 0x01;
-
-/**
- * Register one client-sourced slot per signal, carrying its SSR default.
- *
- * Both mount paths call this. They used to carry separate copies and the
- * inline one had drifted: it handled only text and bool, so a numeric signal
- * on an inline-mount page got a TYPE_TEXT slot with NO default bytes — the
- * server rendered a blank where the number belongs.
- * Verified by: packages/compiler/tests/ssr-emission.test.ts > "gives a numeric inline-mount signal its type and default"
- */
-function registerSignalSlots(
-  ctx: IrEmitContext,
-  signalDefaults: Map<string, SignalDefault>,
-  signalSlots: Map<string, number>,
-): void {
-  for (const [name, sigDefault] of signalDefaults) {
-    let typeHint = TYPE_TEXT;
-    let defaultBytes = new Uint8Array(0);
-
-    if (sigDefault.type === 'text' && typeof sigDefault.default === 'string') {
-      typeHint = TYPE_TEXT;
-      defaultBytes = new TextEncoder().encode(sigDefault.default);
-    } else if (sigDefault.type === 'bool' && typeof sigDefault.default === 'boolean') {
-      typeHint = TYPE_BOOL;
-      defaultBytes = new TextEncoder().encode(String(sigDefault.default));
-    } else if (sigDefault.type === 'number' && typeof sigDefault.default === 'number') {
-      typeHint = TYPE_NUMBER;
-      defaultBytes = new TextEncoder().encode(String(sigDefault.default));
-    }
-    // type 'null' keeps TYPE_TEXT with no default bytes: the Rust walker omits
-    // the attribute entirely for an empty default, which is what null means.
-
-    const slotId = ctx.addSlot(name, typeHint, SOURCE_CLIENT, defaultBytes);
-    signalSlots.set(name, slotId);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,56 +177,52 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
     // ── Handle inline return from block-body mount() (Pattern 3) ──
     if (entryInfo.componentName === '__inline__' && entryInfo.inlineReturnNode) {
       const ctx = new IrEmitContext();
-      const signalSlots = new Map<string, number>();
-
-      // Import map from the entry point file (island signal extraction below)
-      const importMap = new Map<string, string>();
-      for (const [local, binding] of entryInfo.importBindings ?? []) {
-        importMap.set(local, binding.source);
-      }
+      const signalRegistry = newSignalRegistry();
 
       const resolveComponent = createComponentResolver([
         { path: entryPointPath, source: entrySource },
       ]);
 
-      // Extract file constants and signal defaults from entry point itself
+      // Extract file constants from the entry point itself
       const fileConstants = analyzer.extractFileConstants(entrySource, entryPointPath);
       const stringConstants = analyzer.extractStringConstants(entrySource, entryPointPath);
 
-      // Signal defaults: an inline mount has no exported component to look
-      // inside — its signals live at module scope and in the mount callback.
-      // This used to ask for an export literally named '__inline__', a lookup
-      // that could never match, so an inline-mount page got ZERO named signal
-      // slots and every binding landed in an anonymous `text:`/`attr:` slot
-      // that server-side injection cannot address by name.
+      // An inline mount has no exported component to look inside: the page's
+      // scope chain is the entry file's module scope, then the mount
+      // callback's own body. Both are real lexical scopes of the tree being
+      // walked, which is why the walk reads them and no separate extractor
+      // has to know this pattern exists.
       // Verified by: packages/compiler/tests/ssr-emission.test.ts > "names signal slots on an inline-mount entry"
-      const signalDefaults = analyzer.extractInlineMountSignalDefaults(
-        entrySource,
-        entryPointPath,
-      ) as Map<string, SignalDefault>;
-
-      // Merge signal defaults from island component files (finding F9) — the
-      // inline block-body mount path can register islands via
-      // activateIslands({...}) too. The entry file IS the component here, so
-      // its own import map and dir serve as the component-level fallback.
-      mergeIslandSignalDefaults(
-        analyzer,
-        entryInfo,
-        'the entry mount',
-        entryDir,
-        importMap,
-        entryDir,
-        signalDefaults,
+      const entryAst = parse(entrySource, PARSE_OPTS);
+      let signalScope: SignalScope = enterSignalScope(
+        null,
+        `${entryPointPath}#module`,
+        collectSignalDeclarations(entryAst.program.body, {
+          filePath: entryPointPath,
+          constants: stringConstants,
+        }),
+        ctx,
+        signalRegistry,
       );
-
-      registerSignalSlots(ctx, signalDefaults, signalSlots);
+      if (entryInfo.inlineMountBody) {
+        signalScope = enterSignalScope(
+          signalScope,
+          `${entryPointPath}#mount`,
+          collectSignalDeclarations(entryInfo.inlineMountBody, {
+            filePath: entryPointPath,
+            constants: stringConstants,
+          }),
+          ctx,
+          signalRegistry,
+        );
+      }
 
       const walkCtx: WalkContext = {
         sourceFile: entryPointPath,
         fileConstants,
         stringConstants,
-        signalSlots,
-        signalDefaults,
+        signalScope,
+        signalRegistry,
         resolveComponent,
         loadModule: fsModuleLoader,
         visited: new Set(),
@@ -344,63 +302,37 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
     const fileConstants = analyzer.extractFileConstants(rootSource, rootPath);
     const stringConstants = analyzer.extractStringConstants(rootSource, rootPath);
 
-    // 7. Extract signal defaults (for slot defaults). A failure here used to be
-    // the compiler's only fully silent one: the signals kept their bindings but
-    // lost their names, so the page shipped anonymous slots the server could
-    // not inject into and no build output said why.
-    const signalDefaults = analyzer.extractSignalDefaults(
-      componentSource,
-      componentPath,
-      exportedName,
-      {
-        loadModule: fsModuleLoader,
-        onUnresolved: (detail) => console.warn(
-          `   IR: ${detail} — its createSignal defaults cannot be read, so bindings to them land in anonymous 'text:'/'attr:' slots that cannot be injected by name`,
-        ),
-      },
-    );
-
-    // 8. Build import map from the root component's own file (for island
-    // signal extraction below)
-    const componentAst = parse(rootSource, PARSE_OPTS);
-    const componentDir = dirname(rootPath);
-    const importMap = new Map<string, string>();
-    for (const [local, binding] of readImportBindings(componentAst as any)) {
-      importMap.set(local, binding.source);
-    }
-
-    // 9. Merge signal defaults from ISLAND component files (first-wins,
-    // root component authoritative — see mergeIslandSignalDefaults).
-    mergeIslandSignalDefaults(
-      analyzer,
-      entryInfo,
-      `root '${entryInfo.componentName}'`,
-      entryDir,
-      importMap,
-      componentDir,
-      signalDefaults,
-    );
-
-    // 10. Create IrEmitContext and register signal slots with defaults
+    // 7. Create IrEmitContext and open the root page's scope chain: the page
+    // FILE's module scope, then the page COMPONENT's own body. Island and
+    // sub-component scopes are NOT gathered here — the walk pushes each one as
+    // it inlines that component, which is what makes a scope the walk learns
+    // to inline later work without a matching extractor being written for it.
     const ctx = new IrEmitContext();
-    const signalSlots = new Map<string, number>();
+    const signalRegistry = newSignalRegistry();
+    const signalScope = enterComponentScope({
+      ast: componentInfo.ast,
+      fn: componentInfo.fn,
+      fnName: exportedName,
+      filePath: rootPath,
+      constants: stringConstants,
+      ctx,
+      registry: signalRegistry,
+    });
 
-    registerSignalSlots(ctx, signalDefaults, signalSlots);
-
-    // 11. Build resolve callback for sub-components
+    // 8. Build resolve callback for sub-components
     const resolveComponent = createComponentResolver([
       { path: entryPointPath, source: entrySource },
       { path: componentPath, source: componentSource },
       { path: rootPath, source: rootSource },
     ]);
 
-    // 12. Build WalkContext and walk the h() tree
+    // 9. Build WalkContext and walk the h() tree
     const walkCtx: WalkContext = {
       sourceFile: rootPath,
       fileConstants,
       stringConstants,
-      signalSlots,
-      signalDefaults,
+      signalScope,
+      signalRegistry,
       resolveComponent,
       loadModule: fsModuleLoader,
       visited: new Set(),
@@ -411,6 +343,8 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       // and show on the page dedups against one shared namespace.
       listNames: { counts: new Map(), total: 0 },
       showNames: { counts: new Map(), total: 0 },
+      attrNames: new Map(),
+      textNames: new Map(),
     };
 
     const returnNode = componentInfo.returnNode;
@@ -424,7 +358,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       return null;
     }
 
-    // 13. Return the binary and island metadata
+    // 10. Return the binary and island metadata
     return {
       binary: ctx.toBinary(),
       islands: ctx.getIslands(),
@@ -432,88 +366,6 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
   } catch (err) {
     console.warn(`   IR: real emission failed: ${(err as Error).message}`);
     return null;
-  }
-}
-
-/**
- * Merge signal defaults from ISLAND component files into the page-level map.
- * Island files declare their signals at module scope (or inside the island
- * function); merging is FIRST-WINS — the root component's defaults (already
- * in `signalDefaults`) are authoritative, then islands merge in registry
- * order. Identical duplicate declarations merge silently; only a conflicting
- * default warns, naming the declarer whose default actually won — first-wins
- * means the keeper may be an EARLIER ISLAND, not necessarily the root.
- *
- * `rootLabel` names the pre-seeded declarations in warnings (e.g.
- * "root 'DashboardPage'"). `componentImportMap`/`componentDir` are the
- * fallback for resolving island files not imported by the entry itself;
- * the inline mount path passes the entry's own map and dir for both.
- */
-function mergeIslandSignalDefaults(
-  analyzer: ComponentAnalyzer,
-  entryInfo: EntryPointInfo,
-  rootLabel: string,
-  entryDir: string,
-  componentImportMap: Map<string, string>,
-  componentDir: string,
-  signalDefaults: Map<string, SignalDefault>,
-): void {
-  if (!entryInfo.islandNames) return;
-
-  // Provenance: signal name -> label of the declarer whose default won.
-  const provenance = new Map<string, string>();
-  for (const sigName of signalDefaults.keys()) {
-    provenance.set(sigName, rootLabel);
-  }
-
-  for (const islandName of entryInfo.islandNames) {
-    // Resolve the island's source file via the entry's import map,
-    // falling back to the component file's import map.
-    let islandPath: string | null = null;
-    const entryImport = entryInfo.importMap?.get(islandName);
-    if (entryImport && (entryImport.startsWith('.') || entryImport.startsWith('/'))) {
-      islandPath = resolveFilePath(entryDir, entryImport);
-    }
-    if (!islandPath) {
-      const componentImport = componentImportMap.get(islandName);
-      if (componentImport && (componentImport.startsWith('.') || componentImport.startsWith('/'))) {
-        islandPath = resolveFilePath(componentDir, componentImport);
-      }
-    }
-    if (!islandPath) {
-      console.warn(`   IR: could not resolve island component '${islandName}' for signal extraction`);
-      continue;
-    }
-
-    const islandSource = loadComponentSource(islandPath);
-    if (islandSource === null) {
-      console.warn(`   IR: could not read island component file ${islandPath}`);
-      continue;
-    }
-
-    const islandDefaults = analyzer.extractIslandSignalDefaults(
-      islandSource,
-      islandPath,
-      islandName,
-      {
-        loadModule: fsModuleLoader,
-        onUnresolved: (detail) => console.warn(
-          `   IR: ${detail} — signals declared inside island '${islandName}' get no named slots, so bindings to them land in anonymous 'text:'/'attr:' slots that cannot be injected by name`,
-        ),
-      },
-    );
-    for (const [sigName, sigDefault] of islandDefaults) {
-      const existing = signalDefaults.get(sigName);
-      if (!existing) {
-        signalDefaults.set(sigName, sigDefault);
-        provenance.set(sigName, `island '${islandName}'`);
-      } else if (existing.type !== sigDefault.type || existing.default !== sigDefault.default) {
-        const keeper = provenance.get(sigName) ?? rootLabel;
-        console.warn(
-          `   IR: signal '${sigName}' in island '${islandName}' has default ${JSON.stringify(sigDefault.default)} but ${keeper} declares ${JSON.stringify(existing.default)} — keeping the default from ${keeper}`,
-        );
-      }
-    }
   }
 }
 

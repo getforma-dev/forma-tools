@@ -29,7 +29,11 @@ import * as t from '@babel/types';
 
 import { IrEmitContext } from '../src/ir-emit';
 import { walkHTree, walkCallExpression, type WalkContext } from '../src/ir-walk';
-import { ComponentAnalyzer } from '../src/component-analyzer';
+import {
+  collectSignalDeclarations,
+  enterSignalScope,
+  newSignalRegistry,
+} from '../src/signal-scope';
 import { assertBinaryInvariants, getIslands, parseOpcodeList } from './helpers/fmir';
 
 // ---------------------------------------------------------------------------
@@ -44,8 +48,17 @@ function parseExpr(code: string): T.Expression {
   return (ast.program.body[0] as T.VariableDeclaration).declarations[0]!.init!;
 }
 
-/** Walk an expression, capturing every console.warn the walk produces. */
-function emitWithWarnings(code: string, walkCtx: WalkContext = {}) {
+/**
+ * Walk an expression, capturing every console.warn the walk produces.
+ *
+ * `signals` is source for the declarations that must be IN SCOPE — a binding
+ * to a signal the compiler cannot resolve is itself a degradation (the value
+ * renders empty server-side), so a fixture that is supposed to be CLEAN has to
+ * declare the signals it reads, exactly as a real page does. The scope's slots
+ * are minted into the same context the walk emits into, or the ids the walk
+ * writes would name slots that do not exist.
+ */
+function emitWithWarnings(code: string, walkCtx: WalkContext = {}, signals?: string) {
   const warnings: string[] = [];
   const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
     warnings.push(args.join(' '));
@@ -53,6 +66,24 @@ function emitWithWarnings(code: string, walkCtx: WalkContext = {}) {
   try {
     const expr = parseExpr(code);
     const ctx = new IrEmitContext();
+    if (signals) {
+      const registry = newSignalRegistry();
+      walkCtx = {
+        ...walkCtx,
+        signalRegistry: registry,
+        signalScope: enterSignalScope(
+          null,
+          'fixture.ts#module',
+          collectSignalDeclarations(
+            parse(signals, { sourceType: 'module', plugins: ['typescript'] })
+              .program.body as T.Statement[],
+            { filePath: 'fixture.ts' },
+          ),
+          ctx,
+          registry,
+        ),
+      };
+    }
     if (t.isCallExpression(expr)) {
       if (t.isIdentifier(expr.callee) && expr.callee.name === 'h') {
         walkHTree(expr, 'h', ctx, walkCtx);
@@ -76,8 +107,8 @@ afterEach(() => {
 // 1 + 2: every degradation warns, and the IR really degraded
 // ---------------------------------------------------------------------------
 
-/** [label, source, walk context, fragments the warning must contain] */
-const DEGRADATIONS: Array<[string, string, WalkContext, string[]]> = [
+/** [label, source, walk context, fragments the warning must contain, in-scope signals] */
+const DEGRADATIONS: Array<[string, string, WalkContext, string[], string?]> = [
   [
     'dynamic tag',
     `h(tagName, null, 'x')`,
@@ -137,6 +168,9 @@ const DEGRADATIONS: Array<[string, string, WalkContext, string[]]> = [
     `createShow(() => open(), () => renderPanel(), () => h('p', null, 'closed'))`,
     {},
     ['renderPanel'],
+    // `open` is in scope, so the condition resolves and the ONLY thing left to
+    // report is the branch — which is what "exactly one diagnostic" asserts.
+    `const [open] = createSignal(true);`,
   ],
   [
     'unresolvable component',
@@ -199,9 +233,9 @@ const DEGRADATIONS: Array<[string, string, WalkContext, string[]]> = [
 ];
 
 describe('build diagnostics', () => {
-  describe.each(DEGRADATIONS)('%s', (_label, code, walkCtx, fragments) => {
+  describe.each(DEGRADATIONS)('%s', (_label, code, walkCtx, fragments, signals) => {
     it('warns, naming the construct and the consequence', () => {
-      const { warnings } = emitWithWarnings(code, walkCtx);
+      const { warnings } = emitWithWarnings(code, walkCtx, signals);
 
       expect(warnings, 'the degradation must produce exactly one diagnostic')
         .toHaveLength(1);
@@ -214,7 +248,7 @@ describe('build diagnostics', () => {
       // The other half of the contract: a diagnostic must correspond to real
       // lost server-side content, or it is noise that trains people to ignore
       // the channel.
-      const { islands } = emitWithWarnings(code, walkCtx);
+      const { islands } = emitWithWarnings(code, walkCtx, signals);
       expect(islands.length).toBeGreaterThan(0);
     });
   });
@@ -250,16 +284,27 @@ describe('build diagnostics', () => {
   // 3: negative space — a page the compiler understands says nothing
   // -------------------------------------------------------------------------
 
-  const CLEAN_PAGES: Array<[string, string, WalkContext]> = [
+  const CLEAN_PAGES: Array<[string, string, WalkContext, string?]> = [
     ['static markup', `h('main', { id: 'app' }, h('h1', null, 'Title'))`, {}],
-    ['dynamic text and attributes', `h('p', { class: () => cls() }, () => body())`, {}],
-    ['a void element', `h('input', { type: 'search', value: () => q() })`, {}],
+    [
+      'dynamic text and attributes',
+      `h('p', { class: () => cls() }, () => body())`,
+      {},
+      `const [cls] = createSignal('row'); const [body] = createSignal('hi');`,
+    ],
+    [
+      'a void element',
+      `h('input', { type: 'search', value: () => q() })`,
+      {},
+      `const [q] = createSignal('');`,
+    ],
     ['an event handler (deliberately skipped)', `h('button', { onClick: () => go() }, 'Go')`, {}],
     ['null / undefined / false children', `h('div', null, null, undefined, false, 'kept')`, {}],
     [
       'a createShow',
       `createShow(() => visible(), () => h('p', null, 'yes'), () => h('p', null, 'no'))`,
       {},
+      `const [visible] = createSignal(true);`,
     ],
     [
       'a createList',
@@ -298,8 +343,8 @@ describe('build diagnostics', () => {
     ],
   ];
 
-  it.each(CLEAN_PAGES)('stays silent for %s', (_label, code, walkCtx) => {
-    const { warnings, islands } = emitWithWarnings(code, walkCtx);
+  it.each(CLEAN_PAGES)('stays silent for %s', (_label, code, walkCtx, signals) => {
+    const { warnings, islands } = emitWithWarnings(code, walkCtx, signals);
     expect(warnings).toEqual([]);
     // …and stayed silent because it compiled, not because it emitted nothing.
     if (_label !== 'a resolvable island component') {
@@ -344,10 +389,10 @@ describe('build diagnostics', () => {
         warnings.push(args.join(' '));
       });
       try {
-        const defaults = new ComponentAnalyzer('').extractIslandSignalDefaults(
-          source,
-          'src/StatusIsland.ts',
-          'StatusIsland',
+        const defaults = collectSignalDeclarations(
+          parse(source, { sourceType: 'module', plugins: ['typescript'] })
+            .program.body as T.Statement[],
+          { filePath: 'src/StatusIsland.ts' },
         );
         return { warnings, defaults };
       } finally {

@@ -2,6 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 import { IrEmitContext } from '../src/ir-emit';
 import { walkHTree, walkCallExpression, type WalkContext } from '../src/ir-walk';
 import { ComponentAnalyzer } from '../src/component-analyzer';
+import {
+  collectSignalDeclarations,
+  enterSignalScope,
+  newSignalRegistry,
+} from '../src/signal-scope';
 import { parse } from '@babel/parser';
 import type * as T from '@babel/types';
 import * as t from '@babel/types';
@@ -48,6 +53,30 @@ function walkIntoAndEmit(code: string, ctx: IrEmitContext, walkCtx: WalkContext 
 /** Emit an h() expression through walkHTree. */
 function walkAndEmit(code: string, walkCtx: WalkContext = {}): Uint8Array {
   return walkIntoAndEmit(code, new IrEmitContext(), walkCtx);
+}
+
+/**
+ * Open a signal scope over `declarations` (real source, read by the real
+ * collector) and return it with the context its slots were minted into.
+ *
+ * Tests build scopes the way the walk does rather than hand-assembling slot
+ * maps: a hand-made map could stay valid while the pass that produces the real
+ * one broke.
+ */
+function withSignals(declarations: string): { ctx: IrEmitContext; walkCtx: WalkContext } {
+  const ctx = new IrEmitContext();
+  const registry = newSignalRegistry();
+  const scope = enterSignalScope(
+    null,
+    'fixture.ts#module',
+    collectSignalDeclarations(
+      parse(declarations, { sourceType: 'module', plugins: ['typescript'] }).program.body as T.Statement[],
+      { filePath: 'fixture.ts' },
+    ),
+    ctx,
+    registry,
+  );
+  return { ctx, walkCtx: { signalScope: scope, signalRegistry: registry } };
 }
 
 /** Emit a non-h() call expression through walkCallExpression. */
@@ -319,16 +348,11 @@ describe('IR Walk Engine', () => {
       ]);
     });
 
-    it('reuses the pre-registered signal slot from signalSlots', () => {
-      const ctx = new IrEmitContext();
-      const preSlotId = ctx.addSlot('email', 0x01, 0x01, new TextEncoder().encode(''));
-      expect(preSlotId).toBe(0);
+    it('reuses the slot of a signal that is in scope', () => {
+      const { ctx, walkCtx } = withSignals(`const [email] = createSignal('');`);
+      const binary = walkIntoAndEmit(`h('div', null, () => email())`, ctx, walkCtx);
 
-      const binary = walkIntoAndEmit(`h('div', null, () => email())`, ctx, {
-        signalSlots: new Map([['email', preSlotId]]),
-      });
-
-      // Binding to the signal slot by NAME proves the DYN_ATTR operand points
+      // Binding to the signal slot by NAME proves the DYN_TEXT operand points
       // at slot 0 and that no fresh `text:0` slot was minted.
       expect(parseOpcodeList(binary)).toEqual([
         'OPEN_TAG div',
@@ -336,6 +360,17 @@ describe('IR Walk Engine', () => {
         'CLOSE_TAG div',
       ]);
       expect(getSlotNames(binary)).toEqual(['email']);
+    });
+
+    it('gives an anonymous text slot the value the client would render', () => {
+      // `() => count() + ' items'` is not a bare signal call, so it mints its
+      // own `text:` slot — which used to carry NO default at all, so the
+      // server emitted the zero-width-space placeholder and the text appeared
+      // only after hydration.
+      const { ctx, walkCtx } = withSignals(`const [count] = createSignal(3);`);
+      const binary = walkIntoAndEmit(`h('p', null, () => count() + ' items')`, ctx, walkCtx);
+
+      expect(getSlots(binary).find(s => s.name === 'text:0')!.default).toBe('3 items');
     });
   });
 
@@ -1283,87 +1318,101 @@ describe('IR Walk Engine', () => {
   // =========================================================================
 
   describe('DYN_ATTR SSR defaults', () => {
-    const TYPE_TEXT = 0x01;
-    const TYPE_BOOL = 0x02;
-    const SOURCE_CLIENT = 0x01;
-
-    /** Build a context with one pre-registered signal slot, as generateRealIr does. */
-    function withSignal(name: string, typeHint: number, def: string) {
-      const ctx = new IrEmitContext();
-      const signalSlots = new Map<string, number>([
-        [name, ctx.addSlot(name, typeHint, SOURCE_CLIENT, new TextEncoder().encode(def))],
-      ]);
-      return { ctx, signalSlots };
-    }
-
     function attrDefault(binary: Uint8Array, slotName: string): string | undefined {
       return getSlots(binary).find(s => s.name === slotName)?.default;
     }
 
     it('computes default for ternary: showPassword() ? text : password', () => {
-      const { ctx, signalSlots } = withSignal('showPassword', TYPE_BOOL, 'false');
+      const { ctx, walkCtx } = withSignals(`const [showPassword] = createSignal(false);`);
       const binary = walkIntoAndEmit(
         `h('input', { type: () => showPassword() ? 'text' : 'password' })`,
         ctx,
-        {
-          signalSlots,
-          signalDefaults: new Map([['showPassword', { type: 'bool', default: false }]]),
-        },
+        walkCtx,
       );
 
       expect(attrDefault(binary, 'attr:type')).toBe('password');
     });
 
     it('computes default for concatenation: mfa-panel + hidden', () => {
-      const { ctx, signalSlots } = withSignal('showMfa', TYPE_BOOL, 'false');
+      const { ctx, walkCtx } = withSignals(`const [showMfa] = createSignal(false);`);
       const binary = walkIntoAndEmit(
         `h('section', { class: () => 'mfa-panel' + (showMfa() ? '' : ' hidden') })`,
         ctx,
-        { signalSlots, signalDefaults: new Map([['showMfa', { type: 'bool', default: false }]]) },
+        walkCtx,
       );
 
       expect(attrDefault(binary, 'attr:class')).toBe('mfa-panel hidden');
     });
 
     it('computes default for caps lock warning class', () => {
-      const { ctx, signalSlots } = withSignal('capsLock', TYPE_BOOL, 'false');
+      const { ctx, walkCtx } = withSignals(`const [capsLock] = createSignal(false);`);
       const binary = walkIntoAndEmit(
         `h('div', { class: () => 'field-hint field-hint--danger' + (capsLock() ? '' : ' hidden') })`,
         ctx,
-        { signalSlots, signalDefaults: new Map([['capsLock', { type: 'bool', default: false }]]) },
+        walkCtx,
       );
 
       expect(attrDefault(binary, 'attr:class')).toBe('field-hint field-hint--danger hidden');
     });
 
+    it('computes default for a template literal with an embedded expression', () => {
+      // The create-forma-app dashboard writes its sidebar class exactly like
+      // this. Refusing interpolation meant the whole page server-rendered with
+      // no class attribute anywhere and every control was unstyled until JS ran.
+      const { ctx, walkCtx } = withSignals(`const [collapsed] = createSignal(true);`);
+      const binary = walkIntoAndEmit(
+        'h(\'nav\', { class: () => `sidebar ${collapsed() ? \'is-collapsed\' : \'\'}` })',
+        ctx,
+        walkCtx,
+      );
+
+      expect(attrDefault(binary, 'attr:class')).toBe('sidebar is-collapsed');
+    });
+
+    it('computes default through a block-bodied arrow that folds its own locals', () => {
+      const { ctx, walkCtx } = withSignals(`const [tone] = createSignal('calm');`);
+      const binary = walkIntoAndEmit(
+        `h('div', { class: () => { const base = 'row '; return base + tone(); } })`,
+        ctx,
+        walkCtx,
+      );
+
+      expect(attrDefault(binary, 'attr:class')).toBe('row calm');
+    });
+
+    it('gives a boolean-valued attribute a BOOL slot, not the string "false"', () => {
+      // As a Text slot the default bytes "false" render `disabled="false"`,
+      // which the browser reads as DISABLED — the exact inversion of what the
+      // client shows. A Bool slot omits the attribute instead.
+      const { ctx, walkCtx } = withSignals(`const [busy] = createSignal(false);`);
+      const binary = walkIntoAndEmit(`h('button', { disabled: () => !!busy() })`, ctx, walkCtx);
+
+      const slot = getSlots(binary).find(s => s.name === 'attr:disabled')!;
+      expect(slot.typeHint).toBe(0x02); // TYPE_BOOL
+      expect(slot.default).toBe('false');
+    });
+
     it('stores empty default when expression cannot be evaluated', () => {
-      const binary = walkAndEmit(`h('div', { class: () => computeClass(a, b) })`, {
-        signalSlots: new Map(),
-        signalDefaults: new Map(),
-      });
+      const binary = walkAndEmit(`h('div', { class: () => computeClass(a, b) })`);
 
       expect(attrDefault(binary, 'attr:class')).toBe('');
     });
 
     it('computes default for aria-label ternary', () => {
-      const { ctx, signalSlots } = withSignal('showPassword', TYPE_BOOL, 'false');
+      const { ctx, walkCtx } = withSignals(`const [showPassword] = createSignal(false);`);
       const binary = walkIntoAndEmit(
         `h('button', { 'aria-label': () => showPassword() ? 'Hide password' : 'Show password' })`,
         ctx,
-        {
-          signalSlots,
-          signalDefaults: new Map([['showPassword', { type: 'bool', default: false }]]),
-        },
+        walkCtx,
       );
 
       expect(attrDefault(binary, 'attr:aria-label')).toBe('Show password');
     });
 
     it('computes default for function prop referencing a module string const', () => {
-      const { ctx, signalSlots } = withSignal('suffix', TYPE_TEXT, ' selected');
+      const { ctx, walkCtx } = withSignals(`const [suffix] = createSignal(' selected');`);
       const binary = walkIntoAndEmit(`h('path', { d: () => SIL_BODY + suffix() })`, ctx, {
-        signalSlots,
-        signalDefaults: new Map([['suffix', { type: 'text', default: ' selected' }]]),
+        ...walkCtx,
         stringConstants: new Map([['SIL_BODY', 'M10 20 L30 40']]),
       });
 
@@ -1372,11 +1421,68 @@ describe('IR Walk Engine', () => {
 
     it('computes default for function prop that only references a const (no signals)', () => {
       const binary = walkAndEmit(`h('path', { d: () => SIL_BODY })`, {
-        signalSlots: new Map(),
         stringConstants: new Map([['SIL_BODY', 'M10 20 L30 40']]),
       });
 
       expect(attrDefault(binary, 'attr:d')).toBe('M10 20 L30 40');
+    });
+  });
+
+  // =========================================================================
+  // SHOW_IF SSR defaults — which branch the server renders
+  // =========================================================================
+
+  describe('SHOW_IF SSR defaults', () => {
+    const showDefault = (binary: Uint8Array, name: string) =>
+      getSlots(binary).find(s => s.name === name)?.default;
+
+    it('writes true when the condition evaluates truthy', () => {
+      const { ctx, walkCtx } = withSignals(`const [visible] = createSignal(true);`);
+      const binary = walkIntoAndEmit(
+        `h('div', null, () => visible() ? h('p', { class: 'on' }, 'THEN') : h('p', { class: 'off' }, 'ELSE'))`,
+        ctx,
+        walkCtx,
+      );
+
+      expect(showDefault(binary, 'show:visible')).toBe('true');
+    });
+
+    it('writes false when the condition evaluates falsy, including a zero number', () => {
+      const { ctx, walkCtx } = withSignals(`const [count] = createSignal(0);`);
+      const binary = walkIntoAndEmit(
+        `h('div', null, () => count() ? 'some' : 'none')`,
+        ctx,
+        walkCtx,
+      );
+
+      expect(showDefault(binary, 'show:count')).toBe('false');
+    });
+
+    it('unwraps a negated condition to the branch the client would take', () => {
+      const { ctx, walkCtx } = withSignals(`const [ready] = createSignal(false);`);
+      const binary = walkCallAndEmit(
+        `createShow(() => !ready(), () => h('em', null, 'waiting'), () => h('strong', null, 'ready'))`,
+        walkCtx,
+      );
+      void ctx;
+
+      expect(showDefault(binary, 'show:ready')).toBe('true');
+    });
+
+    it('leaves the slot defaultless and warns when the condition cannot be evaluated', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const binary = walkCallAndEmit(
+          `createShow(() => isAdmin(user), () => h('b', null, 'yes'), () => h('i', null, 'no'))`,
+        );
+        expect(showDefault(binary, 'show:isAdmin')).toBe('');
+
+        const warned = warnSpy.mock.calls.map(c => c.join(' ')).join('\n');
+        expect(warned).toContain('renders its ELSE branch');
+        expect(warned).toContain('hydration');
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 

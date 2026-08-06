@@ -12,6 +12,31 @@
  */
 
 // ---------------------------------------------------------------------------
+// Slot type hints and sources
+// ---------------------------------------------------------------------------
+
+/**
+ * The `type_hint` and `source` bytes an FMIR slot entry carries.
+ *
+ * They live beside the encoder that writes them so the walker, the signal-scope
+ * pass and any future producer read one definition. Three copies of these
+ * numbers used to exist (ir-walk.ts, esbuild-ssr-plugin.ts, and the plugin's
+ * "must match ir-walk.ts" comment), which is exactly how the inline-mount path
+ * came to hand a numeric signal a TYPE_TEXT slot.
+ *
+ * The values are frozen by the Rust reader's `SlotType`
+ * (forma/crates/forma-ir/src/slot.rs) — changing one changes the wire format.
+ */
+export const SLOT_TYPE_TEXT   = 0x01;
+export const SLOT_TYPE_BOOL   = 0x02;
+export const SLOT_TYPE_NUMBER = 0x03;
+export const SLOT_TYPE_ARRAY  = 0x04;
+export const SLOT_TYPE_OBJECT = 0x05;
+
+export const SLOT_SOURCE_SERVER = 0x00;
+export const SLOT_SOURCE_CLIENT = 0x01;
+
+// ---------------------------------------------------------------------------
 // IrEmitContext
 // ---------------------------------------------------------------------------
 
@@ -59,11 +84,28 @@ export class IrEmitContext {
     return idx;
   }
 
-  /** Register a new slot, return its id. */
-  addSlot(name: string, typeHint: number, source: number = 0x01, defaultBytes: Uint8Array = new Uint8Array(0)): number {
+  /**
+   * Register a new slot, return its id.
+   *
+   * `reference` says whether creating the slot also counts as USING it inside
+   * the island subtree currently being captured. It is true for every slot
+   * minted because an opcode needs one, and false for a slot merely DECLARED —
+   * a signal the walk found in scope but that no binding on the page reads.
+   * A declared-but-unread slot must not enter an island's `slot_ids`, or the
+   * walker serializes it into `data-forma-props` and every island ships state
+   * nothing on the page renders.
+   * Verified by: packages/compiler/tests/island-registry.test.ts > "island slot ids include the signal slots its own scope minted"
+   */
+  addSlot(
+    name: string,
+    typeHint: number,
+    source: number = SLOT_SOURCE_CLIENT,
+    defaultBytes: Uint8Array = new Uint8Array(0),
+    reference: boolean = true,
+  ): number {
     const id = this.nextSlotId++;
     this.slots.push({ id, name, typeHint, source, defaultBytes });
-    this.recordSlotRef(id);
+    if (reference) this.recordSlotRef(id);
     return id;
   }
 
@@ -79,8 +121,9 @@ export class IrEmitContext {
   }
 
   /** Record a slot-id reference into every active capture set.
-   *  Called automatically by addSlot; call it directly when an opcode reuses
-   *  a pre-existing slot (signalSlots / listItemBindings) without addSlot. */
+   *  Called by addSlot for slots minted because an opcode needs them; call it
+   *  directly when an opcode reuses a pre-existing slot (an in-scope signal, a
+   *  list item binding) without addSlot. */
   recordSlotRef(id: number): void {
     for (const set of this.slotCaptureStack) set.add(id);
   }

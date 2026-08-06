@@ -19,12 +19,39 @@
  *  12. null/undefined/false      -> skip
  */
 
+import type * as T from '@babel/types';
 import * as t from '@babel/types';
-import { IrEmitContext } from './ir-emit.js';
+import {
+  IrEmitContext,
+  SLOT_SOURCE_CLIENT,
+  SLOT_SOURCE_SERVER,
+  SLOT_TYPE_ARRAY,
+  SLOT_TYPE_BOOL,
+  SLOT_TYPE_OBJECT,
+  SLOT_TYPE_TEXT,
+} from './ir-emit.js';
 import { ComponentAnalyzer } from './component-analyzer.js';
-import { resolveExportedFunction, returnExpressionOf } from './export-resolver.js';
+import {
+  resolveExportedFunction,
+  returnExpressionOf,
+  type ComponentFunction,
+} from './export-resolver.js';
 import type { ModuleLoader } from './module-loader.js';
-import { VOID_TAGS, isEventProp, isStaticLiteral, isUndefinedIdentifier } from './utils.js';
+import {
+  enterComponentScope,
+  lookupSignal,
+  newSignalRegistry,
+  type SignalDefault,
+  type SignalRegistry,
+  type SignalScope,
+} from './signal-scope.js';
+import {
+  VOID_TAGS,
+  isEventProp,
+  isStaticLiteral,
+  isUndefinedIdentifier,
+  uniqueName,
+} from './utils.js';
 
 /** Maximum depth for sub-component resolution. Prevents unbounded AST parsing. */
 export const MAX_RESOLVE_DEPTH = 3;
@@ -47,15 +74,15 @@ const OP_ISLAND_END   = 0x0C;
 const OP_PROP         = 0x12;
 
 // ---------------------------------------------------------------------------
-// Slot Type Hints
+// Slot Type Hints (defined beside the encoder that writes them — ir-emit.ts)
 // ---------------------------------------------------------------------------
 
-const TYPE_TEXT   = 0x01;
-const TYPE_BOOL   = 0x02;
-const TYPE_ARRAY  = 0x04;
-const TYPE_OBJECT = 0x05;
-const SOURCE_SERVER = 0x00;
-const SOURCE_CLIENT = 0x01;
+const TYPE_TEXT   = SLOT_TYPE_TEXT;
+const TYPE_BOOL   = SLOT_TYPE_BOOL;
+const TYPE_ARRAY  = SLOT_TYPE_ARRAY;
+const TYPE_OBJECT = SLOT_TYPE_OBJECT;
+const SOURCE_SERVER = SLOT_SOURCE_SERVER;
+const SOURCE_CLIENT = SLOT_SOURCE_CLIENT;
 
 /** Convert a static literal to its string representation for an attribute value. */
 function staticLiteralToAttrString(expr: t.Expression): string | null {
@@ -119,6 +146,10 @@ function warnDegraded(
 /** Describe a child/tag expression in source-like terms for a diagnostic. */
 function describeNode(node: t.Node): string {
   if (t.isIdentifier(node) || t.isMemberExpression(node)) return exprToText(node);
+  if (isFunctionExpr(node)) {
+    const body = getEffectiveBody(node as t.ArrowFunctionExpression | t.FunctionExpression);
+    return body ? `\`() => ${describeNode(body)}\`` : 'a function with no visible return';
+  }
   if (t.isCallExpression(node)) return `${exprToText(node.callee)}(...)`;
   if (t.isTemplateLiteral(node)) return 'a template literal';
   if (t.isConditionalExpression(node)) return 'a bare ternary (not wrapped in a function)';
@@ -156,49 +187,139 @@ function extractSignalName(fn: t.ArrowFunctionExpression | t.FunctionExpression)
 // ---------------------------------------------------------------------------
 
 /**
- * Try to evaluate a dynamic attribute expression to a string using known signal
- * defaults. Handles common patterns:
+ * A statically evaluated value. `undefined` (never a member of this type) means
+ * "could not be evaluated"; `null` is a real JS null.
+ *
+ * The evaluator used to work in STRINGS, which made truthiness a guess: the
+ * number 0 and the string "0" both arrived as `"0"`, and `false` arrived as the
+ * non-empty string `"false"`. That is fine for concatenation and wrong for
+ * every conditional — and conditionals are what decides which SHOW_IF branch
+ * the server renders. Values stay typed until the moment they are written into
+ * a slot's default bytes.
+ */
+type EvalValue = string | number | boolean | null;
+
+/**
+ * Names an expression can resolve against: signals in the lexical chain the
+ * walk is currently inside, plus module constants and locals folded from a
+ * block-bodied arrow.
+ */
+interface EvalEnv {
+  signal(name: string): SignalDefault | undefined;
+  ident(name: string): EvalValue | undefined;
+}
+
+/** The env for the scope the walk is in right now. */
+function evalEnv(walkCtx: WalkContext): EvalEnv {
+  return {
+    signal: (name) => lookupSignal(walkCtx.signalScope, name)?.default,
+    ident: (name) => walkCtx.stringConstants?.get(name),
+  };
+}
+
+/** JS truthiness of an evaluated value. */
+function isTruthy(val: EvalValue): boolean {
+  if (val === null) return false;
+  if (typeof val === 'boolean') return val;
+  if (typeof val === 'number') return val !== 0 && !Number.isNaN(val);
+  return val !== '';
+}
+
+/**
+ * Render an evaluated value the way the client renderer would write it into the
+ * DOM: `null` is the ABSENT case (an omitted attribute, empty text), everything
+ * else is its JS string form.
+ */
+function evalToText(val: EvalValue): string {
+  return val === null ? '' : String(val);
+}
+
+/**
+ * The `default_bytes` an evaluated value contributes to a slot.
+ *
+ * Empty bytes mean "no default" to the FMIR reader — `SlotData::new_from_defaults`
+ * leaves such a slot Null, which renders as an omitted attribute and empty text.
+ * That is the right answer for null and for a value that could not be evaluated;
+ * it is also, unavoidably, what an EMPTY STRING default has to encode, because
+ * the slot entry has no way to distinguish "" from absent. An attribute whose
+ * value evaluates to "" is therefore omitted server-side where the client writes
+ * `attr=""` — a documented boundary of the binary format, not a walker choice.
+ */
+function defaultBytesFor(val: EvalValue | undefined): Uint8Array {
+  if (val === undefined || val === null) return new Uint8Array(0);
+  return new TextEncoder().encode(String(val));
+}
+
+/**
+ * Try to evaluate a dynamic binding (`() => …`) to the value the client would
+ * render on first paint. Handles the shapes real pages use:
  *   () => showPassword() ? 'text' : 'password'           → "password"
  *   () => 'mfa-panel' + (showMfa() ? '' : ' hidden')     → "mfa-panel hidden"
- *   () => !!busy()                                        → ""
+ *   () => `sidebar ${collapsed() ? 'is-collapsed' : ''}` → "sidebar "
+ *   () => { const cls = 'row'; return cls + tone(); }     → "rowcalm"
+ *   () => !!busy()                                        → false
  *
- * Returns the evaluated string, or undefined if evaluation fails.
+ * Returns undefined when any leaf cannot be evaluated — a partial answer would
+ * be worse than none, because it would render as though it were complete.
  */
 function tryEvalExprDefault(
   fnExpr: t.ArrowFunctionExpression | t.FunctionExpression,
-  signalDefaults: Map<string, { type: string; default: string | boolean | number | null }>,
-  stringConsts?: Map<string, string>,
-): string | undefined {
+  env: EvalEnv,
+): EvalValue | undefined {
   const body = getEffectiveBody(fnExpr);
   if (!body) return undefined;
-  return evalNode(body, signalDefaults, stringConsts);
-}
 
-function evalNode(
-  node: t.Expression,
-  signals: Map<string, { type: string; default: string | boolean | number | null }>,
-  stringConsts?: Map<string, string>,
-): string | undefined {
-  // String literal: "foo"
-  if (t.isStringLiteral(node)) return node.value;
-
-  // Numeric literal: 42
-  if (t.isNumericLiteral(node)) return String(node.value);
-
-  // Boolean literal: true/false
-  if (t.isBooleanLiteral(node)) return String(node.value);
-
-  // Null literal
-  if (t.isNullLiteral(node)) return '';
-
-  // Template literal with no expressions: `foo`
-  if (t.isTemplateLiteral(node) && node.expressions.length === 0) {
-    return node.quasis.map(q => q.value.cooked || q.value.raw).join('');
+  // A block body may fold its own locals first: `const cls = 'row'; return …`.
+  // Without this, a component that names its class before returning it drops
+  // the whole attribute server-side.
+  if (t.isBlockStatement(fnExpr.body)) {
+    const locals = new Map<string, EvalValue>();
+    const inner: EvalEnv = {
+      signal: env.signal,
+      ident: (name) => (locals.has(name) ? locals.get(name)! : env.ident(name)),
+    };
+    for (const stmt of fnExpr.body.body) {
+      if (!t.isVariableDeclaration(stmt) || stmt.kind !== 'const') continue;
+      for (const decl of stmt.declarations) {
+        if (!t.isIdentifier(decl.id) || !decl.init) continue;
+        const value = evalNode(decl.init, inner);
+        if (value !== undefined) locals.set(decl.id.name, value);
+      }
+    }
+    return evalNode(body, inner);
   }
 
-  // Module-level string constant reference: SIL_BODY
+  return evalNode(body, env);
+}
+
+function evalNode(node: t.Expression, env: EvalEnv): EvalValue | undefined {
+  if (t.isStringLiteral(node)) return node.value;
+  if (t.isNumericLiteral(node)) return node.value;
+  if (t.isBooleanLiteral(node)) return node.value;
+  if (t.isNullLiteral(node)) return null;
+
+  // Template literal, with or without embedded expressions. The dashboard's
+  // sidebar class is `${base} ${collapsed() ? 'is-collapsed' : ''}` — refusing
+  // interpolation meant that page server-rendered with no class attribute at
+  // all and every control was unstyled until hydration.
+  if (t.isTemplateLiteral(node)) {
+    let out = '';
+    for (let i = 0; i < node.quasis.length; i++) {
+      out += node.quasis[i]!.value.cooked ?? node.quasis[i]!.value.raw;
+      const expr = node.expressions[i];
+      if (expr === undefined) continue;
+      if (!t.isExpression(expr)) return undefined;
+      const value = evalNode(expr, env);
+      if (value === undefined) return undefined;
+      out += evalToText(value);
+    }
+    return out;
+  }
+
+  // Module-level constant or a folded local: SIL_BODY
   if (t.isIdentifier(node)) {
-    return stringConsts?.get(node.name);
+    if (isUndefinedIdentifier(node)) return null;
+    return env.ident(node.name);
   }
 
   // Signal call: signalName()
@@ -207,50 +328,48 @@ function evalNode(
     && t.isIdentifier(node.callee)
     && node.arguments.length === 0
   ) {
-    const sig = signals.get(node.callee.name);
-    if (sig !== undefined) {
-      if (sig.default === null) return '';
-      return String(sig.default);
-    }
-    return undefined;
+    return env.signal(node.callee.name)?.default;
   }
 
   // Unary negation: !expr or !!expr
   if (t.isUnaryExpression(node) && node.operator === '!') {
-    const inner = evalNode(node.argument as t.Expression, signals, stringConsts);
+    const inner = evalNode(node.argument as t.Expression, env);
     if (inner === undefined) return undefined;
-    const bool = isTruthy(inner);
-    return String(!bool);
+    return !isTruthy(inner);
   }
 
   // Ternary: test ? consequent : alternate
   if (t.isConditionalExpression(node)) {
-    const test = evalNode(node.test as t.Expression, signals, stringConsts);
+    const test = evalNode(node.test as t.Expression, env);
     if (test === undefined) return undefined;
-    const branch = isTruthy(test) ? node.consequent : node.alternate;
-    return evalNode(branch as t.Expression, signals, stringConsts);
+    return evalNode((isTruthy(test) ? node.consequent : node.alternate) as t.Expression, env);
   }
 
-  // Binary +: left + right (string concatenation)
+  // Logical && / ||, which is how conditional classes are usually written.
+  if (t.isLogicalExpression(node) && (node.operator === '&&' || node.operator === '||')) {
+    const left = evalNode(node.left as t.Expression, env);
+    if (left === undefined) return undefined;
+    if (node.operator === '&&' && !isTruthy(left)) return left;
+    if (node.operator === '||' && isTruthy(left)) return left;
+    return evalNode(node.right as t.Expression, env);
+  }
+
+  // Binary +: numeric when both sides are numbers, string concatenation
+  // otherwise — the same rule JavaScript applies.
   if (t.isBinaryExpression(node) && node.operator === '+') {
-    const left = evalNode(node.left as t.Expression, signals, stringConsts);
-    const right = evalNode(node.right as t.Expression, signals, stringConsts);
+    const left = evalNode(node.left as t.Expression, env);
+    const right = evalNode(node.right as t.Expression, env);
     if (left === undefined || right === undefined) return undefined;
-    return left + right;
+    if (typeof left === 'number' && typeof right === 'number') return left + right;
+    return evalToText(left) + evalToText(right);
   }
 
-  // Parenthesized expression
   if (t.isParenthesizedExpression(node)) {
-    return evalNode(node.expression, signals, stringConsts);
+    return evalNode(node.expression, env);
   }
 
   // Can't evaluate
   return undefined;
-}
-
-/** JS-style truthiness for eval results. */
-function isTruthy(val: string): boolean {
-  return val !== '' && val !== '0' && val !== 'false' && val !== 'null' && val !== 'undefined';
 }
 
 // ---------------------------------------------------------------------------
@@ -264,10 +383,15 @@ export interface WalkContext {
    *  Identifiers referencing these resolve to STATIC attribute values
    *  (and fold inside function-valued prop SSR defaults). */
   stringConstants?: Map<string, string>;
-  /** Signal name -> slot id mappings. */
-  signalSlots?: Map<string, number>;
-  /** Signal name -> default value (for computing DYN_ATTR SSR defaults). */
-  signalDefaults?: Map<string, { type: string; default: string | boolean | number | null }>;
+  /** The lexical signal chain the walk is currently inside. Pushed at every
+   *  point the walk enters a new scope (a component's file, a component's
+   *  body), so a signal is in scope exactly when the code that declares it was
+   *  inlined into this page — see signal-scope.ts.
+   *  Verified by: packages/compiler/tests/ssr-emission.test.ts > "names a signal declared inside an inlined sub-component" */
+  signalScope?: SignalScope;
+  /** Page-wide signal slot-name occurrences and scope memo. Same eager-init
+   *  and by-reference sharing rules as listNames. */
+  signalRegistry?: SignalRegistry;
   /** Path of the file whose tree is currently being walked. Only used to name
    *  the file in build diagnostics — nested walks (sub-components, islands)
    *  carry the resolved component's own path so a warning points at the file
@@ -348,12 +472,12 @@ const constantAnalyzer = new ComponentAnalyzer('');
  */
 function extractResolvedConstants(
   source: string,
-  _walkCtx: WalkContext,
+  filePath: string,
 ): Pick<WalkContext, 'fileConstants' | 'stringConstants'> {
   try {
     return {
-      fileConstants: constantAnalyzer.extractFileConstants(source, '<resolved>'),
-      stringConstants: constantAnalyzer.extractStringConstants(source, '<resolved>'),
+      fileConstants: constantAnalyzer.extractFileConstants(source, filePath),
+      stringConstants: constantAnalyzer.extractStringConstants(source, filePath),
     };
   } catch {
     return {
@@ -361,6 +485,46 @@ function extractResolvedConstants(
       stringConstants: new Map(),
     };
   }
+}
+
+/**
+ * The nested walk context for a component the walk has decided to inline:
+ * the component file's own constants, its own signal scope chain, and its own
+ * path for diagnostics.
+ *
+ * ONE function builds it for both inlining sites — a registered island and a
+ * plain sub-component — so the two cannot drift into resolving different
+ * things, which is precisely how island files came to be the only nested scope
+ * whose signals were read.
+ * Verified by: packages/compiler/tests/ssr-emission.test.ts > "names a signal declared inside an inlined sub-component"
+ */
+function inlinedWalkContext(
+  walkCtx: WalkContext,
+  ctx: IrEmitContext,
+  sub: ResolvedSubComponent,
+  functionName: string,
+  visited: Set<string>,
+): WalkContext {
+  const constants = extractResolvedConstants(sub.source, sub.filePath);
+  return {
+    ...walkCtx,
+    ...constants,
+    signalScope: enterComponentScope({
+      ast: sub.ast,
+      fn: sub.fn,
+      fnName: functionName,
+      filePath: sub.filePath,
+      constants: constants.stringConstants,
+      ctx,
+      registry: walkCtx.signalRegistry!,
+      // A helper declared inside another function is only reachable from its
+      // own file, and the caller's chain is then its lexical environment.
+      callerScope: sub.filePath === walkCtx.sourceFile ? walkCtx.signalScope ?? null : null,
+    }),
+    sourceFile: sub.filePath,
+    visited,
+    depth: (walkCtx.depth ?? 0) + 1,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -384,20 +548,7 @@ function ensureNameRegistries(walkCtx: WalkContext): void {
   walkCtx.showNames ??= { counts: new Map(), total: 0 };
   walkCtx.attrNames ??= new Map();
   walkCtx.textNames ??= new Map();
-}
-
-/**
- * Reserve the next occurrence of `base` in a per-page occurrence registry and
- * return the unique name for it: the first occurrence keeps `base` verbatim,
- * the Nth gets `base#N`. Shared by every slot-name family (list bases, show,
- * attr, text) so one documented scheme governs all of them — and so a name
- * that appears once on a page keeps the spelling downstream consumers pin.
- * Verified by: packages/compiler/tests/ir-walk.test.ts > "keeps single-occurrence attr and text names unsuffixed"
- */
-function uniqueName(counts: Map<string, number>, base: string): string {
-  const occurrence = (counts.get(base) ?? 0) + 1;
-  counts.set(base, occurrence);
-  return occurrence > 1 ? `${base}#${occurrence}` : base;
+  walkCtx.signalRegistry ??= newSignalRegistry();
 }
 
 /**
@@ -560,31 +711,35 @@ export function walkHTree(
       // Rule 6: Function/arrow expression -> DYN_ATTR
       if (isFunctionExpr(val)) {
         const keyIdx = ctx.addString(key);
-        // Check if the body is a simple signal call and reuse the slot
-        const sigName = extractSignalName(val as t.ArrowFunctionExpression | t.FunctionExpression);
+        const fn = val as t.ArrowFunctionExpression | t.FunctionExpression;
+        // A bare `() => sig()` binding reuses the signal's own named slot
+        // rather than minting an anonymous `attr:` one.
+        const sigName = extractSignalName(fn);
+        const binding = sigName ? lookupSignal(walkCtx.signalScope, sigName) : undefined;
         let slotId: number;
-        if (sigName && walkCtx.signalSlots?.has(sigName)) {
-          slotId = walkCtx.signalSlots.get(sigName)!;
+        if (binding) {
+          slotId = binding.slotId;
           ctx.recordSlotRef(slotId);
         } else {
-          const slotName = attrSlotName(key, walkCtx);
-          // Try to compute SSR default by evaluating the expression with
-          // signal defaults and module-level string constants
-          let defaultBytes = new Uint8Array(0);
-          if (
-            (walkCtx.signalDefaults && walkCtx.signalDefaults.size > 0)
-            || (walkCtx.stringConstants && walkCtx.stringConstants.size > 0)
-          ) {
-            const evaluated = tryEvalExprDefault(
-              val as t.ArrowFunctionExpression | t.FunctionExpression,
-              walkCtx.signalDefaults ?? new Map(),
-              walkCtx.stringConstants,
+          const evaluated = tryEvalExprDefault(fn, evalEnv(walkCtx));
+          if (evaluated === undefined) {
+            warnDegraded(
+              walkCtx,
+              `attribute '${key}' on <${tag}> binds ${describeNode(fn)}, which the compiler cannot evaluate`,
+              'the attribute is OMITTED server-side and only appears once the client hydrates —'
+              + ' initialize the signals it reads with literal defaults, or fold the value into a module-level const',
             );
-            if (evaluated !== undefined && evaluated !== '') {
-              defaultBytes = new TextEncoder().encode(evaluated);
-            }
           }
-          slotId = ctx.addSlot(slotName, TYPE_TEXT, SOURCE_CLIENT, defaultBytes);
+          slotId = ctx.addSlot(
+            attrSlotName(key, walkCtx),
+            // A boolean value must land in a TYPE_BOOL slot: the walkers omit a
+            // false boolean attribute and write the bare name for a true one.
+            // As TYPE_TEXT it would render `disabled="false"`, which the browser
+            // reads as DISABLED — the exact inversion of what the client shows.
+            typeof evaluated === 'boolean' ? TYPE_BOOL : TYPE_TEXT,
+            SOURCE_CLIENT,
+            defaultBytesFor(evaluated),
+          );
         }
         dynAttrs.push({ keyIdx, slotId });
         continue;
@@ -735,7 +890,6 @@ export function walkCallExpression(
               resolved.path ?? walkCtx.sourceFile ?? '<unknown>',
               resolved.functionName,
               node,
-              hName,
               walkCtx.loadModule,
             );
             const componentReturn = sub?.returnNode;
@@ -757,14 +911,12 @@ export function walkCallExpression(
               try {
                 const newVisited = new Set<string>(walkCtx.visited || new Set<string>());
                 newVisited.add(componentName);
-                const islandWalkCtx: WalkContext = {
-                  ...walkCtx,
-                  ...extractResolvedConstants(sub.source, walkCtx),
-                  sourceFile: sub.filePath,
-                  visited: newVisited,
-                  depth: (walkCtx.depth ?? 0) + 1,
-                };
-                walkCallExpression(componentReturn, hName, ctx, islandWalkCtx);
+                walkCallExpression(
+                  componentReturn,
+                  hName,
+                  ctx,
+                  inlinedWalkContext(walkCtx, ctx, sub, resolved.functionName, newVisited),
+                );
               } catch (err) {
                 // ISLAND_START is already in the stream: unwinding past the
                 // matching ISLAND_END would leave the bytecode unbalanced (and
@@ -869,7 +1021,6 @@ export function walkCallExpression(
             resolved.path ?? walkCtx.sourceFile ?? '<unknown>',
             resolved.functionName,
             node,
-            hName,
             walkCtx.loadModule,
           );
 
@@ -877,13 +1028,12 @@ export function walkCallExpression(
             const newVisited = new Set(visited);
             newVisited.add(componentName);
 
-            walkHTree(sub.returnNode, hName, ctx, {
-              ...walkCtx,
-              ...extractResolvedConstants(sub.source, walkCtx),
-              sourceFile: sub.filePath,
-              visited: newVisited,
-              depth: depth + 1,
-            });
+            walkHTree(
+              sub.returnNode,
+              hName,
+              ctx,
+              inlinedWalkContext(walkCtx, ctx, sub, resolved.functionName, newVisited),
+            );
             return;
           }
           bailOut('has no return statement the compiler can follow to an h() call');
@@ -1041,16 +1191,34 @@ function emitChild(
       return;
     }
 
-    // Rule 5: Non-ternary arrow → DYN_TEXT
-    // Check if the body is a simple signal call like () => email()
-    // and reuse the pre-registered slot from signalSlots if available.
+    // Rule 5: Non-ternary arrow → DYN_TEXT.
+    // A bare `() => email()` binding reuses the signal's own named slot.
     const signalName = extractSignalName(arrowOrFunc);
+    const binding = signalName ? lookupSignal(walkCtx.signalScope, signalName) : undefined;
     let slotId: number;
-    if (signalName && walkCtx.signalSlots?.has(signalName)) {
-      slotId = walkCtx.signalSlots.get(signalName)!;
+    if (binding) {
+      slotId = binding.slotId;
       ctx.recordSlotRef(slotId);
     } else {
-      slotId = ctx.addSlot(textSlotName(childIndex, walkCtx), TYPE_TEXT);
+      // An anonymous text slot still gets an SSR default when the expression
+      // evaluates. Without one the server emits the zero-width-space
+      // placeholder and the text only appears after hydration — a flash on
+      // every page that computes its text (`() => count() + ' items'`).
+      const evaluated = tryEvalExprDefault(arrowOrFunc, evalEnv(walkCtx));
+      if (evaluated === undefined) {
+        warnDegraded(
+          walkCtx,
+          `dynamic text child ${describeNode(arrowOrFunc)}, which the compiler cannot evaluate`,
+          'it renders EMPTY server-side and only fills in once the client hydrates —'
+          + ' initialize the signals it reads with literal defaults so the server can render them',
+        );
+      }
+      slotId = ctx.addSlot(
+        textSlotName(childIndex, walkCtx),
+        TYPE_TEXT,
+        SOURCE_CLIENT,
+        defaultBytesFor(evaluated),
+      );
     }
     const markerId = ctx.nextMarker();
     ctx.emit(OP_DYN_TEXT);
@@ -1108,6 +1276,59 @@ function deriveShowSlotName(cond: t.Node | null | undefined, walkCtx: WalkContex
 }
 
 /**
+ * Mint the TYPE_BOOL slot a SHOW_IF selects its branch with, carrying the
+ * branch the CLIENT would take on first paint as its SSR default.
+ *
+ * Without a default the slot is Null, which the walkers read as false, so the
+ * server rendered the ELSE branch for every conditional on the page —
+ * including one whose signal defaults to `true`. Hydration does not repair it:
+ * `adoptShowRegion` matches the client's THEN descriptor against the server's
+ * ELSE element, the tags match, the node is adopted, and the static content is
+ * never rewritten. Both mismatch-repair arms test "one side has content and the
+ * other does not", and here both do — so the page shows the wrong branch, with
+ * no warning from either side, until the signal CHANGES VALUE. For a
+ * config-like default that never changes, that is forever.
+ *
+ * The slot NAME is unchanged and no slot is reused: `show:<name>` stays in the
+ * table, because servers inject shows by that name.
+ * Verified by: packages/compiler/tests/ssr-render.test.ts > "renders the THEN branch for a show whose condition defaults true"
+ */
+function addShowSlot(
+  cond: t.Node | null | undefined,
+  ctx: IrEmitContext,
+  walkCtx: WalkContext,
+): number {
+  const slotName = deriveShowSlotName(cond, walkCtx);
+
+  let value: EvalValue | undefined;
+  if (cond && isFunctionExpr(cond)) {
+    value = tryEvalExprDefault(cond as t.ArrowFunctionExpression | t.FunctionExpression, evalEnv(walkCtx));
+  } else if (cond && t.isExpression(cond)) {
+    value = evalNode(cond, evalEnv(walkCtx));
+  }
+
+  if (value === undefined) {
+    warnDegraded(
+      walkCtx,
+      cond
+        ? `conditional on ${describeNode(cond)}, which the compiler cannot evaluate`
+        : 'conditional with no condition expression',
+      'the server renders its ELSE branch; if the client would render the THEN branch, hydration'
+      + ' adopts the wrong one silently and the page stays wrong until the condition changes value —'
+      + ' initialize the signals it reads with literal defaults',
+    );
+    return ctx.addSlot(slotName, TYPE_BOOL, SOURCE_CLIENT);
+  }
+
+  return ctx.addSlot(
+    slotName,
+    TYPE_BOOL,
+    SOURCE_CLIENT,
+    new TextEncoder().encode(String(isTruthy(value))),
+  );
+}
+
+/**
  * Emit SHOW_IF for a ternary conditional expression.
  *
  * Binary format:
@@ -1123,8 +1344,7 @@ function emitTernaryShowIf(
   walkCtx: WalkContext,
   childIndex: number,
 ): void {
-  const slotName = deriveShowSlotName(cond.test, walkCtx);
-  const slotId = ctx.addSlot(slotName, TYPE_BOOL, SOURCE_CLIENT);
+  const slotId = addShowSlot(cond.test, ctx, walkCtx);
 
   ctx.emit(OP_SHOW_IF);
   ctx.emitU16(slotId);
@@ -1168,8 +1388,7 @@ function emitCreateShow(
   ctx: IrEmitContext,
   walkCtx: WalkContext,
 ): void {
-  const slotName = deriveShowSlotName(node.arguments[0], walkCtx);
-  const slotId = ctx.addSlot(slotName, TYPE_BOOL, SOURCE_CLIENT);
+  const slotId = addShowSlot(node.arguments[0], ctx, walkCtx);
 
   ctx.emit(OP_SHOW_IF);
   ctx.emitU16(slotId);
@@ -1643,6 +1862,11 @@ interface ResolvedSubComponent {
   filePath: string;
   /** Source of `filePath`. */
   source: string;
+  /** Parsed module of `filePath` — its top level is the component's outer
+   *  lexical scope. */
+  ast: T.File;
+  /** The component function. Its body is the component's inner scope. */
+  fn: ComponentFunction;
 }
 
 /**
@@ -1665,7 +1889,6 @@ function resolveSubComponent(
   filePath: string,
   functionName: string,
   callNode: t.CallExpression,
-  hName: string,
   loadModule?: ModuleLoader,
 ): ResolvedSubComponent | null {
   const lookup = resolveExportedFunction(source, filePath, functionName, {
@@ -1691,7 +1914,13 @@ function resolveSubComponent(
     }
   }
 
-  return { returnNode, filePath: lookup.filePath, source: lookup.source };
+  return {
+    returnNode,
+    filePath: lookup.filePath,
+    source: lookup.source,
+    ast: lookup.ast,
+    fn: lookup.fn,
+  };
 }
 
 /**
@@ -1868,8 +2097,24 @@ function emitBranchContent(
     return;
   }
 
-  // Anything else → DYN_TEXT
-  const slotId = ctx.addSlot(textSlotName(childIndex, walkCtx), TYPE_TEXT);
+  // Anything else → DYN_TEXT, with an SSR default when the expression folds
+  // (a branch like `PREFIX + name()` is static text once the signals resolve).
+  // Reached from a conditional branch, a createShow branch and a list row
+  // body, so the diagnostic names the VALUE rather than guessing which.
+  const evaluated = evalNode(expr, evalEnv(walkCtx));
+  if (evaluated === undefined) {
+    warnDegraded(
+      walkCtx,
+      `dynamic value ${describeNode(expr)}, which the compiler cannot evaluate`,
+      'it renders EMPTY server-side and only fills in once the client hydrates',
+    );
+  }
+  const slotId = ctx.addSlot(
+    textSlotName(childIndex, walkCtx),
+    TYPE_TEXT,
+    SOURCE_CLIENT,
+    defaultBytesFor(evaluated),
+  );
   const markerId = ctx.nextMarker();
   ctx.emit(OP_DYN_TEXT);
   ctx.emitU16(slotId);

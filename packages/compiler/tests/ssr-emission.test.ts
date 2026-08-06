@@ -329,6 +329,159 @@ describe('generateRealIr — component resolution scope', () => {
 });
 
 // ===========================================================================
+// Signal scopes: whatever the walk inlines, it names
+// ===========================================================================
+
+describe('generateRealIr — signals in the scopes the walk inlines', () => {
+  const ENTRY = `
+    import { mount } from 'formajs';
+    import { Page } from './page';
+    mount(() => Page(), '#app');
+  `;
+
+  it('names a signal declared inside an inlined sub-component', () => {
+    // The reported gap. `resolveSubComponent` pulls only the RETURN expression
+    // out of the function, so the body's declarations were never visited and
+    // `label` compiled to an anonymous `text:0` with no default — a blank on
+    // the server where the client shows "Ready".
+    const entry = writeProject({
+      'app.ts': ENTRY,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { Sub } from './sub';
+        export function Page() { return h('div', { id: 'app' }, Sub()); }
+      `,
+      'sub.ts': `
+        import { h, createSignal } from 'formajs';
+        export function Sub() {
+          const [label] = createSignal('Ready');
+          return h('span', null, () => label());
+        }
+      `,
+    }, 'app.ts');
+
+    const result = emitReal(entry);
+    expect(slotNames(result.binary)).toEqual(['label']);
+    expect(slotByName(result.binary, 'label')!.default).toBe('Ready');
+    expect(parseOpcodeList(result.binary)).toContain('DYN_TEXT label marker=0');
+    expect(warnings()).toBe('');
+  });
+
+  it('names a signal at the module scope of an inlined sub-component\'s own file', () => {
+    // The same gap one scope out, and the one that made `barrel-exports` work
+    // by accident: its chip's module scope was read only because the chip is
+    // in the islands registry.
+    const entry = writeProject({
+      'app.ts': ENTRY,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { Sub } from './sub';
+        export function Page() { return h('div', { id: 'app' }, Sub()); }
+      `,
+      'sub.ts': `
+        import { h, createSignal } from 'formajs';
+        const [label] = createSignal('Ready');
+        export function Sub() { return h('span', null, () => label()); }
+      `,
+    }, 'app.ts');
+
+    const result = emitReal(entry);
+    expect(slotNames(result.binary)).toEqual(['label']);
+    expect(slotByName(result.binary, 'label')!.default).toBe('Ready');
+  });
+
+  it('names a signal at the ROOT PAGE file\'s module scope', () => {
+    const entry = writeProject({
+      'app.ts': ENTRY,
+      'page.ts': `
+        import { h, createSignal } from 'formajs';
+        const [label] = createSignal('Ready');
+        export function Page() { return h('div', { id: 'app' }, h('span', null, () => label())); }
+      `,
+    }, 'app.ts');
+
+    const result = emitReal(entry);
+    expect(slotNames(result.binary)).toEqual(['label']);
+    expect(slotByName(result.binary, 'label')!.default).toBe('Ready');
+  });
+
+  it('keeps two sub-components\' same-named signals apart, deterministically', () => {
+    // Two components can each declare `count`; they are different signals and
+    // must not share a slot. Occurrence order is the WALK's document order, so
+    // the name a given declaration gets does not depend on file system order.
+    const entry = writeProject({
+      'app.ts': ENTRY,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { First } from './first';
+        import { Second } from './second';
+        export function Page() { return h('div', { id: 'app' }, First(), Second()); }
+      `,
+      'first.ts': `
+        import { h, createSignal } from 'formajs';
+        export function First() {
+          const [count] = createSignal(1);
+          return h('b', null, () => count());
+        }
+      `,
+      'second.ts': `
+        import { h, createSignal } from 'formajs';
+        export function Second() {
+          const [count] = createSignal(2);
+          return h('i', null, () => count());
+        }
+      `,
+    }, 'app.ts');
+
+    const result = emitReal(entry);
+    expect(getSlots(result.binary).map((s) => [s.name, s.default])).toEqual([
+      ['count', '1'],
+      ['count#2', '2'],
+    ]);
+    expect(parseOpcodeList(result.binary)).toEqual([
+      'OPEN_TAG div id="app"',
+      'OPEN_TAG b',
+      'DYN_TEXT count marker=0',
+      'CLOSE_TAG b',
+      'OPEN_TAG i',
+      'DYN_TEXT count#2 marker=1',
+      'CLOSE_TAG i',
+      'CLOSE_TAG div',
+    ]);
+    // The rename is reported: injecting `count` would fill only the first.
+    expect(warnings()).toContain("signal 'count' is also declared in another scope");
+  });
+
+  it('does not leak a sub-component\'s signals into the page around it', () => {
+    // Lexical scoping, not a flat page-wide map: `hidden` belongs to Sub, and a
+    // binding on the PAGE that happens to share the name must not resolve to it.
+    const entry = writeProject({
+      'app.ts': ENTRY,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { Sub } from './sub';
+        export function Page() {
+          return h('div', { id: 'app' }, Sub(), h('em', null, () => hidden()));
+        }
+      `,
+      'sub.ts': `
+        import { h, createSignal } from 'formajs';
+        export function Sub() {
+          const [hidden] = createSignal('inner');
+          return h('span', null, () => hidden());
+        }
+      `,
+    }, 'app.ts');
+
+    const result = emitReal(entry);
+    // The page's binding gets an anonymous slot with no default — and says so.
+    expect(slotNames(result.binary)).toEqual(['hidden', 'text:0']);
+    expect(slotByName(result.binary, 'text:0')!.default).toBe('');
+    expect(warnings()).toContain('dynamic text child');
+  });
+});
+
+// ===========================================================================
 // Inline mount signal defaults
 // ===========================================================================
 

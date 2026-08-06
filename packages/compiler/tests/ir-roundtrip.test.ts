@@ -198,25 +198,36 @@ describe('IR roundtrip validation', () => {
       const { binary } = compileFixture();
 
       // The page mints four `class` attribute slots (root, sub-component,
-      // island, list body) and three text children at child index 0 under
+      // island, list body) and two text children at child index 0 under
       // different parents. Before the attr/text occurrence registries these
       // collapsed into two names. The unrolled NAV_ITEMS spread mints NO slot:
       // both hrefs resolve to static attributes at compile time.
+      //
+      // Ordering is the walk's: the root page's own scope first, then each
+      // slot at the point the walk reaches it — including `statusText`, which
+      // is minted when the walk ENTERS the island's file, between the
+      // sub-component's class and the island's own.
       expect(getSlots(binary).map(s => s.name)).toEqual([
-        'statusText',
-        'attr:class',
+        'title',           // page file module scope
+        'busy',            // page file module scope
+        'attr:class',      // root <section>
+        'attr:class#2',    // inlined SummaryCard
+        'statusText',      // minted on entering the island's scope
+        'attr:class#3',    // the island's own <aside>
         'text:0',
-        'attr:class#2',
-        'attr:class#3',
         'text:0#2',
-        'text:0#3',
         'list:rows:array',
         'list:rows:item',
         'list:rows:name',
-        'attr:class#4',
+        'attr:class#4',    // the list body
         'show:busy',
-        'attr:disabled',
       ]);
+
+      // Three bindings that used to mint anonymous slots now reuse the named
+      // signal ones instead: `() => title()`, `disabled: () => busy()` and the
+      // island's `() => statusText()`.
+      expect(getSlots(binary).map(s => s.name)).not.toContain('attr:disabled');
+      expect(getSlots(binary).map(s => s.name)).not.toContain('text:0#3');
     });
 
     it('slot table entries are well-formed and resolvable', () => {

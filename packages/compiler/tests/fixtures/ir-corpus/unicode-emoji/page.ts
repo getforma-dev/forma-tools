@@ -1,8 +1,7 @@
 import { h, createSignal } from 'formajs';
 
 export function UnicodePage() {
-  // Declared INSIDE the exported component, so the emitter turns it into a
-  // named signal slot whose default lands in the slot table as UTF-8
+  // A named signal slot whose default lands in the slot table as UTF-8
   // default_bytes: 8 characters, 12 UTF-16 units, 15 bytes.
   const [greeting] = createSignal('héllo 🌍');
 
