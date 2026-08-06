@@ -3,8 +3,24 @@ name: CI
 on:
   push:
     branches: [main]
+    # Doc-only pushes to main do not need five runners. Deliberately NOT on
+    # `pull_request`: a skipped workflow leaves a required status check
+    # permanently pending, which blocks the merge forever. Extend to
+    # pull_request only after confirming branch protection allows it.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
   pull_request:
     branches: [main]
+
+# One run per ref; a new push cancels the run it supersedes. On 2026-08-06 the
+# four Forma repos pushed together and asked for ~44 concurrent jobs against a
+# 20-job limit; jobs then sat 20-58 minutes waiting for a runner and were read
+# as hangs. They were queue time.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # The matrix includes Windows because this toolchain's first field-reported
@@ -13,7 +29,8 @@ jobs:
   # `npx.cmd` shim. Every test passed on Linux. The same shape recurred for
   # `wasm-pack`, and module-id matching in the Vite plugin never handled
   # backslash-separated paths. A Linux-only matrix cannot see any of it, and
-  # the primary consumer develops on Windows.
+  # the primary consumer develops on Windows. This matrix is NOT the cost
+  # problem and is not trimmed.
   test:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -24,6 +41,11 @@ jobs:
         include:
           - os: windows-latest
             node-version: 22
+    # MEASURED locally: `npm test --workspaces` = 3s wall, 453 tests, 14 files.
+    # The job is dominated by `npm install` (~1m ubuntu, ~2-3m windows) and the
+    # two builds (~45s). Realistic worst case ~5m on the Windows leg; 15 is 3x
+    # that. Nothing here can hang: no server, no prompt, no unbounded wait.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -55,14 +77,22 @@ jobs:
   # there is exactly one definition of the contract and it lives with the
   # consumer.
   #
-  # Cost: forma-ir has three direct dependencies and this builds one test
-  # target, not the workspace — roughly a minute cold, seconds warm. Cheap
-  # enough for every PR.
+  # getforma-dev/forma is PUBLIC (verified: api.github.com returns 200
+  # unauthenticated), so the default GITHUB_TOKEN checkout works and no PAT is
+  # required. If that repo is ever made private this job starts failing on
+  # checkout and needs a PAT in `token:`.
   #
-  # NOTE: this job is green only once the matching fixtures are on `forma`'s
-  # default branch. The contract lands when both halves land.
+  # `needs: test` is a runner-demand fix: the cheap tier releases its runners
+  # before the expensive tier asks for any, taking this workflow's peak
+  # concurrent demand from 4 jobs to 3.
   fmir-contract:
     runs-on: ubuntu-latest
+    needs: test
+    # MEASURED locally: `cargo test -p forma-ir` warm = 10s for the whole
+    # workspace suite; this builds one test target against three direct deps.
+    # Cold with rust-cache the comparable CI job measured ~2m. Realistic worst
+    # case ~6m fully cold; 20 is >3x.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -80,6 +110,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: forma-checkout
+          key: fmir-contract
 
       - run: npm install
 
@@ -119,6 +150,13 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     needs: test  # Only run E2E if unit tests pass
+    # MEASURED locally: `npm run test:e2e:ci` = 8s wall, 6.6s test time, 15/15
+    # passed. The job is dominated by building formajs from source (~1.5m) and
+    # `npx playwright install chromium --with-deps` (0.3-0.5m measured in CI).
+    # Playwright's webServer has no explicit timeout so it inherits the 60s
+    # default — `npx serve` failing to bind fails the run at 60s, it cannot
+    # hang. Realistic worst case ~5m; 15 is 3x.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -126,7 +164,8 @@ jobs:
           node-version: 22
           cache: npm
 
-      # Clone and build FormaJS for E2E fixtures
+      # Clone and build FormaJS for E2E fixtures.
+      # getforma-dev/formajs is PUBLIC (verified unauthenticated), so no PAT.
       - name: Clone FormaJS
         uses: actions/checkout@v4
         with:
@@ -139,13 +178,77 @@ jobs:
           npm ci
           npm run build
 
+      # THIS STEP WAS BROKEN AND FAILED ON EVERY RUN.
+      #
+      # It used to be a blind `cp formajs-checkout/dist/formajs.global.js`.
+      # formajs no longer builds that file: tsup.config.ts emits IIFE bundles
+      # for `formajs-runtime` and `formajs-runtime-hardened` only, and the full
+      # library ships as `forma.esm.js` (ESM). So the copy was `cp: cannot
+      # stat` -> exit 1 -> this job red on every single run, forever. It went
+      # unnoticed because `test:e2e:ci` locally reads a STALE committed copy of
+      # formajs.global.js dated 2026-08-05, which is why the suite passes on a
+      # laptop and cannot pass in CI.
+      #
+      # The fix regenerates the artifact rather than papering over it: bundle
+      # formajs's own built `dist/forma.esm.js` into an IIFE named FormaJS with
+      # formajs's own esbuild. Because the input is the already-built ESM, the
+      # build-time defines (__DEV__ etc.) are already baked in — this is not a
+      # second, divergent build of the source.
+      #
+      # VERIFIED LOCALLY: produces a 112,518-byte bundle whose FormaJS global
+      # exposes 78 exports including every symbol e2e/fixtures/full-stack.html
+      # uses (createSignal, h, mount, createEffect, template, templateMany,
+      # createComputed, batch, Fragment). esbuild ran in 39ms.
+      #
+      # PERMANENT FIX (out of scope for this workflow-only change, tracked in
+      # owner_todo): either restore a `formajs.global` IIFE entry to formajs's
+      # tsup.config.ts, or point e2e/fixtures/full-stack.html at an artifact
+      # formajs actually builds. Until one of those lands, this step is what
+      # makes the job green, and it fails loudly if its inputs move.
       - name: Copy fixtures
         run: |
-          cp formajs-checkout/dist/formajs-runtime.global.js e2e/fixtures/
-          cp formajs-checkout/dist/formajs.global.js e2e/fixtures/
+          set -euo pipefail
+          RT=formajs-checkout/dist/formajs-runtime.global.js
+          ESM=formajs-checkout/dist/forma.esm.js
+          for f in "$RT" "$ESM"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::formajs no longer builds $f."
+              echo "::error::This job bundles formajs's dist into the two globals"
+              echo "::error::e2e/fixtures/full-stack.html loads. Re-check formajs tsup.config.ts"
+              echo "::error::and update this step to name the artifacts it now emits."
+              exit 1
+            fi
+          done
+          cp "$RT" e2e/fixtures/formajs-runtime.global.js
+          # Rebuild the full-library IIFE that formajs stopped emitting, using
+          # formajs's own esbuild (a tsup dependency, so it is already in the
+          # checkout's node_modules after `npm ci` above). Invoked by path
+          # rather than `npx` so it can never fall through to the registry.
+          ./formajs-checkout/node_modules/.bin/esbuild "$ESM" \
+            --bundle --format=iife --global-name=FormaJS --target=es2022 \
+            --outfile=e2e/fixtures/formajs.global.js
+          node -e "
+            const s = require('fs').readFileSync('e2e/fixtures/formajs.global.js','utf8');
+            if (!/var FormaJS\s*=/.test(s)) {
+              console.error('::error::Rebuilt formajs.global.js does not define the FormaJS global.');
+              process.exit(1);
+            }
+          "
+          ls -l e2e/fixtures/
 
       # Install forma-tools deps and run E2E
       - run: npm install
+
+      # Cache the browser binaries (~130 MB) keyed on the resolved Playwright
+      # version. `--with-deps` still runs so the OS packages are present; only
+      # the download is skipped on a hit.
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - run: npx playwright install chromium --with-deps
 
       - name: Run E2E tests

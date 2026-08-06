@@ -5,9 +5,19 @@ on:
     - cron: '0 0 * * 1'  # Every Monday at midnight UTC
   workflow_dispatch:       # Manual trigger
 
+# A scheduled run that overlaps a manual one buys nothing; keep the newest.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify-compiler-imports:
     runs-on: ubuntu-latest
+    # MEASURED: `npm test --workspaces` = 3s locally. The rest is two npm
+    # installs and two `node -e` require checks. Realistic worst case ~3m;
+    # 10 is >3x. This job talks to the npm registry twice, which is the only
+    # thing here that can be slow.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

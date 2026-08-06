@@ -10,14 +10,30 @@ permissions:
   contents: read
   id-token: write  # Required for npm trusted publishing (OIDC)
 
+# cancel-in-progress is deliberately FALSE. A publish is never superseded, and
+# cancelling `npm publish` between the tarball upload and the registry commit
+# is how a version ends up half-created and unrecoverable without a version
+# bump. Keyed on the tag so compiler-v* and build-v* never block each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish-compiler:
     if: startsWith(github.ref_name, 'compiler-v')
     runs-on: ubuntu-latest
+    # MEASURED: on 2026-08-06 run #18 this job executed npm install, build and
+    # test and reached `npm publish` in well under 4 minutes of runner time;
+    # the same workflow published 0.2.0 in 30 seconds on 2026-08-05.
+    # `npm test -w packages/compiler` is 3s locally. 20 is ~5x a 4m run and
+    # bounds a slow registry without ever cutting a publish short.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
+          # npm >= 11.5.1 is required for OIDC trusted publishing; Node 24
+          # ships it. Do not lower this.
           node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
@@ -35,13 +51,44 @@ jobs:
             exit 1
           fi
 
+      # Recorded for the failure explainer below: an OIDC publish that fails
+      # because npm is too old looks identical to one that fails on auth.
+      - name: Record toolchain
+        run: |
+          echo "node $(node -v) / npm $(npm -v) — OIDC trusted publishing needs npm >= 11.5.1"
+
       # Trusted publishing: uses OIDC, no npm token needed.
       # Configure at: npmjs.com/package/@getforma/compiler → Settings → Trusted Publisher
       - run: npm publish --access public -w packages/compiler
 
+      # run #18 failed here with nothing on the run page but "failure". These
+      # three causes need three different responses and only one of them is
+      # fixed by re-running.
+      - name: Explain a publish failure
+        if: failure()
+        run: |
+          echo "::error title=@getforma/compiler publish failed::Read the npm error above, then match it here."
+          echo "5xx / ETIMEDOUT / 'Unable to get OIDC token' / 'Service Unavailable'"
+          echo "  -> GitHub Actions or npm incident. The Actions API mints the OIDC token that"
+          echo "     npm exchanges for a credential, so an Actions outage breaks publish auth."
+          echo "     RE-RUN THIS RUN. Do not re-tag; the tag is fine."
+          echo "ENEEDAUTH / E403 / 'Unable to authenticate, need: Basic realm=npm'"
+          echo "  -> Trusted publishing is NOT configured for @getforma/compiler."
+          echo "     Set it at npmjs.com/package/@getforma/compiler -> Settings -> Trusted Publisher:"
+          echo "     repository getforma-dev/forma-tools, workflow .github/workflows/release.yml,"
+          echo "     environment (leave EMPTY — this job declares none)."
+          echo "     No number of re-runs fixes this; it is a human step on npmjs.com."
+          echo "E409 / 'cannot publish over the previously published versions'"
+          echo "  -> This version already shipped. Bump the version and re-tag."
+
   publish-build:
     if: startsWith(github.ref_name, 'build-v')
     runs-on: ubuntu-latest
+    # Same shape as publish-compiler plus one extra workspace build. On
+    # 2026-08-06 run #19 never executed a step — it died in "Set up job" with
+    # "Service Unavailable" / "Failed to resolve action download info", which
+    # is GitHub failing to fetch actions/checkout, not this repo failing.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -64,6 +111,32 @@ jobs:
             exit 1
           fi
 
+      # @getforma/build depends on @getforma/compiler from the registry, not
+      # from this workspace. Publishing build against a compiler version that
+      # is not on npm yet ships a package nobody can install. Diagnostic only —
+      # it never blocks, but it makes the ordering visible in the log.
+      - name: Report the @getforma/compiler version npm can see
+        continue-on-error: true
+        run: |
+          echo "this repo's packages/build requires:"
+          node -p "JSON.stringify(require('./packages/build/package.json').dependencies, null, 2)"
+          echo "npm currently serves @getforma/compiler: $(npm view @getforma/compiler version || echo unknown)"
+
+      - name: Record toolchain
+        run: |
+          echo "node $(node -v) / npm $(npm -v) — OIDC trusted publishing needs npm >= 11.5.1"
+
       # Trusted publishing: uses OIDC, no npm token needed.
       # Configure at: npmjs.com/package/@getforma/build → Settings → Trusted Publisher
       - run: npm publish --access public -w packages/build
+
+      - name: Explain a publish failure
+        if: failure()
+        run: |
+          echo "::error title=@getforma/build publish failed::Read the npm error above, then match it here."
+          echo "5xx / ETIMEDOUT / 'Unable to get OIDC token' -> Actions/npm incident. RE-RUN, do not re-tag."
+          echo "ENEEDAUTH / E403 -> no Trusted Publisher for @getforma/build on npmjs.com."
+          echo "  Set repository getforma-dev/forma-tools, workflow .github/workflows/release.yml,"
+          echo "  environment EMPTY. Human step; re-running will not fix it."
+          echo "E409 -> version already published. Bump and re-tag."
+          echo "ETARGET on @getforma/compiler -> publish the compiler-v* tag first, then re-run this run."
