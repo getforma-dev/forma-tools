@@ -586,6 +586,231 @@ describe('generateRealIr — inline mount', () => {
 });
 
 // ===========================================================================
+// Rule 9's static spread unroll over a table declared in ANOTHER module
+//
+// The exact shape of ksx's map route: the page module declares the key
+// vocabulary tables and the island imports them back to spread into its
+// <select>s. `fileConstants` is extracted per resolved file — correct, and the
+// reason an imported table was invisible — so all 34 of those spreads compiled
+// to empty island shells. Nothing rendered server-side, and with JavaScript
+// off the write path did not exist at all.
+// ===========================================================================
+
+describe('generateRealIr — imported constant tables in a spread unroll', () => {
+  /** The ksx shape: page declares the table, island imports it back. */
+  const KSX_SHAPE = {
+    'app.ts': `
+      import { mount, activateIslands } from 'formajs';
+      import { Page } from './page';
+      import { Picker } from './picker';
+      activateIslands({ Picker });
+      mount(() => Page(), '#app');
+    `,
+    'page.ts': `
+      import { h } from 'formajs';
+      import { Picker } from './picker';
+      const KEYS = [{ k: 'A' }, { k: 'B' }, { k: 'F1' }];
+      export { KEYS };
+      export function Page() { return h('main', { id: 'app' }, Picker()); }
+    `,
+    'picker.ts': `
+      import { h } from 'formajs';
+      import { KEYS } from './page';
+      export function Picker() {
+        return h('select', { name: 'key' }, ...KEYS.map((ko) => h('option', null, ko.k)));
+      }
+    `,
+  };
+
+  it('unrolls a const table the island imports from the page module', () => {
+    const result = emitReal(writeProject(KSX_SHAPE, 'app.ts'));
+
+    // Every option is STATIC markup inside the island — server-rendered, and
+    // present with JavaScript off. Before the fix the island's whole subtree
+    // was `OPEN_TAG div / CLOSE_TAG div`, a shell with nothing in it.
+    expect(parseOpcodeList(result.binary)).toEqual([
+      'OPEN_TAG main id="app"',
+      'ISLAND_START Picker#0',
+      'OPEN_TAG select name="key"',
+      'OPEN_TAG option',
+      'TEXT "A"',
+      'CLOSE_TAG option',
+      'OPEN_TAG option',
+      'TEXT "B"',
+      'CLOSE_TAG option',
+      'OPEN_TAG option',
+      'TEXT "F1"',
+      'CLOSE_TAG option',
+      'CLOSE_TAG select',
+      'ISLAND_END Picker#0',
+      'CLOSE_TAG main',
+    ]);
+    // One island — the registered component. No `island_<n>` fallback shell.
+    expect(result.islands.map((i) => i.name)).toEqual(['Picker']);
+    expect(warnings()).toBe('');
+  });
+
+  it('follows the table through a barrel re-export and an import alias', () => {
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount } from 'formajs';
+        import { Page } from './page';
+        mount(() => Page(), '#app');
+      `,
+      'tables/keys.ts': `export const RAW_KEYS = [{ k: 'X' }, { k: 'Y' }];`,
+      'tables/index.ts': `export { RAW_KEYS } from './keys';`,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { RAW_KEYS as KEYS } from './tables';
+        export function Page() {
+          return h('ul', { id: 'app' }, ...KEYS.map((r) => h('li', null, r.k)));
+        }
+      `,
+    }, 'app.ts'));
+
+    expect(parseOpcodeList(result.binary)).toEqual([
+      'OPEN_TAG ul id="app"',
+      'OPEN_TAG li',
+      'TEXT "X"',
+      'CLOSE_TAG li',
+      'OPEN_TAG li',
+      'TEXT "Y"',
+      'CLOSE_TAG li',
+      'CLOSE_TAG ul',
+    ]);
+    expect(result.islands).toEqual([]);
+  });
+
+  it('substitutes imported rows into attribute position too', () => {
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount } from 'formajs';
+        import { Page } from './page';
+        mount(() => Page(), '#app');
+      `,
+      'nav.ts': `export const NAV = [{ href: '/', label: 'Home', n: 1 }];`,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { NAV } from './nav';
+        export function Page() {
+          return h('nav', { id: 'app' },
+            ...NAV.map((item) => h('a', { href: item.href, 'data-n': item.n }, item.label)));
+        }
+      `,
+    }, 'app.ts'));
+
+    expect(parseOpcodeList(result.binary)).toEqual([
+      'OPEN_TAG nav id="app"',
+      'OPEN_TAG a href="/" data-n="1"',
+      'TEXT "Home"',
+      'CLOSE_TAG a',
+      'CLOSE_TAG nav',
+    ]);
+  });
+
+  it('still degrades a table that is built at runtime, naming the module that declares it', () => {
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount } from 'formajs';
+        import { Page } from './page';
+        mount(() => Page(), '#app');
+      `,
+      'tables.ts': `export const KEYS = loadKeys();`,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { KEYS } from './tables';
+        export function Page() {
+          return h('ul', { id: 'app' }, ...KEYS.map((r) => h('li', null, r.k)));
+        }
+      `,
+    }, 'app.ts'));
+
+    expect(result.islands.map((i) => i.name)).toEqual(['island_0']);
+
+    const warned = warnings();
+    expect(warned).toContain('...KEYS.map(...)');          // the construct
+    expect(warned).toContain('tables.ts');                 // the file to edit
+    expect(warned).toContain('CallExpression');            // why it is not static
+    expect(warned).toContain('empty island shell');        // the consequence
+  });
+
+  it('still degrades a table the declaring module mutates in place', () => {
+    // `const` freezes the binding, not the contents. Unrolling the literal
+    // would bake a stale snapshot into the server's HTML that the client then
+    // disagrees with — worse than an island, because nothing repairs it.
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount } from 'formajs';
+        import { Page } from './page';
+        mount(() => Page(), '#app');
+      `,
+      'tables.ts': `
+        export const KEYS = [{ k: 'A' }];
+        KEYS.push({ k: 'B' });
+      `,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { KEYS } from './tables';
+        export function Page() {
+          return h('ul', { id: 'app' }, ...KEYS.map((r) => h('li', null, r.k)));
+        }
+      `,
+    }, 'app.ts'));
+
+    expect(result.islands.map((i) => i.name)).toEqual(['island_0']);
+    expect(warnings()).toContain('tables.ts');
+  });
+
+  it('still degrades when a nested declaration shadows the imported table', () => {
+    // The identifier at the spread reads the INNER binding. Unrolling the
+    // imported table there would ship rows the client never renders.
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount } from 'formajs';
+        import { Page } from './page';
+        mount(() => Page(), '#app');
+      `,
+      'tables.ts': `export const KEYS = [{ k: 'A' }];`,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { KEYS } from './tables';
+        export function Page() {
+          const KEYS = loadKeys();
+          return h('ul', { id: 'app' }, ...KEYS.map((r) => h('li', null, r.k)));
+        }
+      `,
+    }, 'app.ts'));
+
+    expect(result.islands.map((i) => i.name)).toEqual(['island_0']);
+    const warned = warnings();
+    expect(warned).toContain('declared in a nested scope');
+    expect(warned).toContain('page.ts');
+  });
+
+  it('terminates on a re-export cycle instead of hanging the build', () => {
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount } from 'formajs';
+        import { Page } from './page';
+        mount(() => Page(), '#app');
+      `,
+      'a.ts': `export { KEYS } from './b';`,
+      'b.ts': `export { KEYS } from './a';`,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { KEYS } from './a';
+        export function Page() {
+          return h('ul', { id: 'app' }, ...KEYS.map((r) => h('li', null, r.k)));
+        }
+      `,
+    }, 'app.ts'));
+
+    expect(result.islands.map((i) => i.name)).toEqual(['island_0']);
+    expect(warnings()).toContain('cycle');
+  });
+});
+
+// ===========================================================================
 // Failing loudly
 // ===========================================================================
 

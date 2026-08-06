@@ -3,11 +3,15 @@ import { transformSync } from 'esbuild';
 
 import {
   readImportBindings,
+  resolveExportedConstant,
   resolveExportedFunction,
+  resolveImportedConstant,
   returnExpressionOf,
+  type ConstantLookup,
   type ExportLookup,
   type ModuleLoader,
 } from '../src/export-resolver';
+import { ComponentAnalyzer } from '../src/component-analyzer';
 import { parse } from '@babel/parser';
 
 // ---------------------------------------------------------------------------
@@ -340,6 +344,244 @@ describe('returnExpressionOf', () => {
 // ===========================================================================
 // readImportBindings
 // ===========================================================================
+
+// ===========================================================================
+// Constant tables — the same export forms, asked about an array instead of a
+// function.
+//
+// ksx's map island spreads twelve `...KEYS_*.map(ko => h('option', null, ko.k))`
+// tables that are DECLARED one module away, and every one of the 34 spreads
+// compiled to an empty island shell because the unroll could only see
+// constants extracted from the module it was walking. These pin the resolution
+// that closes that: follow the import, read the table from the module that
+// declares it, and refuse — out loud — when it is not statically knowable.
+// ===========================================================================
+
+describe('resolveExportedConstant / resolveImportedConstant', () => {
+  /** The real reader, so a table is judged by the same rules a local one is. */
+  const readConstants = (source: string, filePath: string) =>
+    new ComponentAnalyzer('').extractFileConstants(source, filePath);
+
+  function moduleAst(source: string) {
+    return parse(source, { sourceType: 'module', plugins: ['typescript', 'jsx'] }) as any;
+  }
+
+  function expectTable(lookup: ConstantLookup) {
+    if (lookup.kind !== 'found') {
+      throw new Error(
+        `expected a resolved table, got: ${lookup.kind === 'unresolved' ? lookup.detail : lookup.kind}`,
+      );
+    }
+    return lookup;
+  }
+
+  function expectDetail(lookup: ConstantLookup): string {
+    if (lookup.kind !== 'unresolved') {
+      throw new Error(`expected an unresolved result, got '${lookup.kind}'`);
+    }
+    return lookup.detail;
+  }
+
+  it('reads the bare-const-then-export form ksx declares its tables in', () => {
+    // MapPage.ts declares `const KEYS_LETTER = [...]` at the top and
+    // `export { KEYS_LETTER, ... }` at the bottom — the one form that is
+    // neither `export const` nor a re-export.
+    const source = `
+      const KEYS = [{ k: 'A' }, { k: 'B' }];
+      export { KEYS };
+    `;
+    const lookup = expectTable(
+      resolveExportedConstant(source, 'tables.ts', 'KEYS', { readConstants }),
+    );
+    expect(lookup.value).toEqual([{ k: 'A' }, { k: 'B' }]);
+    expect(lookup.filePath).toBe('tables.ts');
+  });
+
+  it("follows an aliased import to the table's declaring module", () => {
+    const files = {
+      './tables': `export const RAW_KEYS = [{ k: 'A' }];`,
+    };
+    // `import { RAW_KEYS as KEYS }` binds local KEYS to RAW_KEYS over there;
+    // looking up 'KEYS' in tables.ts would find nothing at all.
+    const ast = moduleAst(`import { RAW_KEYS as KEYS } from './tables';`);
+    const lookup = expectTable(
+      resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+        loadModule: loaderFor(files),
+        readConstants,
+      }),
+    );
+    expect(lookup.value).toEqual([{ k: 'A' }]);
+    expect(lookup.filePath).toBe('./tables');
+  });
+
+  it('follows an aliased RE-export chain across two modules', () => {
+    const files = {
+      './barrel': `export { INNER as KEYS } from './inner';`,
+      './inner': `export const INNER = [{ k: 'Z' }];`,
+    };
+    const ast = moduleAst(`import { KEYS } from './barrel';`);
+    const lookup = expectTable(
+      resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+        loadModule: loaderFor(files),
+        readConstants,
+      }),
+    );
+    expect(lookup.value).toEqual([{ k: 'Z' }]);
+    expect(lookup.filePath).toBe('./inner');
+  });
+
+  it('follows an `export *` barrel', () => {
+    const files = {
+      './barrel': `export * from './inner';`,
+      './inner': `export const KEYS = [{ k: 'Q' }];`,
+    };
+    const ast = moduleAst(`import { KEYS } from './barrel';`);
+    expect(
+      expectTable(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+        loadModule: loaderFor(files),
+        readConstants,
+      })).value,
+    ).toEqual([{ k: 'Q' }]);
+  });
+
+  it('reports a name that is not imported at all as not-imported', () => {
+    // Distinct from "unresolved": there is nothing to explain, and the caller's
+    // own unknown-identifier diagnostic is the right one to print.
+    const ast = moduleAst(`import { OTHER } from './tables';`);
+    expect(
+      resolveImportedConstant(ast, 'island.ts', 'KEYS', { readConstants }).kind,
+    ).toBe('not-imported');
+  });
+
+  it('refuses a table the declaring module never exports', () => {
+    // A non-exported binding is not importable. Unrolling it would put rows in
+    // the server's HTML that the importing module cannot produce client-side.
+    const files = { './tables': `const KEYS = [{ k: 'A' }];` };
+    const ast = moduleAst(`import { KEYS } from './tables';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor(files),
+      readConstants,
+    }));
+    expect(detail).toContain('./tables');
+    expect(detail).toContain('never exported');
+  });
+
+  it('refuses a table built at runtime, naming the module it is declared in', () => {
+    const files = { './tables': `export const KEYS = buildKeys();` };
+    const ast = moduleAst(`import { KEYS } from './tables';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor(files),
+      readConstants,
+    }));
+    // The author has to edit ./tables, so the diagnostic must name ./tables —
+    // not the island the spread happens to sit in.
+    expect(detail).toContain('./tables');
+    expect(detail).toContain('CallExpression');
+  });
+
+  it('refuses a `let` table, which can be reassigned at runtime', () => {
+    const files = { './tables': `export let KEYS = [{ k: 'A' }];` };
+    const ast = moduleAst(`import { KEYS } from './tables';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor(files),
+      readConstants,
+    }));
+    expect(detail).toContain('`let`');
+  });
+
+  it('refuses elements that are not object literals of primitives', () => {
+    const files = { './tables': `export const KEYS = [{ k: label() }];` };
+    const ast = moduleAst(`import { KEYS } from './tables';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor(files),
+      readConstants,
+    }));
+    expect(detail).toContain('ArrayExpression');
+  });
+
+  it('reports a constant imported from a package as unfollowable', () => {
+    const ast = moduleAst(`import { KEYS } from '@vendor/keys';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor({}),
+      readConstants,
+    }));
+    expect(detail).toContain('@vendor/keys');
+    expect(detail).toContain('relative imports only');
+  });
+
+  it('reports an import whose file does not exist', () => {
+    const ast = moduleAst(`import { KEYS } from './missing';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor({}),
+      readConstants,
+    }));
+    expect(detail).toContain('./missing');
+    expect(detail).toContain('does not resolve to a readable file');
+  });
+
+  it('refuses a namespace import', () => {
+    const ast = moduleAst(`import * as tables from './tables';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'tables', {
+      loadModule: loaderFor({ './tables': `export const KEYS = [{ k: 'A' }];` }),
+      readConstants,
+    }));
+    expect(detail).toContain('namespace import');
+  });
+
+  it('refuses a default import, and says to name the export', () => {
+    const ast = moduleAst(`import KEYS from './tables';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor({ './tables': `export default [{ k: 'A' }];` }),
+      readConstants,
+    }));
+    expect(detail).toContain('DEFAULT import');
+  });
+
+  it('terminates on a re-export cycle instead of recursing', () => {
+    // Two modules forwarding the same name to each other. Without the cycle
+    // guard this is an unbounded recursion, which in a build means a hang.
+    const files = {
+      './a': `export { KEYS } from './b';`,
+      './b': `export { KEYS } from './a';`,
+    };
+    const ast = moduleAst(`import { KEYS } from './a';`);
+    const detail = expectDetail(resolveImportedConstant(ast, 'island.ts', 'KEYS', {
+      loadModule: loaderFor(files),
+      readConstants,
+    }));
+    expect(detail).toContain('cycle');
+  });
+
+  it('resolves through the inert import cycle a compile-time twin creates', () => {
+    // ksx's real shape: the page module declares the tables and imports the
+    // island, the island imports the tables back. The cycle is inert — nothing
+    // reads the arrays at module init — and resolution must not trip on it.
+    const files = {
+      './page': `
+        import { Island } from './island';
+        const KEYS = [{ k: 'A' }];
+        export { KEYS };
+        export function Page() { return h('main', null, Island()); }
+      `,
+      './island': `import { KEYS } from './page'; export function Island() {}`,
+    };
+    const ast = moduleAst(files['./island']);
+    expect(
+      expectTable(resolveImportedConstant(ast, './island', 'KEYS', {
+        loadModule: loaderFor(files),
+        readConstants,
+      })).value,
+    ).toEqual([{ k: 'A' }]);
+  });
+
+  it('reports a missing module loader rather than guessing', () => {
+    const ast = moduleAst(`import { KEYS } from './tables';`);
+    const detail = expectDetail(
+      resolveImportedConstant(ast, 'island.ts', 'KEYS', { readConstants }),
+    );
+    expect(detail).toContain('no module loader');
+  });
+});
 
 describe('readImportBindings', () => {
   it('records the name the TARGET module exports each binding under', () => {

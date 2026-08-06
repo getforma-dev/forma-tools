@@ -1,7 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { IrEmitContext } from '../src/ir-emit';
-import { walkHTree, walkCallExpression, type WalkContext } from '../src/ir-walk';
+import {
+  moduleConstantScope,
+  walkHTree,
+  walkCallExpression,
+  type WalkContext,
+} from '../src/ir-walk';
 import { ComponentAnalyzer } from '../src/component-analyzer';
+import type { ModuleLoader } from '../src/module-loader';
 import {
   collectSignalDeclarations,
   enterSignalScope,
@@ -738,6 +744,125 @@ describe('IR Walk Engine', () => {
         'ISLAND_END island_0#0',
         'CLOSE_TAG div',
       ]);
+    });
+
+    // -----------------------------------------------------------------------
+    // Tables the module IMPORTS
+    // -----------------------------------------------------------------------
+
+    /** A module loader over an in-memory file map, keyed by bare specifier. */
+    const loaderFor = (files: Record<string, string>): ModuleLoader =>
+      (_fromFile, importPath) =>
+        importPath in files ? { path: importPath, source: files[importPath]! } : null;
+
+    /**
+     * The walk context for a module whose text is `source` — its own constants
+     * plus the resolver for the ones it imports, built by the same function the
+     * SSR plugin and every inlined component use.
+     */
+    const scopeOf = (source: string, files: Record<string, string> = {}): WalkContext => ({
+      sourceFile: 'island.ts',
+      ...moduleConstantScope(source, 'island.ts', loaderFor(files)),
+    });
+
+    it('unrolls a table imported from a sibling module', () => {
+      const spread = `h('select', null, ...KEYS.map((ko) => h('option', null, ko.k)))`;
+      const binary = walkAndEmit(spread, scopeOf(
+        `import { KEYS } from './tables';\nexport function Picker() { return ${spread}; }`,
+        { './tables': `export const KEYS = [{ k: 'A' }, { k: 'B' }];` },
+      ));
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG select',
+        'OPEN_TAG option',
+        'TEXT "A"',
+        'CLOSE_TAG option',
+        'OPEN_TAG option',
+        'TEXT "B"',
+        'CLOSE_TAG option',
+        'CLOSE_TAG select',
+      ]);
+      expect(getIslands(binary)).toEqual([]);
+    });
+
+    it('consults the import resolver only when the module declares no such table', () => {
+      // Scope order, not a preference: an identifier binds to the module's own
+      // declaration, and only when there is none can an import be the answer.
+      // (Both at module scope is a redeclaration error, so this pins the rule
+      // rather than a reachable page — the reachable shadow is a NESTED
+      // declaration, covered in ssr-emission.test.ts.)
+      const asked: string[] = [];
+      const binary = walkAndEmit(
+        `h('ul', null, ...ROWS.map((r) => h('li', null, r.k)))`,
+        {
+          fileConstants: new Map<string, any[]>([['ROWS', [{ k: 'local' }]]]),
+          resolveImportedConstant: (name) => {
+            asked.push(name);
+            return { kind: 'found', value: [{ k: 'imported' }], filePath: 'other.ts' };
+          },
+        },
+      );
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG ul',
+        'OPEN_TAG li',
+        'TEXT "local"',
+        'CLOSE_TAG li',
+        'CLOSE_TAG ul',
+      ]);
+      expect(asked).toEqual([]);
+    });
+
+    it('answers the same imported table once, however many spreads read it', () => {
+      // ksx's map island spreads twelve imported tables across 34 sites in a
+      // 240 KB file. Re-resolving (and re-parsing the declaring module) per
+      // spread turns one page compile into dozens of full-file parses.
+      const files = { './tables': `export const KEYS = [{ k: 'A' }];` };
+      let loads = 0;
+      const counting: ModuleLoader = (from, path) => {
+        loads++;
+        return loaderFor(files)(from, path);
+      };
+      const spread = `...KEYS.map((ko) => h('option', null, ko.k))`;
+      const walkCtx: WalkContext = {
+        sourceFile: 'island.ts',
+        ...moduleConstantScope(
+          `import { KEYS } from './tables';\nexport function P() { return h('div', null, ${spread}); }`,
+          'island.ts',
+          counting,
+        ),
+      };
+
+      const binary = walkAndEmit(
+        `h('div', null, h('select', null, ${spread}), h('select', null, ${spread}))`,
+        walkCtx,
+      );
+
+      expect(parseOpcodeList(binary).filter((op) => op === 'TEXT "A"')).toHaveLength(2);
+      expect(loads).toBe(1);
+    });
+
+    it('warns with the declaring module when an imported table is not static', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const spread = `h('ul', null, ...ROWS.map((r) => h('li', null, r.k)))`;
+        const binary = walkAndEmit(spread, scopeOf(
+          `import { ROWS } from './tables';\nexport function P() { return ${spread}; }`,
+          { './tables': `export const ROWS = loadRows();` },
+        ));
+
+        expect(getIslands(binary).map((i) => i.name)).toEqual(['island_0']);
+
+        const warned = warn.mock.calls.map((c) => c.join(' ')).join('\n');
+        // The generic "use createList" line would send the author to the
+        // spread; the table is one module away and that is what must be named.
+        expect(warned).toContain('...ROWS.map(...)');
+        expect(warned).toContain('./tables');
+        expect(warned).toContain('CallExpression');
+        expect(warned).not.toContain('use createList');
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 

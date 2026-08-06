@@ -19,6 +19,7 @@
  *  12. null/undefined/false      -> skip
  */
 
+import { parse } from '@babel/parser';
 import type * as T from '@babel/types';
 import * as t from '@babel/types';
 import {
@@ -30,11 +31,13 @@ import {
   SLOT_TYPE_OBJECT,
   SLOT_TYPE_TEXT,
 } from './ir-emit.js';
-import { ComponentAnalyzer } from './component-analyzer.js';
+import { ComponentAnalyzer, nestedScopeBindings } from './component-analyzer.js';
 import {
   resolveExportedFunction,
+  resolveImportedConstant,
   returnExpressionOf,
   type ComponentFunction,
+  type ConstantLookup,
 } from './export-resolver.js';
 import type { ModuleLoader } from './module-loader.js';
 import {
@@ -446,6 +449,21 @@ function evalNode(node: t.Expression, env: EvalEnv): EvalValue | undefined {
 export interface WalkContext {
   /** File-level constant arrays (for Rule 9 static unroll). */
   fileConstants?: Map<string, any[]>;
+  /** Resolve a constant array the CURRENT module imports, for the same unroll.
+   *
+   *  `fileConstants` is extracted per resolved file, which is what makes an
+   *  identifier resolve against its own module scope — and is also why a table
+   *  declared one file away was invisible: ksx's map island spreads twelve
+   *  tables it imports from the page module, and every one of the 34 spreads
+   *  degraded to an unhydratable island shell. This follows the import to the
+   *  declaring module and reads the table from THERE.
+   *
+   *  Set alongside `fileConstants` by `moduleConstantScope`, so it always
+   *  describes the same module the local constants came from. Consulted only
+   *  after `fileConstants` misses, which is what keeps a local declaration
+   *  shadowing an imported one.
+   *  Verified by: packages/compiler/tests/ssr-emission.test.ts > "unrolls a const table the island imports from the page module" */
+  resolveImportedConstant?: (name: string) => ConstantLookup;
   /** File-level string constants: const name → folded string value.
    *  Identifiers referencing these resolve to STATIC attribute values
    *  (and fold inside function-valued prop SSR defaults). */
@@ -529,29 +547,98 @@ export interface WalkContext {
  *  sources (baseDir is unused by the extraction methods). */
 const constantAnalyzer = new ComponentAnalyzer('');
 
+/** One module's constant scope, as the walk needs it. */
+export type ModuleConstantScope =
+  Pick<WalkContext, 'fileConstants' | 'stringConstants' | 'resolveImportedConstant'>;
+
 /**
- * Re-extract file-level constants from a resolved component source so the
- * sub-component/island walk resolves identifiers against its OWN module
- * scope — mirroring the root-file extraction in the SSR plugin.
+ * The constant scope of ONE module: the tables and strings it declares, plus
+ * the resolver for the ones it imports.
+ *
+ * Every walk entry point builds its scope through this function — the root
+ * page in the SSR plugin, an inlined sub-component, an inlined island — so a
+ * construct that resolves on a page cannot fail to resolve inside an island
+ * merely because a different site assembled the context. That divergence is
+ * exactly what left ksx's map island unable to see the tables its own page
+ * module declares.
+ *
  * Falls back to EMPTY maps if the source fails to parse: falling back to the
  * parent context's constants would resolve the child file's identifiers
  * against the WRONG module scope (the parent's).
  */
-function extractResolvedConstants(
+export function moduleConstantScope(
   source: string,
   filePath: string,
-): Pick<WalkContext, 'fileConstants' | 'stringConstants'> {
+  loadModule?: ModuleLoader,
+): ModuleConstantScope {
+  let fileConstants: Map<string, any[]>;
+  let stringConstants: Map<string, string>;
   try {
-    return {
-      fileConstants: constantAnalyzer.extractFileConstants(source, filePath),
-      stringConstants: constantAnalyzer.extractStringConstants(source, filePath),
-    };
+    fileConstants = constantAnalyzer.extractFileConstants(source, filePath);
+    stringConstants = constantAnalyzer.extractStringConstants(source, filePath);
   } catch {
-    return {
-      fileConstants: new Map(),
-      stringConstants: new Map(),
-    };
+    fileConstants = new Map();
+    stringConstants = new Map();
   }
+
+  // Parsed on the FIRST imported-table question and never again: a module with
+  // no such spread pays nothing, and a module with 34 of them — ksx's 240 KB
+  // map island — parses itself once rather than once per spread.
+  let parsed: { ast: T.File; shadowed: Set<string> } | null | undefined;
+  const answers = new Map<string, ConstantLookup>();
+
+  const parseOnce = (): { ast: T.File; shadowed: Set<string> } | null => {
+    if (parsed !== undefined) return parsed;
+    try {
+      const ast = parse(source, {
+        sourceType: 'module',
+        plugins: ['typescript', 'jsx'],
+      }) as unknown as T.File;
+      parsed = { ast, shadowed: nestedScopeBindings(ast) };
+    } catch {
+      parsed = null;
+    }
+    return parsed;
+  };
+
+  const resolveImportedConstantForModule = (name: string): ConstantLookup => {
+    const cached = answers.get(name);
+    if (cached) return cached;
+
+    const answer = ((): ConstantLookup => {
+      const mod = parseOnce();
+      // Unparseable here means unparseable above too, where it already emptied
+      // the local maps; the caller's generic diagnostic is the honest one.
+      if (!mod) return { kind: 'not-imported' };
+
+      // A local declaration shadows an imported one. Module scope cannot hold
+      // both (that is a redeclaration), so the case that matters is a NESTED
+      // binding: a component-local `const KEYS = buildKeys()` beside a module
+      // `import { KEYS }`. The identifier at the spread refers to the inner
+      // one, and unrolling the imported table there would ship rows the client
+      // never renders.
+      if (mod.shadowed.has(name)) {
+        return {
+          kind: 'unresolved',
+          detail: `'${name}' is imported into ${filePath} but ALSO declared in a nested scope of that file, so the compiler cannot tell which one this spread reads`,
+        };
+      }
+
+      return resolveImportedConstant(mod.ast, filePath, name, {
+        loadModule,
+        readConstants: (src, path) => constantAnalyzer.extractFileConstants(src, path),
+      });
+    })();
+
+    answers.set(name, answer);
+    return answer;
+  };
+
+  return {
+    fileConstants,
+    stringConstants,
+    resolveImportedConstant: resolveImportedConstantForModule,
+  };
 }
 
 /**
@@ -572,7 +659,7 @@ function inlinedWalkContext(
   functionName: string,
   visited: Set<string>,
 ): WalkContext {
-  const constants = extractResolvedConstants(sub.source, sub.filePath);
+  const constants = moduleConstantScope(sub.source, sub.filePath, walkCtx.loadModule);
   return {
     ...walkCtx,
     ...constants,
@@ -1907,8 +1994,12 @@ function collectMemberProps(node: t.Node, paramName: string, props: Set<string>)
 /**
  * Handle spread children: ...ARRAY.map(cb)
  *
- * If ARRAY is in fileConstants and the callback only uses Rules 1-7 patterns,
- * statically unroll. Otherwise, emit island.
+ * ARRAY may be declared in this module or IMPORTED from another; either way it
+ * must be a statically knowable array of object literals. When the callback
+ * only uses Rules 1-7 patterns, the spread unrolls to static markup.
+ * Otherwise it degrades to an island — and says which of those two things
+ * failed, because "the table is unreadable" and "the callback is not a plain
+ * h() call" need different fixes.
  */
 function emitSpreadChild(
   spread: t.SpreadElement,
@@ -1929,16 +2020,15 @@ function emitSpreadChild(
   ) {
     const arrayName = arg.callee.object.name;
     const callback = arg.arguments[0];
+    const table = resolveConstantTable(arrayName, walkCtx);
 
-    // Check if the array is a known file constant
     if (
-      walkCtx.fileConstants
-      && walkCtx.fileConstants.has(arrayName)
+      table.kind === 'found'
       && callback
       && !t.isSpreadElement(callback)
       && isFunctionExpr(callback)
     ) {
-      const items = walkCtx.fileConstants.get(arrayName)!;
+      const items = table.value;
       const fn = callback as t.ArrowFunctionExpression | t.FunctionExpression;
 
       // Get the callback parameter name
@@ -1950,7 +2040,7 @@ function emitSpreadChild(
         if (body && t.isCallExpression(body) && t.isIdentifier(body.callee) && body.callee.name === hName) {
           // Unroll: for each item in the array, substitute properties and walk
           for (const item of items) {
-            const substituted = substituteProperties(body, paramName, item);
+            const substituted = substituteProperties(body, paramName, item as Record<string, any>);
             if (substituted && t.isCallExpression(substituted)) {
               walkHTree(substituted, hName, ctx, walkCtx);
             } else {
@@ -1966,6 +2056,21 @@ function emitSpreadChild(
         }
       }
     }
+
+    // The table itself is the thing that failed, and it knows why — the file
+    // it lives in, and what about it is not statically knowable. Reporting
+    // that beats the generic "use createList" line, which sends the author
+    // looking at the spread when the problem is one module away.
+    // Verified by: packages/compiler/tests/ir-walk.test.ts > "warns with the declaring module when an imported table is not static"
+    if (table.kind === 'unresolved') {
+      warnDegraded(
+        walkCtx,
+        `spread child ...${arrayName}.map(...)`,
+        `${ISLAND_CONSEQUENCE} — ${table.detail}`,
+      );
+      emitIsland(ctx);
+      return;
+    }
   }
 
   // Can't statically unroll → island
@@ -1976,6 +2081,21 @@ function emitSpreadChild(
       + ' — only `...CONST.map(item => h(...))` over a module-level array of object literals unrolls statically; use createList for runtime data',
   );
   emitIsland(ctx);
+}
+
+/**
+ * The constant table `name` refers to at this point in the walk: this module's
+ * own declaration first, then whatever it imports under that name.
+ *
+ * Order is the scope rule, not a preference — a module-scope declaration is
+ * what the identifier binds to, and only when there is none can an import be
+ * the answer.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "consults the import resolver only when the module declares no such table"
+ */
+function resolveConstantTable(name: string, walkCtx: WalkContext): ConstantLookup {
+  const local = walkCtx.fileConstants?.get(name);
+  if (local) return { kind: 'found', value: local, filePath: walkCtx.sourceFile ?? '' };
+  return walkCtx.resolveImportedConstant?.(name) ?? { kind: 'not-imported' };
 }
 
 /**

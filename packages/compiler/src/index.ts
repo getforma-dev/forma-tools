@@ -28,11 +28,16 @@ export {
   type SignalScope,
 } from './signal-scope.js';
 export {
+  resolveExportedConstant,
   resolveExportedFunction,
+  resolveImportedConstant,
   readImportBindings,
   returnExpressionOf,
+  type ConstantLookup,
+  type ConstantTable,
   type ExportLookup,
   type ImportBinding,
+  type ResolveConstantOptions,
   type ResolveExportOptions,
 } from './export-resolver.js';
 export {
@@ -42,4 +47,10 @@ export {
   type ModuleLoader,
 } from './module-loader.js';
 export { classifySubtree, SubtreeClassification } from './ir-analyze.js';
-export { walkHTree, walkCallExpression, type WalkContext } from './ir-walk.js';
+export {
+  moduleConstantScope,
+  walkHTree,
+  walkCallExpression,
+  type ModuleConstantScope,
+  type WalkContext,
+} from './ir-walk.js';

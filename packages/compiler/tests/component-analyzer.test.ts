@@ -468,6 +468,38 @@ describe('extractFileConstants', () => {
     expect(result.size).toBe(0);
   });
 
+  it('drops a const table the file mutates in place', () => {
+    // `const` freezes the BINDING, not the array. Rule 9 unrolls this map's
+    // contents into static server HTML, so a table whose contents change after
+    // declaration would ship a stale snapshot the client then disagrees with —
+    // and unlike a missing island, nothing repairs a wrong static row.
+    const source = `
+      const ROWS = [{ k: 'A' }];
+      ROWS.push({ k: 'B' });
+    `;
+    expect(analyzer.extractFileConstants(source, 'file.ts').size).toBe(0);
+  });
+
+  it('drops a const table assigned through an index', () => {
+    const source = `
+      const ROWS = [{ k: 'A' }];
+      ROWS[0] = { k: 'B' };
+    `;
+    expect(analyzer.extractFileConstants(source, 'file.ts').size).toBe(0);
+  });
+
+  it('keeps a table the file only reads', () => {
+    // The guard must not fire on ordinary reads — `.map`, `.length`, indexing —
+    // or it would degrade every table Rule 9 exists to unroll.
+    const source = `
+      const ROWS = [{ k: 'A' }];
+      const first = ROWS[0];
+      const all = ROWS.map((r) => r.k).join(ROWS.length);
+    `;
+    expect(analyzer.extractFileConstants(source, 'file.ts').get('ROWS'))
+      .toEqual([{ k: 'A' }]);
+  });
+
   it('extracts multiple constants', () => {
     const source = `
       const FEATURES = [

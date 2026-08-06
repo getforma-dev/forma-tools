@@ -383,6 +383,17 @@ export class ComponentAnalyzer {
       }
     }
 
+    // `const` freezes the BINDING, not the array. A table the file goes on to
+    // mutate — `ROWS.push(…)`, `ROWS[0] = …`, `ROWS.sort()` — has a different
+    // content at render time than at declaration time, so unrolling the
+    // literal bakes a stale snapshot into the server's HTML that the client
+    // then disagrees with. Drop those: the spread degrades to an island and
+    // says why, which is recoverable, where a wrong static row is not.
+    // Verified by: packages/compiler/tests/component-analyzer.test.ts > "drops a const table the file mutates in place"
+    for (const name of mutatedArrayNames(ast as unknown as T.File)) {
+      constants.delete(name);
+    }
+
     return constants;
   }
 
@@ -444,34 +455,9 @@ export class ComponentAnalyzer {
     // over-conservative, but safe — shadowed names then hit the existing
     // unresolvable-identifier warn path.
     if (constants.size > 0) {
-      const deleteBindings = (idNode: T.Node) => {
-        for (const name of Object.keys(t.getBindingIdentifiers(idNode))) {
-          constants.delete(name);
-        }
-      };
-      traverse(ast, {
-        VariableDeclarator(path) {
-          // Skip module top-level declarations — those ARE the folded consts.
-          const declaration = path.parentPath;
-          const container = declaration.parentPath;
-          if (!container) return;
-          if (t.isProgram(container.node)) return;
-          if (
-            t.isExportNamedDeclaration(container.node)
-            && container.parentPath
-            && t.isProgram(container.parentPath.node)
-          ) {
-            return;
-          }
-          deleteBindings(path.node.id);
-        },
-        Function(path) {
-          for (const param of path.node.params) deleteBindings(param);
-        },
-        CatchClause(path) {
-          if (path.node.param) deleteBindings(path.node.param);
-        },
-      });
+      for (const name of nestedScopeBindings(ast as unknown as T.File)) {
+        constants.delete(name);
+      }
     }
 
     return constants;
@@ -574,4 +560,101 @@ export class ComponentAnalyzer {
 
     return obj;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Module scope helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Every name bound in a scope BELOW this module's top level: variable
+ * declarations, function parameters and catch parameters.
+ *
+ * These are the names a module-scope constant of the same spelling must NOT be
+ * substituted for, because the code that reads the name is reading the inner
+ * binding. The walk carries no scope chain for plain identifiers, so both
+ * consumers are deliberately over-conservative in the same way: a name bound
+ * anywhere nested, even in an unrelated function, disqualifies the module
+ * constant and the use site degrades with a diagnostic instead of silently
+ * baking the wrong value in.
+ *
+ * ONE definition, used by the string-constant fold and by the imported-table
+ * unroll, so "is this name shadowed?" cannot be answered two ways.
+ * Verified by: packages/compiler/tests/ssr-emission.test.ts > "still degrades when a nested declaration shadows the imported table"
+ */
+export function nestedScopeBindings(ast: T.File): Set<string> {
+  const names = new Set<string>();
+
+  const addBindings = (idNode: T.Node) => {
+    for (const name of Object.keys(t.getBindingIdentifiers(idNode))) {
+      names.add(name);
+    }
+  };
+
+  traverse(ast as any, {
+    VariableDeclarator(path) {
+      // Skip module top-level declarations — those ARE the module scope.
+      const declaration = path.parentPath;
+      const container = declaration.parentPath;
+      if (!container) return;
+      if (t.isProgram(container.node)) return;
+      if (
+        t.isExportNamedDeclaration(container.node)
+        && container.parentPath
+        && t.isProgram(container.parentPath.node)
+      ) {
+        return;
+      }
+      addBindings(path.node.id);
+    },
+    Function(path) {
+      for (const param of path.node.params) addBindings(param);
+    },
+    CatchClause(path) {
+      if (path.node.param) addBindings(path.node.param);
+    },
+  });
+
+  return names;
+}
+
+/** Array methods that change the receiver in place. */
+const ARRAY_MUTATORS = new Set([
+  'push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'fill', 'copyWithin',
+]);
+
+/**
+ * Names this module mutates as an array: `NAME.push(…)` and friends, or an
+ * assignment through `NAME[i]` / `NAME.length`.
+ *
+ * `const` freezes the binding, never the contents, so a mutated table is not
+ * a static table — see the call site in `extractFileConstants`.
+ * Verified by: packages/compiler/tests/component-analyzer.test.ts > "drops a const table the file mutates in place"
+ */
+function mutatedArrayNames(ast: T.File): Set<string> {
+  const names = new Set<string>();
+
+  /** The base identifier of `NAME.x` / `NAME[i]`, else null. */
+  const receiver = (node: T.Node): string | null =>
+    t.isMemberExpression(node) && t.isIdentifier(node.object) ? node.object.name : null;
+
+  traverse(ast as any, {
+    CallExpression(path) {
+      const callee = path.node.callee;
+      if (!t.isMemberExpression(callee) || callee.computed) return;
+      if (!t.isIdentifier(callee.property) || !ARRAY_MUTATORS.has(callee.property.name)) return;
+      const base = receiver(callee);
+      if (base) names.add(base);
+    },
+    AssignmentExpression(path) {
+      const base = receiver(path.node.left);
+      if (base) names.add(base);
+    },
+    UpdateExpression(path) {
+      const base = receiver(path.node.argument);
+      if (base) names.add(base);
+    },
+  });
+
+  return names;
 }

@@ -26,7 +26,7 @@ import {
   newSignalRegistry,
   type SignalScope,
 } from './signal-scope';
-import { walkHTree, walkCallExpression, type WalkContext } from './ir-walk';
+import { moduleConstantScope, walkHTree, walkCallExpression, type WalkContext } from './ir-walk';
 
 export interface SsrPluginOptions {
   /** Page name (e.g., 'platform-login') -- used for the output .ir filename */
@@ -183,9 +183,10 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         { path: entryPointPath, source: entrySource },
       ]);
 
-      // Extract file constants from the entry point itself
-      const fileConstants = analyzer.extractFileConstants(entrySource, entryPointPath);
-      const stringConstants = analyzer.extractStringConstants(entrySource, entryPointPath);
+      // The entry point's own module scope: its constants, and the resolver
+      // for tables it imports (Rule 9's unroll).
+      const { fileConstants, stringConstants, resolveImportedConstant } =
+        moduleConstantScope(entrySource, entryPointPath, fsModuleLoader);
 
       // An inline mount has no exported component to look inside: the page's
       // scope chain is the entry file's module scope, then the mount
@@ -221,6 +222,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         sourceFile: entryPointPath,
         fileConstants,
         stringConstants,
+        resolveImportedConstant,
         signalScope,
         signalRegistry,
         resolveComponent,
@@ -297,10 +299,11 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
     const rootPath = componentInfo.filePath;
     const rootSource = componentInfo.source;
 
-    // 6. Extract file constants (for Rule 9 static unroll) and string
-    // constants (for static attribute resolution)
-    const fileConstants = analyzer.extractFileConstants(rootSource, rootPath);
-    const stringConstants = analyzer.extractStringConstants(rootSource, rootPath);
+    // 6. The root page module's constant scope: the tables it declares (for
+    // Rule 9's static unroll), the strings it declares (for static attribute
+    // resolution), and the resolver for tables it IMPORTS.
+    const { fileConstants, stringConstants, resolveImportedConstant } =
+      moduleConstantScope(rootSource, rootPath, fsModuleLoader);
 
     // 7. Create IrEmitContext and open the root page's scope chain: the page
     // FILE's module scope, then the page COMPONENT's own body. Island and
@@ -331,6 +334,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       sourceFile: rootPath,
       fileConstants,
       stringConstants,
+      resolveImportedConstant,
       signalScope,
       signalRegistry,
       resolveComponent,

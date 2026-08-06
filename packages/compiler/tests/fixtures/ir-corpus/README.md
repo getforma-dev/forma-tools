@@ -52,6 +52,7 @@ the same byte. Only the Rust side turns the wrong byte into missing rows.
 | `barrel-exports` | every component reached through an `index.ts` barrel: `export { X } from`, `export * from`, and `export { XImpl as X }` |
 | `sub-component-scopes` | signals declared in the four scopes the old hand-written extractors did not look in, plus the same-name **collision** rule and a truthy `SHOW_IF` default |
 | `eager-concat` | expressions evaluated EAGERLY — `'Player ' + name()` with no `() => …` wrapper — in **child** and **attribute** position, including a multi-operand concat mixing a string and a **number** |
+| `imported-const-table` | Rule 9's spread unroll over tables declared in **another module** — inside a registered island, through an inert page↔island import cycle, and through a barrel that **aliases** the export |
 
 ### Why `eager-concat` exists
 
@@ -100,6 +101,34 @@ wrong branch silently: both branches produce a `<p>`, the tags match,
 `adoptNode` takes the server's element, and neither mismatch-repair arm fires
 because both arms test "one side has content and the other does not". The page
 stays wrong until the signal changes value.
+
+### Why `imported-const-table` exists
+
+`...CONST.map(item => h(…))` is the compiler's escape hatch for a large static
+vocabulary: it expands at BUILD time into plain markup, which is what makes a
+122-option `<select>` affordable on a page that has twenty-five of them and
+must still work with JavaScript off.
+
+Every other case that uses it declares the table in the module being walked.
+That was the only place the unroll could see one: `fileConstants` is
+re-extracted per resolved file — correct, and precisely why an IMPORTED table
+was invisible — so a spread over one degraded to an empty island shell. Nothing
+server-side, nothing at all without JavaScript, and the build's only comment
+was "use `createList` for runtime data" about a table that is as static as data
+gets. ksx's map route hit it 34 times on one page, every one of them from a
+`KEYS_*`/`FUNCTIONS` table its own page module declares.
+
+The case reproduces that shape: `page.ts` declares the tables as bare `const` +
+`export { … }` (the compile-time-twin form, neither `export const` nor a
+re-export), the registered island `picker.ts` imports them back — an inert
+cycle — and a third table arrives through a barrel that renames it
+(`export { MOD_KEYS as MODIFIERS } from './modifiers'`). Rows are read in child
+AND attribute position, and one row's value needs HTML escaping.
+
+It is in `RESOLUTION_CASES` on the Rust side for the same reason `jsx-page` is:
+the golden alone would not catch a relapse, because an island shell is a
+perfectly valid module and `UPDATE_GOLDEN` would bless it. That assertion fails
+on the minted `island_<n>` first.
 
 ### Why `jsx-page` and `barrel-exports` exist
 
