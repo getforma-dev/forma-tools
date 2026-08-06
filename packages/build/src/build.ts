@@ -71,11 +71,9 @@ function resolveTailwindCli(): string | null {
  * Run @tailwindcss/cli on an input file. Prefers the locally installed CLI
  * script executed with the current Node binary — no shell on any platform,
  * so paths with spaces survive and nothing is exposed to shell injection.
- * Falls back to npx for projects that rely on it fetching the CLI on demand;
- * npx is a .cmd shim on Windows that can only be spawned through a shell
- * (execFileSync throws ENOENT/EINVAL otherwise), and the shell does not
- * escape arguments, so each one is quoted there ('"' cannot appear in
- * Windows paths, which makes the quoting safe).
+ * Falls back to npx for projects that rely on it fetching the CLI on demand —
+ * through spawnTool, because npx is a .cmd shim on Windows (see its doc
+ * comment for why that needs a shell).
  */
 function runTailwind(input: string, outPath: string): void {
   const args = ['-i', input, '-o', outPath, '--minify'];
@@ -86,12 +84,7 @@ function runTailwind(input: string, outPath: string): void {
     return;
   }
 
-  const windows = process.platform === 'win32';
-  const npxArgs = ['@tailwindcss/cli', ...args];
-  execFileSync('npx', windows ? npxArgs.map((a) => `"${a}"`) : npxArgs, {
-    stdio: 'inherit',
-    shell: windows,
-  });
+  spawnTool('npx', ['@tailwindcss/cli', ...args], { stdio: 'inherit' });
 }
 
 function generateCss(
@@ -130,96 +123,73 @@ function copyFonts(config: BuildConfig): void {
 }
 
 // ---------------------------------------------------------------------------
-// Island Registry Generation
-// ---------------------------------------------------------------------------
-
-function generateIslandRegistries(
-  config: BuildConfig,
-): string[] {
-  const generatedRegistries: string[] = [];
-
-  for (const entry of config.entryPoints) {
-    const pageName = basename(entry.outfile, '.js');
-    const islandMetaPath = join(config.outputDir, `${pageName}.islands.json`);
-
-    if (!existsSync(islandMetaPath)) continue;
-
-    const islands = JSON.parse(readFileSync(islandMetaPath, 'utf8')) as Array<{
-      id: number;
-      name: string;
-    }>;
-    if (islands.length === 0) continue;
-
-    const registrySource = [
-      `// Auto-generated island registry for ${pageName}`,
-      `// Islands discovered: ${islands.map((i) => i.name).join(', ')}`,
-      `import { activateIslands } from '@getforma/core';`,
-      `import PageComponent from '../${entry.entry}';`,
-      ``,
-      `// Map all micro-islands to the page's root component`,
-      `const registry = {`,
-      ...islands.map((i) => `  '${i.name}': PageComponent,`),
-      `};`,
-      ``,
-      `activateIslands(registry);`,
-      ``,
-    ].join('\n');
-
-    const registryPath = join(config.outputDir, `${pageName}.islands.js`);
-    writeFileSync(registryPath, registrySource);
-    generatedRegistries.push(pageName);
-
-    console.log(
-      `   Island registry: ${pageName}.islands.js (${islands.length} islands)`,
-    );
-  }
-
-  if (generatedRegistries.length > 0) {
-    console.log(
-      `   Generated ${generatedRegistries.length} island registry entry points`,
-    );
-  }
-
-  return generatedRegistries;
-}
-
-// ---------------------------------------------------------------------------
 // WASM Build
 // ---------------------------------------------------------------------------
+
+/**
+ * Spawn a developer tool that may be installed either as a native executable
+ * or as an npm `.cmd`/`.ps1` shim.
+ *
+ * `execFileSync` calls CreateProcess, which can only run a real PE image — a
+ * `.cmd` shim (which is what `npm i -g` writes on Windows for wasm-pack, npx,
+ * tsc and friends) fails with ENOENT/EINVAL. Windows therefore goes through a
+ * shell, where arguments are NOT escaped for us, so each one is quoted; `"`
+ * cannot appear in a Windows path, which makes that quoting sufficient. POSIX
+ * keeps the no-shell path, where a path with spaces is safe as-is.
+ * Verified by: packages/build/tests/build.test.ts > "runs a .cmd-shimmed wasm-pack (the Windows npm install shape)"
+ */
+function spawnTool(
+  command: string,
+  args: string[],
+  options: { stdio: 'inherit' | 'pipe' },
+): void {
+  const windows = process.platform === 'win32';
+  execFileSync(
+    windows ? `"${command}"` : command,
+    windows ? args.map((a) => `"${a}"`) : args,
+    { ...options, shell: windows },
+  );
+}
 
 function buildWasm(
   config: BuildConfig,
 ): boolean {
   if (!config.wasm) return false;
 
+  // Probe separately from the build so a COMPILE failure is never reported as
+  // "wasm-pack not found" — that message sent people looking for a missing
+  // tool while the real error was in their crate.
   try {
-    execFileSync('wasm-pack', ['--version'], { stdio: 'pipe' });
-
-    console.log('   Building WASM walker...');
-    execFileSync(
-      'wasm-pack',
-      ['build', '--target', 'web', '--release', config.wasm.crateDir, '--', '--features', 'wasm'],
-      { stdio: 'inherit' },
-    );
-
-    // Copy wasm outputs to outputDir
-    const wasmPkgDir = join(config.wasm.crateDir, 'pkg');
-    const wasmFile = 'forma_ir_bg.wasm';
-    const wasmLoader = 'forma_ir.js';
-
-    if (existsSync(join(wasmPkgDir, wasmFile))) {
-      cpSync(join(wasmPkgDir, wasmFile), join(config.outputDir, wasmFile));
-      cpSync(join(wasmPkgDir, wasmLoader), join(config.outputDir, wasmLoader));
-      console.log(`   WASM built: ${wasmFile}`);
-      return true;
-    }
+    spawnTool('wasm-pack', ['--version'], { stdio: 'pipe' });
   } catch {
     console.warn(
       'Warning: wasm-pack not found — skipping WASM build. SSR pipeline works without it.',
     );
+    return false;
   }
 
-  return false;
+  console.log('   Building WASM walker...');
+  spawnTool(
+    'wasm-pack',
+    ['build', '--target', 'web', '--release', config.wasm.crateDir, '--', '--features', 'wasm'],
+    { stdio: 'inherit' },
+  );
+
+  // Copy wasm outputs to outputDir
+  const wasmPkgDir = join(config.wasm.crateDir, 'pkg');
+  const wasmFile = 'forma_ir_bg.wasm';
+  const wasmLoader = 'forma_ir.js';
+
+  if (!existsSync(join(wasmPkgDir, wasmFile))) {
+    throw new Error(
+      `wasm-pack reported success but ${join(wasmPkgDir, wasmFile)} does not exist — check that the crate at ${config.wasm.crateDir} builds the forma-ir cdylib`,
+    );
+  }
+
+  cpSync(join(wasmPkgDir, wasmFile), join(config.outputDir, wasmFile));
+  cpSync(join(wasmPkgDir, wasmLoader), join(config.outputDir, wasmLoader));
+  console.log(`   WASM built: ${wasmFile}`);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +268,70 @@ function compressAssets(distDir: string): number {
 
   console.log(`   ${compressCount} files compressed (brotli 11 + gzip 9)`);
   return compressCount;
+}
+
+// ---------------------------------------------------------------------------
+// Config Validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Reject configurations whose output cannot be correct, BEFORE anything is
+ * written. Both checks close a silent failure mode:
+ *
+ *  - An `outfile` containing a path separator lands esbuild's output in a
+ *    subdirectory, which the (non-recursive) hashing pass never sees. The asset
+ *    was silently absent from the manifest and its route fell back to an
+ *    unhashed name that 404s in production.
+ *  - A route naming a JS/CSS base that no entry produces is a typo that
+ *    manifests as a missing script tag on a deployed page, not at build time.
+ *
+ * Verified by: packages/build/tests/build.test.ts > "rejects a route that names an asset no entry produces"
+ */
+function validateConfig(config: BuildConfig): void {
+  const problems: string[] = [];
+
+  for (const entry of config.entryPoints) {
+    if (/[\\/]/.test(entry.outfile)) {
+      problems.push(
+        `entryPoints: outfile '${entry.outfile}' contains a path separator — outfile is a bare filename inside outputDir`,
+      );
+    }
+    if (!entry.outfile.endsWith('.js')) {
+      problems.push(
+        `entryPoints: outfile '${entry.outfile}' must end in .js (routes and the SSR page name are derived from it)`,
+      );
+    }
+  }
+
+  const jsBases = new Set(
+    config.entryPoints.map((e) => basename(e.outfile, '.js')),
+  );
+  const cssBases = new Set(
+    (config.cssEntries ?? []).map((e) => basename(e.outfile, '.css')),
+  );
+
+  for (const [route, mapping] of Object.entries(config.routes)) {
+    for (const name of mapping.js) {
+      if (!jsBases.has(name)) {
+        problems.push(
+          `routes['${route}'].js names '${name}', but no entryPoint produces '${name}.js'`,
+        );
+      }
+    }
+    for (const name of mapping.css) {
+      if (!cssBases.has(name)) {
+        problems.push(
+          `routes['${route}'].css names '${name}', but no cssEntry produces '${name}.css'`,
+        );
+      }
+    }
+  }
+
+  if (problems.length > 0) {
+    throw new Error(
+      `@getforma/build: invalid config\n  - ${problems.join('\n  - ')}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +526,10 @@ self.addEventListener('fetch', (event) => {
  * generation, and budget warnings.
  */
 export async function build(config: BuildConfig): Promise<BuildResult> {
+  // Validate before the clean: a config error must not destroy the previous
+  // build's output on its way to failing.
+  validateConfig(config);
+
   const distDir = config.outputDir;
   const createdDir = !existsSync(distDir);
 
@@ -602,11 +640,6 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
         return esbuild.build(buildOptions);
       }),
     );
-
-    // ── Island registry generation ────────────────────────────────────
-    if (config.ssr) {
-      generateIslandRegistries(config);
-    }
 
     // ── WASM build ────────────────────────────────────────────────────
     const wasmBuilt = buildWasm(config);

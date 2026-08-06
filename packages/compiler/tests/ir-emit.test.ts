@@ -1,463 +1,296 @@
-import { describe, it, expect } from 'vitest';
-import { emitIr, IrEmitContext } from '../src/ir-emit';
-import { parse } from '@babel/parser';
-import type * as T from '@babel/types';
-import _traverse from '@babel/traverse';
-
-const traverse = typeof _traverse === 'function' ? _traverse : (_traverse as any).default;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /**
- * Parse a JS expression string into a Babel AST Expression node.
- * Wraps the expression in `const x = <expr>` and extracts the init.
+ * IrEmitContext tests — the FMIR binary buffer itself.
+ *
+ * AST → opcode translation is covered by ir-walk.test.ts against the live
+ * walker. This file covers only what IrEmitContext owns: string interning,
+ * slot and island registration, the slot-id capture stack, and the binary
+ * layout it serializes.
  */
-function parseExpr(code: string): T.Expression {
-  const ast = parse(`const x = ${code}`, {
-    sourceType: 'module',
-    plugins: ['typescript'],
-  });
-  let expr: T.Expression | undefined;
-  traverse(ast, {
-    VariableDeclarator(path: any) {
-      expr = path.node.init;
-      path.stop();
-    },
-  });
-  if (!expr) throw new Error(`Failed to parse expression: ${code}`);
-  return expr;
+import { describe, it, expect } from 'vitest';
+import { IrEmitContext } from '../src/ir-emit';
+import {
+  assertBinaryInvariants,
+  getIslands,
+  getSlots,
+  getStrings,
+  parseOpcodeList,
+  readSections,
+  readU16LE,
+} from './helpers/fmir';
+
+/** Emit a minimal well-formed `<div></div>` so toBinary() has a bytecode section. */
+function emitDiv(ctx: IrEmitContext): void {
+  const divIdx = ctx.addString('div');
+  ctx.emit(0x01); // OPEN_TAG
+  ctx.emitU32(divIdx);
+  ctx.emitU16(0);
+  ctx.emit(0x02); // CLOSE_TAG
+  ctx.emitU32(divIdx);
 }
 
-function readU16LE(data: Uint8Array, offset: number): number {
-  return data[offset]! | (data[offset + 1]! << 8);
-}
+describe('IrEmitContext string interning', () => {
+  it('returns the same index for a repeated string and stores it once', () => {
+    const ctx = new IrEmitContext();
 
-function readU32LE(data: Uint8Array, offset: number): number {
-  return (
-    data[offset]!
-    | (data[offset + 1]! << 8)
-    | (data[offset + 2]! << 16)
-    | (data[offset + 3]! << 24)
-  ) >>> 0;
-}
+    expect(ctx.addString('div')).toBe(0);
+    expect(ctx.addString('class')).toBe(1);
+    expect(ctx.addString('div')).toBe(0);
+    expect(ctx.addString('class')).toBe(1);
+    expect(ctx.addString('')).toBe(2);
 
-function readStringTable(data: Uint8Array, offset: number, _size: number): string[] {
-  const count = readU32LE(data, offset);
-  const strings: string[] = [];
-  let pos = offset + 4;
-  for (let i = 0; i < count; i++) {
-    const len = readU16LE(data, pos);
-    pos += 2;
-    const bytes = data.slice(pos, pos + len);
-    strings.push(new TextDecoder().decode(bytes));
-    pos += len;
-  }
-  return strings;
-}
+    ctx.emit(0x04); // TEXT
+    ctx.emitU32(0);
 
-/** Read the section table from the binary. Returns offsets and sizes. */
-function readSections(data: Uint8Array) {
-  // Section table order: 0=Bytecode(@16), 1=Strings(@24), 2=Slots(@32), 3=Islands(@40)
-  return {
-    opcodeOffset: readU32LE(data, 16),
-    opcodeSize: readU32LE(data, 20),
-    stringTableOffset: readU32LE(data, 24),
-    stringTableSize: readU32LE(data, 28),
-    slotTableOffset: readU32LE(data, 32),
-    slotTableSize: readU32LE(data, 36),
-    islandTableOffset: readU32LE(data, 40),
-    islandTableSize: readU32LE(data, 44),
-  };
-}
-
-/** Extract the opcode stream from the binary. */
-function getOpcodes(data: Uint8Array): Uint8Array {
-  const sections = readSections(data);
-  return data.slice(sections.opcodeOffset, sections.opcodeOffset + sections.opcodeSize);
-}
-
-/** Extract the string table from the binary. */
-function getStrings(data: Uint8Array): string[] {
-  const sections = readSections(data);
-  return readStringTable(data, sections.stringTableOffset, sections.stringTableSize);
-}
-
-// Opcode constants
-const OP_OPEN_TAG  = 0x01;
-const OP_CLOSE_TAG = 0x02;
-const OP_VOID_TAG  = 0x03;
-const OP_TEXT      = 0x04;
-const OP_DYN_TEXT  = 0x05;
-const OP_DYN_ATTR  = 0x06;
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe('emitIr', () => {
-  it('emits valid FMIR header', () => {
-    const node = parseExpr(`h('div', null, 'Hello')`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    // Magic bytes: "FMIR"
-    expect(ir[0]).toBe(0x46); // 'F'
-    expect(ir[1]).toBe(0x4d); // 'M'
-    expect(ir[2]).toBe(0x49); // 'I'
-    expect(ir[3]).toBe(0x52); // 'R'
-
-    // Version: 2 (u16 LE)
-    expect(ir[4]).toBe(0x02);
-    expect(ir[5]).toBe(0x00);
+    expect(getStrings(ctx.toBinary())).toEqual(['div', 'class', '']);
   });
 
-  it('emits static div with text', () => {
-    const node = parseExpr(`h('div', null, 'Hello')`);
-    const ir = emitIr(node as T.CallExpression, 'h');
+  it('round-trips non-ASCII strings through the UTF-8 table', () => {
+    const ctx = new IrEmitContext();
+    ctx.addString('café ☕');
+    ctx.emit(0x04);
+    ctx.emitU32(0);
 
-    const strings = getStrings(ir);
-    expect(strings).toContain('div');
-    expect(strings).toContain('Hello');
+    const binary = ctx.toBinary();
+    expect(getStrings(binary)).toEqual(['café ☕']);
+    // The u16 length prefix counts BYTES, not code points.
+    const strOffset = readSections(binary).stringTableOffset;
+    expect(readU16LE(binary, strOffset + 4)).toBe(new TextEncoder().encode('café ☕').length);
+  });
+});
 
-    // Opcode stream should contain OPEN_TAG, TEXT, CLOSE_TAG
-    const opcodes = getOpcodes(ir);
+describe('IrEmitContext binary layout', () => {
+  it('emits the v2 header', () => {
+    const ctx = new IrEmitContext();
+    emitDiv(ctx);
+    const binary = ctx.toBinary();
 
-    // Find opcodes by scanning: OPEN_TAG(0x01), TEXT(0x04), CLOSE_TAG(0x02)
-    const opcodeList: number[] = [];
-    let pos = 0;
-    while (pos < opcodes.length) {
-      const op = opcodes[pos]!;
-      opcodeList.push(op);
-      if (op === OP_OPEN_TAG || op === OP_VOID_TAG) {
-        // opcode(1) + str_idx(4) + attr_count(2)
-        pos += 1 + 4;
-        const attrCount = readU16LE(opcodes, pos);
-        pos += 2;
-        // Skip attrs: (key(4) + val(4)) * count
-        pos += attrCount * 8;
-      } else if (op === OP_CLOSE_TAG) {
-        // opcode(1) + str_idx(4)
-        pos += 1 + 4;
-      } else if (op === OP_TEXT) {
-        // opcode(1) + str_idx(4)
-        pos += 1 + 4;
-      } else if (op === OP_DYN_TEXT) {
-        // opcode(1) + slot_id(2) + marker_id(2)
-        pos += 1 + 2 + 2;
-      } else if (op === OP_DYN_ATTR) {
-        // opcode(1) + attr_str_idx(4) + slot_id(2)
-        pos += 1 + 4 + 2;
-      } else {
-        pos += 1;
-      }
-    }
-
-    expect(opcodeList).toEqual([OP_OPEN_TAG, OP_TEXT, OP_CLOSE_TAG]);
+    expect(Array.from(binary.slice(0, 4))).toEqual([0x46, 0x4d, 0x49, 0x52]); // 'FMIR'
+    expect(readU16LE(binary, 4)).toBe(2); // version
+    expect(readU16LE(binary, 6)).toBe(0); // flags
   });
 
-  it('emits void tag', () => {
-    const node = parseExpr(`h('input', { type: 'email' })`);
-    const ir = emitIr(node as T.CallExpression, 'h');
+  it('writes little-endian integers and back-patches in place', () => {
+    const ctx = new IrEmitContext();
+    ctx.emitU16(0x1234);
+    const patchPos = ctx.opcodeLen();
+    ctx.emitU32(0);
+    ctx.emitU32(0xdeadbeef);
+    expect(ctx.opcodeLen()).toBe(2 + 4 + 4);
 
-    const opcodes = getOpcodes(ir);
+    ctx.patchU32(patchPos, 0x01020304);
 
-    // First opcode should be VOID_TAG (0x03), NOT OPEN_TAG
-    expect(opcodes[0]).toBe(OP_VOID_TAG);
-
-    // Should NOT contain CLOSE_TAG
-    const opcodeList: number[] = [];
-    let pos = 0;
-    while (pos < opcodes.length) {
-      const op = opcodes[pos]!;
-      opcodeList.push(op);
-      if (op === OP_VOID_TAG || op === OP_OPEN_TAG) {
-        pos += 1 + 4;
-        const attrCount = readU16LE(opcodes, pos);
-        pos += 2;
-        pos += attrCount * 8;
-      } else if (op === OP_CLOSE_TAG) {
-        pos += 1 + 4;
-      } else if (op === OP_TEXT) {
-        pos += 1 + 4;
-      } else if (op === OP_DYN_TEXT) {
-        pos += 1 + 2 + 2;
-      } else if (op === OP_DYN_ATTR) {
-        pos += 1 + 4 + 2;
-      } else {
-        pos += 1;
-      }
-    }
-
-    expect(opcodeList).not.toContain(OP_CLOSE_TAG);
-  });
-
-  it('emits attributes', () => {
-    const node = parseExpr(`h('div', { class: 'card', id: 'main' })`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    const strings = getStrings(ir);
-    expect(strings).toContain('class');
-    expect(strings).toContain('card');
-    expect(strings).toContain('id');
-    expect(strings).toContain('main');
-  });
-
-  it('emits nested elements', () => {
-    const node = parseExpr(`h('div', null, h('span', null, 'Hi'))`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    const strings = getStrings(ir);
-    expect(strings).toContain('div');
-    expect(strings).toContain('span');
-    expect(strings).toContain('Hi');
-
-    const opcodes = getOpcodes(ir);
-    const opcodeList: number[] = [];
-    let pos = 0;
-    while (pos < opcodes.length) {
-      const op = opcodes[pos]!;
-      opcodeList.push(op);
-      if (op === OP_OPEN_TAG || op === OP_VOID_TAG) {
-        pos += 1 + 4;
-        const attrCount = readU16LE(opcodes, pos);
-        pos += 2;
-        pos += attrCount * 8;
-      } else if (op === OP_CLOSE_TAG) {
-        pos += 1 + 4;
-      } else if (op === OP_TEXT) {
-        pos += 1 + 4;
-      } else if (op === OP_DYN_TEXT) {
-        pos += 1 + 2 + 2;
-      } else if (op === OP_DYN_ATTR) {
-        pos += 1 + 4 + 2;
-      } else {
-        pos += 1;
-      }
-    }
-
-    // OPEN_TAG "div", OPEN_TAG "span", TEXT "Hi", CLOSE_TAG "span", CLOSE_TAG "div"
-    expect(opcodeList).toEqual([
-      OP_OPEN_TAG,   // div
-      OP_OPEN_TAG,   // span
-      OP_TEXT,       // "Hi"
-      OP_CLOSE_TAG,  // span
-      OP_CLOSE_TAG,  // div
+    const binary = ctx.toBinary();
+    const { opcodeOffset } = readSections(binary);
+    expect(Array.from(binary.slice(opcodeOffset, opcodeOffset + 10))).toEqual([
+      0x34, 0x12,
+      0x04, 0x03, 0x02, 0x01,
+      0xef, 0xbe, 0xad, 0xde,
     ]);
   });
 
-  it('emits DYN_TEXT for function child', () => {
-    const node = parseExpr(`h('div', null, () => name())`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    const opcodes = getOpcodes(ir);
-    const opcodeList: number[] = [];
-    let dynTextSlotId: number | undefined;
-    let pos = 0;
-    while (pos < opcodes.length) {
-      const op = opcodes[pos]!;
-      opcodeList.push(op);
-      if (op === OP_OPEN_TAG || op === OP_VOID_TAG) {
-        pos += 1 + 4;
-        const attrCount = readU16LE(opcodes, pos);
-        pos += 2;
-        pos += attrCount * 8;
-      } else if (op === OP_CLOSE_TAG) {
-        pos += 1 + 4;
-      } else if (op === OP_TEXT) {
-        pos += 1 + 4;
-      } else if (op === OP_DYN_TEXT) {
-        dynTextSlotId = readU16LE(opcodes, pos + 1);
-        pos += 1 + 2 + 2;
-      } else if (op === OP_DYN_ATTR) {
-        pos += 1 + 4 + 2;
-      } else {
-        pos += 1;
-      }
-    }
-
-    expect(opcodeList).toContain(OP_DYN_TEXT);
-    expect(dynTextSlotId).toBeDefined();
-    expect(typeof dynTextSlotId).toBe('number');
-  });
-
-  it('deduplicates strings', () => {
-    const node = parseExpr(`h('div', { class: 'x' }, h('div', { class: 'y' }))`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    const strings = getStrings(ir);
-
-    // "div" should appear only once in the string table
-    const divOccurrences = strings.filter(s => s === 'div');
-    expect(divOccurrences).toHaveLength(1);
-
-    // "class" should appear only once too
-    const classOccurrences = strings.filter(s => s === 'class');
-    expect(classOccurrences).toHaveLength(1);
-
-    // "x" and "y" should each appear once
-    expect(strings).toContain('x');
-    expect(strings).toContain('y');
-  });
-
-  it('emits DYN_ATTR for dynamic prop', () => {
-    const node = parseExpr(`h('div', { class: () => cls() })`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    const opcodes = getOpcodes(ir);
-    const opcodeList: number[] = [];
-    let pos = 0;
-    while (pos < opcodes.length) {
-      const op = opcodes[pos]!;
-      opcodeList.push(op);
-      if (op === OP_OPEN_TAG || op === OP_VOID_TAG) {
-        pos += 1 + 4;
-        const attrCount = readU16LE(opcodes, pos);
-        pos += 2;
-        pos += attrCount * 8;
-      } else if (op === OP_CLOSE_TAG) {
-        pos += 1 + 4;
-      } else if (op === OP_TEXT) {
-        pos += 1 + 4;
-      } else if (op === OP_DYN_TEXT) {
-        pos += 1 + 2 + 2;
-      } else if (op === OP_DYN_ATTR) {
-        pos += 1 + 4 + 2;
-      } else {
-        pos += 1;
-      }
-    }
-
-    expect(opcodeList).toContain(OP_DYN_ATTR);
-  });
-
-  it('handles boolean attributes', () => {
-    const node = parseExpr(`h('input', { disabled: true })`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    const strings = getStrings(ir);
-
-    // "disabled" should be in the string table
-    expect(strings).toContain('disabled');
-
-    // Empty string value should be in the string table (boolean true -> '')
-    expect(strings).toContain('');
-  });
-
-  it('handles null props', () => {
-    const node = parseExpr(`h('div', null, 'text')`);
-    const ir = emitIr(node as T.CallExpression, 'h');
-
-    const opcodes = getOpcodes(ir);
-    const opcodeList: number[] = [];
-    let pos = 0;
-    while (pos < opcodes.length) {
-      const op = opcodes[pos]!;
-      opcodeList.push(op);
-      if (op === OP_OPEN_TAG || op === OP_VOID_TAG) {
-        pos += 1 + 4;
-        const attrCount = readU16LE(opcodes, pos);
-        pos += 2;
-        pos += attrCount * 8;
-      } else if (op === OP_CLOSE_TAG) {
-        pos += 1 + 4;
-      } else if (op === OP_TEXT) {
-        pos += 1 + 4;
-      } else if (op === OP_DYN_TEXT) {
-        pos += 1 + 2 + 2;
-      } else if (op === OP_DYN_ATTR) {
-        pos += 1 + 4 + 2;
-      } else {
-        pos += 1;
-      }
-    }
-
-    // Should work correctly: OPEN_TAG + TEXT + CLOSE_TAG with no attributes
-    expect(opcodeList).toEqual([OP_OPEN_TAG, OP_TEXT, OP_CLOSE_TAG]);
-
-    // Verify OPEN_TAG has attr_count = 0
-    // OPEN_TAG is at pos 0: opcode(1) + str_idx(4) + attr_count(2)
-    const attrCount = readU16LE(opcodes, 5); // offset 1 + 4 = 5
-    expect(attrCount).toBe(0);
-  });
-
-  it('emits v2 header (version 2)', () => {
+  it('hands out marker and island ids without gaps', () => {
     const ctx = new IrEmitContext();
-    ctx.addString('div');
-    ctx.emit(0x01); // OPEN_TAG
-    ctx.emitU32(0);
-    ctx.emitU16(0);
-    ctx.emit(0x02); // CLOSE_TAG
-    ctx.emitU32(0);
+
+    expect([ctx.nextMarker(), ctx.nextMarker(), ctx.nextMarker()]).toEqual([0, 1, 2]);
+
+    expect(ctx.peekNextIslandId()).toBe(0);
+    expect(ctx.addIsland('First', 0x01, 0x01, [], 0)).toBe(0);
+    // peek must NOT consume — emitIsland relies on it for fallback naming.
+    expect(ctx.peekNextIslandId()).toBe(1);
+    expect(ctx.peekNextIslandId()).toBe(1);
+    expect(ctx.addIsland('Second', 0x01, 0x01, [], 3)).toBe(1);
+  });
+});
+
+describe('IrEmitContext slot table', () => {
+  it('encodes id, name, type hint, source and default bytes', () => {
+    const ctx = new IrEmitContext();
+    expect(ctx.addSlot('submitting', 0x02, 0x01, new TextEncoder().encode('false'))).toBe(0);
+    expect(ctx.addSlot('list:rows:array', 0x04, 0x00)).toBe(1);
+    emitDiv(ctx);
+
+    expect(getSlots(ctx.toBinary())).toMatchObject([
+      { id: 0, name: 'submitting', typeHint: 0x02, source: 0x01, default: 'false' },
+      { id: 1, name: 'list:rows:array', typeHint: 0x04, source: 0x00, default: '' },
+    ]);
+  });
+
+  it('defaults source to client (0x01) and the default bytes to empty', () => {
+    const ctx = new IrEmitContext();
+    ctx.addSlot('myslot', 0x01);
+    emitDiv(ctx);
+
+    expect(getSlots(ctx.toBinary())).toMatchObject([
+      { id: 0, name: 'myslot', typeHint: 0x01, source: 0x01, default: '' },
+    ]);
+  });
+
+  it('interns slot names into the string table when serializing', () => {
+    const ctx = new IrEmitContext();
+    ctx.addSlot('attr:class', 0x01);
+    emitDiv(ctx);
     const binary = ctx.toBinary();
-    const version = binary[4]! | (binary[5]! << 8);
-    expect(version).toBe(2);
+
+    // Slot names are interned during encodeSlotTable, after the walk, so they
+    // land at the END of the table — and exactly once each.
+    expect(getStrings(binary)).toEqual(['div', 'attr:class']);
+    expect(getSlots(binary)[0]!.nameIdx).toBe(1);
+  });
+});
+
+describe('IrEmitContext island slot capture', () => {
+  it('captures slots created inside a capture window, sorted ascending', () => {
+    const ctx = new IrEmitContext();
+    ctx.addSlot('outside-before', 0x01);
+    ctx.beginSlotCapture();
+    const inner = ctx.addSlot('inside', 0x01);
+    ctx.beginSlotCapture();
+    const deepest = ctx.addSlot('deeper', 0x01);
+    const nested = ctx.endSlotCapture();
+    const outer = ctx.endSlotCapture();
+    ctx.addSlot('outside-after', 0x01);
+
+    expect(nested).toEqual([deepest]);
+    // An outer island's span also owns the slots of islands nested inside it.
+    expect(outer).toEqual([inner, deepest]);
   });
 
-  it('emits v2 slot table with source and defaults', () => {
+  it('records a reused pre-existing slot into every open capture', () => {
     const ctx = new IrEmitContext();
-    const encoder = new TextEncoder();
-    const defaultBytes = encoder.encode('false');
-    const slotId = ctx.addSlot('submitting', 0x02, 0x01, defaultBytes);
-    expect(slotId).toBe(0);
+    const preRegistered = ctx.addSlot('count', 0x01);
 
-    // Emit minimal opcodes so toBinary works
-    ctx.addString('div');
-    ctx.emit(0x01);
-    ctx.emitU32(0);
-    ctx.emitU16(0);
-    ctx.emit(0x02);
-    ctx.emitU32(0);
-
-    const binary = ctx.toBinary();
-    // Verify the binary is valid and larger than just header+sections
-    expect(binary.length).toBeGreaterThan(48);
-
-    // Read slot table and verify v2 fields (section 2 at offset 32)
-    const slotTableOffset = readU32LE(binary, 32);
-    const slotCount = readU16LE(binary, slotTableOffset);
-    expect(slotCount).toBe(1);
-
-    // Parse v2 slot entry: slot_id(u16) + name_str_idx(u32) + type_hint(u8) + source(u8) + default_len(u16) + default_bytes
-    let pos = slotTableOffset + 2;
-    const sid = readU16LE(binary, pos); pos += 2;
-    expect(sid).toBe(0);
-    pos += 4; // skip name_str_idx
-    const typeHint = binary[pos]!; pos += 1;
-    expect(typeHint).toBe(0x02);
-    const source = binary[pos]!; pos += 1;
-    expect(source).toBe(0x01);
-    const defaultLen = readU16LE(binary, pos); pos += 2;
-    expect(defaultLen).toBe(5); // "false" is 5 bytes
-    const defaultBytesRead = binary.slice(pos, pos + defaultLen);
-    expect(new TextDecoder().decode(defaultBytesRead)).toBe('false');
+    ctx.beginSlotCapture();
+    ctx.recordSlotRef(preRegistered); // what DYN_TEXT does for a signal slot
+    expect(ctx.endSlotCapture()).toEqual([preRegistered]);
   });
 
-  it('addSlot defaults source to 0x01 and defaultBytes to empty', () => {
-    const ctx = new IrEmitContext();
-    const slotId = ctx.addSlot('myslot', 0x01);
-    expect(slotId).toBe(0);
+  it('returns an empty capture when the stack is empty', () => {
+    expect(new IrEmitContext().endSlotCapture()).toEqual([]);
+  });
 
-    // Emit minimal opcodes
-    ctx.addString('div');
-    ctx.emit(0x01);
-    ctx.emitU32(0);
+  it('drops per-item list scratch slots from an island entry', () => {
+    const ctx = new IrEmitContext();
+    const arraySlot = ctx.addSlot('list:rows:array', 0x04, 0x00);
+    const itemSlot = ctx.addSlot('list:rows:item', 0x05, 0x00);
+    const propSlot = ctx.addSlot('list:rows:name', 0x01, 0x00);
+    const attrSlot = ctx.addSlot('attr:class', 0x01);
+    const id = ctx.addIsland('RowsIsland', 0x01, 0x01, [], 0);
+    emitDiv(ctx);
+
+    ctx.setIslandSlotIds(id, [arraySlot, itemSlot, propSlot, attrSlot]);
+
+    // `list:rows:item` holds the LAST rendered row after SSR — serializing it
+    // into data-forma-props would leak that row into the page.
+    expect(getIslands(ctx.toBinary())[0]!.slotIds).toEqual([arraySlot, propSlot, attrSlot]);
+  });
+
+  it('drops the scratch slot of a name-deduped list too', () => {
+    // The second list over the same source is based `todos#2`, so its scratch
+    // slot is `list:todos#2:item`. The exclusion pattern must still match it —
+    // `#` is not a `:`, but a pattern anchored on the wrong segment would miss.
+    const ctx = new IrEmitContext();
+    const arraySlot = ctx.addSlot('list:todos#2:array', 0x04, 0x00);
+    const itemSlot = ctx.addSlot('list:todos#2:item', 0x05, 0x00);
+    const id = ctx.addIsland('TodosIsland', 0x01, 0x01, [], 0);
+    emitDiv(ctx);
+
+    ctx.setIslandSlotIds(id, [arraySlot, itemSlot]);
+
+    expect(getIslands(ctx.toBinary())[0]!.slotIds).toEqual([arraySlot]);
+  });
+
+  it('ignores setIslandSlotIds for an unregistered island id', () => {
+    const ctx = new IrEmitContext();
+    const id = ctx.addIsland('Only', 0x01, 0x01, [7], 0);
+    emitDiv(ctx);
+
+    ctx.setIslandSlotIds(id + 1, [1, 2, 3]);
+
+    expect(getIslands(ctx.toBinary())).toMatchObject([{ id, name: 'Only', slotIds: [7] }]);
+  });
+});
+
+describe('IrEmitContext island table', () => {
+  it('encodes trigger, props mode, byte offset and slot ids', () => {
+    const ctx = new IrEmitContext();
+    ctx.emit(0x0b); // ISLAND_START
     ctx.emitU16(0);
-    ctx.emit(0x02);
-    ctx.emitU32(0);
+    const divIdx = ctx.addString('div');
+    ctx.emit(0x01); ctx.emitU32(divIdx); ctx.emitU16(0);
+    ctx.emit(0x02); ctx.emitU32(divIdx);
+    ctx.emit(0x0c); // ISLAND_END
+    ctx.emitU16(0);
+    ctx.addIsland('FormIsland', 0x01, 0x01, [4, 9], 0);
 
     const binary = ctx.toBinary();
 
-    // Read slot table (section 2 at offset 32)
-    const slotTableOffset = readU32LE(binary, 32);
-    let pos = slotTableOffset + 2; // skip count
-    pos += 2; // skip slot_id
-    pos += 4; // skip name_str_idx
-    const typeHint = binary[pos]!; pos += 1;
-    expect(typeHint).toBe(0x01);
-    const source = binary[pos]!; pos += 1;
-    expect(source).toBe(0x01); // default source
-    const defaultLen = readU16LE(binary, pos);
-    expect(defaultLen).toBe(0); // empty default bytes
+    expect(getIslands(binary)).toEqual([{
+      id: 0,
+      name: 'FormIsland',
+      nameIdx: 1,
+      trigger: 0x01,
+      propsMode: 0x01,
+      byteOffset: 0,
+      slotIds: [4, 9],
+    }]);
+    expect(parseOpcodeList(binary)).toEqual([
+      'ISLAND_START FormIsland#0',
+      'OPEN_TAG div',
+      'CLOSE_TAG div',
+      'ISLAND_END FormIsland#0',
+    ]);
+  });
+
+  it('exposes the same island metadata through getIslands() as the binary table', () => {
+    const ctx = new IrEmitContext();
+    ctx.addIsland('Alpha', 0x01, 0x01, [0], 0);
+    ctx.addIsland('Beta', 0x02, 0x01, [], 7);
+    emitDiv(ctx);
+
+    const binary = ctx.toBinary();
+    expect(ctx.getIslands()).toEqual(
+      getIslands(binary).map(({ id, name, trigger, propsMode, slotIds }) =>
+        ({ id, name, trigger, propsMode, slotIds })),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// u16 length guards — string table and slot defaults
+// ---------------------------------------------------------------------------
+// Both tables prefix variable-length payloads with a u16. Without a guard,
+// setUint16 silently wraps for payloads over 65535 bytes and desynchronizes
+// the whole table for the Rust parser — corrupt output must be impossible.
+
+describe('u16 length guards', () => {
+  it('toBinary throws a descriptive error for a string over 65535 UTF-8 bytes', () => {
+    const ctx = new IrEmitContext();
+    ctx.addString('x'.repeat(0x10000));
+    expect(() => ctx.toBinary()).toThrow(/65535-byte u16 length limit/);
+  });
+
+  it('counts UTF-8 bytes, not code units, against the string limit', () => {
+    const ctx = new IrEmitContext();
+    // 33000 three-byte characters = 99000 bytes from a 33000-unit string.
+    ctx.addString('☕'.repeat(33000));
+    expect(() => ctx.toBinary()).toThrow(/65535-byte u16 length limit/);
+  });
+
+  it('toBinary throws a descriptive error for a slot default over 65535 bytes', () => {
+    const ctx = new IrEmitContext();
+    ctx.addSlot('attr:d', 0x01, 0x01, new Uint8Array(0x10000));
+    expect(() => ctx.toBinary()).toThrow(/slot 'attr:d'/);
+  });
+
+  it('accepts a string of exactly 65535 bytes', () => {
+    const ctx = new IrEmitContext();
+    const longest = 'x'.repeat(0xffff);
+    ctx.addString(longest);
+    ctx.emit(0x04); // TEXT
+    ctx.emitU32(0);
+
+    const binary = ctx.toBinary();
+    expect(getStrings(binary)).toEqual([longest]);
+    assertBinaryInvariants(binary);
   });
 });

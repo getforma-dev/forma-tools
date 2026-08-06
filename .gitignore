@@ -2,3 +2,7 @@ node_modules/
 dist/
 test-results/
 playwright-report/
+# `npm run emit:corpus` output. The committed copies of these .ir files live in
+# the forma repo (crates/forma-ir/tests/fixtures/js-emitter/), next to the
+# goldens they are checked against.
+packages/compiler/ir-corpus/

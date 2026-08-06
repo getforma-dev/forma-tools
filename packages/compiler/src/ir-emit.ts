@@ -1,45 +1,40 @@
 /**
- * Forma Compiler - FMIR Binary Emitter
+ * Forma Compiler - FMIR Binary Buffer
  *
- * Compiles h() call expression subtrees into binary FMIR format (.ir files).
- * The FMIR binary is consumed by the Rust-side walker to produce HTML.
+ * IrEmitContext accumulates the four FMIR sections — bytecode, interned
+ * strings, slots and islands — and serializes them into the binary format the
+ * Rust-side walker reads to produce HTML.
  *
- * Only handles Static and Dynamic subtrees -- Island subtrees stay as
- * client-side JS and are NOT emitted to IR.
+ * It is a buffer, not a compiler: the AST → opcode translation lives entirely
+ * in ir-walk.ts (walkHTree / walkCallExpression), which is what the SSR plugin
+ * drives. Only Static and Dynamic subtrees reach the bytecode — Island
+ * subtrees stay as client-side JS behind ISLAND_START/ISLAND_END markers.
  */
 
-import * as t from '@babel/types';
-import { VOID_TAGS, isEventProp, isStaticLiteral, isUndefinedIdentifier } from './utils.js';
-
 // ---------------------------------------------------------------------------
-// Opcodes
+// Slot type hints and sources
 // ---------------------------------------------------------------------------
 
-const OP_OPEN_TAG  = 0x01;
-const OP_CLOSE_TAG = 0x02;
-const OP_VOID_TAG  = 0x03;
-const OP_TEXT      = 0x04;
-const OP_DYN_TEXT  = 0x05;
-const OP_DYN_ATTR  = 0x06;
+/**
+ * The `type_hint` and `source` bytes an FMIR slot entry carries.
+ *
+ * They live beside the encoder that writes them so the walker, the signal-scope
+ * pass and any future producer read one definition. Three copies of these
+ * numbers used to exist (ir-walk.ts, esbuild-ssr-plugin.ts, and the plugin's
+ * "must match ir-walk.ts" comment), which is exactly how the inline-mount path
+ * came to hand a numeric signal a TYPE_TEXT slot.
+ *
+ * The values are frozen by the Rust reader's `SlotType`
+ * (forma/crates/forma-ir/src/slot.rs) — changing one changes the wire format.
+ */
+export const SLOT_TYPE_TEXT   = 0x01;
+export const SLOT_TYPE_BOOL   = 0x02;
+export const SLOT_TYPE_NUMBER = 0x03;
+export const SLOT_TYPE_ARRAY  = 0x04;
+export const SLOT_TYPE_OBJECT = 0x05;
 
-// ---------------------------------------------------------------------------
-// Slot Type Hints
-// ---------------------------------------------------------------------------
-
-const TYPE_TEXT   = 0x01;
-// const TYPE_BOOL   = 0x02;
-// const TYPE_NUMBER = 0x03;
-// const TYPE_ARRAY  = 0x04;
-// const TYPE_OBJECT = 0x05;
-
-/** Convert a static literal to its string representation for an attribute value. */
-function staticLiteralToAttrString(expr: t.Expression): string | null {
-  if (t.isStringLiteral(expr)) return expr.value;
-  if (t.isNumericLiteral(expr)) return String(expr.value);
-  if (t.isBooleanLiteral(expr)) return expr.value ? '' : null;
-  if (t.isNullLiteral(expr)) return null;
-  return null;
-}
+export const SLOT_SOURCE_SERVER = 0x00;
+export const SLOT_SOURCE_CLIENT = 0x01;
 
 // ---------------------------------------------------------------------------
 // IrEmitContext
@@ -68,6 +63,11 @@ export class IrEmitContext {
     byteOffset: number;
   }> = [];
 
+  /** Stack of slot-id capture sets for island subtree walks.
+   *  Every set on the stack records each referenced slot, so an outer
+   *  island's span also captures slots of islands nested inside it. */
+  private slotCaptureStack: Set<number>[] = [];
+
   /** DYN_TEXT marker counter */
   private nextMarkerId: number = 0;
 
@@ -84,11 +84,68 @@ export class IrEmitContext {
     return idx;
   }
 
-  /** Register a new slot, return its id. */
-  addSlot(name: string, typeHint: number, source: number = 0x01, defaultBytes: Uint8Array = new Uint8Array(0)): number {
+  /**
+   * Register a new slot, return its id.
+   *
+   * `reference` says whether creating the slot also counts as USING it inside
+   * the island subtree currently being captured. It is true for every slot
+   * minted because an opcode needs one, and false for a slot merely DECLARED —
+   * a signal the walk found in scope but that no binding on the page reads.
+   * A declared-but-unread slot must not enter an island's `slot_ids`, or the
+   * walker serializes it into `data-forma-props` and every island ships state
+   * nothing on the page renders.
+   * Verified by: packages/compiler/tests/island-registry.test.ts > "island slot ids include the signal slots its own scope minted"
+   */
+  addSlot(
+    name: string,
+    typeHint: number,
+    source: number = SLOT_SOURCE_CLIENT,
+    defaultBytes: Uint8Array = new Uint8Array(0),
+    reference: boolean = true,
+  ): number {
     const id = this.nextSlotId++;
     this.slots.push({ id, name, typeHint, source, defaultBytes });
+    if (reference) this.recordSlotRef(id);
     return id;
+  }
+
+  /** Begin capturing slot ids referenced while walking an island subtree. */
+  beginSlotCapture(): void {
+    this.slotCaptureStack.push(new Set<number>());
+  }
+
+  /** End the innermost capture; returns the captured slot ids sorted ascending. */
+  endSlotCapture(): number[] {
+    const captured = this.slotCaptureStack.pop();
+    return captured ? Array.from(captured).sort((a, b) => a - b) : [];
+  }
+
+  /** Record a slot-id reference into every active capture set.
+   *  Called by addSlot for slots minted because an opcode needs them; call it
+   *  directly when an opcode reuses a pre-existing slot (an in-scope signal, a
+   *  list item binding) without addSlot. */
+  recordSlotRef(id: number): void {
+    for (const set of this.slotCaptureStack) set.add(id);
+  }
+
+  /** Matches per-item list scratch slots (`list:<base>:item`). These are
+   *  TYPE_OBJECT working storage the LIST opcode overwrites per row, so after
+   *  SSR they hold the LAST rendered row — serializing them into an island's
+   *  data-forma-props would leak that row into the page. They are excluded
+   *  from island slot ids; everything else (attr:*, text:*, show:*,
+   *  list:*:array, list:*:<prop>, named signal slots) is kept. */
+  private static readonly LIST_ITEM_SCRATCH_RE = /^list:[^:]+:item$/;
+
+  /** Replace the slot ids of a registered island entry (back-filled after
+   *  the island's component subtree has been walked). Filters out per-item
+   *  list scratch slots — see LIST_ITEM_SCRATCH_RE. */
+  setIslandSlotIds(islandId: number, slotIds: number[]): void {
+    const island = this.islands.find(i => i.id === islandId);
+    if (!island) return;
+    island.slotIds = slotIds.filter(id => {
+      const slot = this.slots.find(s => s.id === id);
+      return !slot || !IrEmitContext.LIST_ITEM_SCRATCH_RE.test(slot.name);
+    });
   }
 
   /** Get a fresh marker id for DYN_TEXT. */
@@ -219,6 +276,15 @@ export class IrEmitContext {
     const encodedStrings: Uint8Array[] = [];
     for (const s of this.strings) {
       const encoded = encoder.encode(s);
+      // The per-string length prefix is a u16 — a longer string would
+      // silently wrap via setUint16 and desynchronize the whole table for
+      // the Rust parser. Fail hard instead of emitting a corrupt binary
+      // (generateRealIr catches this and falls back to placeholder IR).
+      if (encoded.length > 0xffff) {
+        throw new Error(
+          `FMIR string table entry is ${encoded.length} UTF-8 bytes — exceeds the 65535-byte u16 length limit (string starts with ${JSON.stringify(s.slice(0, 40))}...)`,
+        );
+      }
       encodedStrings.push(encoded);
       totalSize += 2 + encoded.length; // u16 len + bytes
     }
@@ -248,6 +314,13 @@ export class IrEmitContext {
     // Each entry: slot_id(u16) + name_str_idx(u32) + type_hint(u8) + source(u8) + default_len(u16) + default_bytes
     let totalSize = 2; // count
     for (const slot of this.slots) {
+      // default_len is a u16 — larger defaults would silently wrap and
+      // corrupt the slot table (see the matching guard in encodeStringTable).
+      if (slot.defaultBytes.length > 0xffff) {
+        throw new Error(
+          `FMIR slot '${slot.name}' has a ${slot.defaultBytes.length}-byte default — exceeds the 65535-byte u16 length limit`,
+        );
+      }
       totalSize += 2 + 4 + 1 + 1 + 2 + slot.defaultBytes.length; // 10 + default_bytes.length
     }
 
@@ -310,180 +383,4 @@ export class IrEmitContext {
 
     return buf;
   }
-}
-
-// ---------------------------------------------------------------------------
-// AST -> Opcode Emission
-// ---------------------------------------------------------------------------
-
-/**
- * Emit opcodes for a single h() call node (recursively handles children).
- */
-function emitNode(
-  node: t.CallExpression,
-  hName: string,
-  ctx: IrEmitContext,
-): void {
-  const args = node.arguments;
-  if (args.length === 0) return;
-
-  // First arg must be a string literal tag name
-  const tagArg = args[0];
-  if (!tagArg || !t.isStringLiteral(tagArg)) return;
-  const tag = tagArg.value;
-  const tagStrIdx = ctx.addString(tag);
-
-  // Process props (second arg)
-  const staticAttrs: Array<{ keyIdx: number; valIdx: number }> = [];
-  const dynAttrs: Array<{ keyIdx: number; slotId: number }> = [];
-
-  const propsArg = args.length > 1 ? args[1] : undefined;
-  if (
-    propsArg
-    && !t.isNullLiteral(propsArg)
-    && !isUndefinedIdentifier(propsArg)
-    && !t.isSpreadElement(propsArg)
-    && t.isObjectExpression(propsArg)
-  ) {
-    for (const prop of propsArg.properties) {
-      if (t.isSpreadElement(prop) || !t.isObjectProperty(prop)) continue;
-      if (prop.computed) continue;
-
-      const key = t.isIdentifier(prop.key)
-        ? prop.key.name
-        : t.isStringLiteral(prop.key)
-          ? prop.key.value
-          : null;
-      if (key === null) continue;
-
-      const val = prop.value as t.Expression;
-
-      // Skip event handlers (island territory)
-      if (isEventProp(key)) continue;
-
-      // Skip ref and dangerouslySetInnerHTML
-      if (key === 'ref' || key === 'dangerouslySetInnerHTML') continue;
-
-      // Static literal value -> static attribute pair
-      if (isStaticLiteral(val)) {
-        const strVal = staticLiteralToAttrString(val);
-        if (strVal !== null) {
-          const keyIdx = ctx.addString(key);
-          const valIdx = ctx.addString(strVal);
-          staticAttrs.push({ keyIdx, valIdx });
-        }
-        // If null (e.g. false boolean), omit the attribute entirely
-        continue;
-      }
-
-      // Function/arrow expression or any other expression -> dynamic attribute
-      const keyIdx = ctx.addString(key);
-      const slotName = `attr:${key}`;
-      const slotId = ctx.addSlot(slotName, TYPE_TEXT);
-      dynAttrs.push({ keyIdx, slotId });
-    }
-  }
-
-  const isVoid = VOID_TAGS.has(tag);
-
-  if (isVoid) {
-    // VOID_TAG: opcode(1) + str_idx(4) + attr_count(2) + [key(4) + val(4)] * count
-    ctx.emit(OP_VOID_TAG);
-    ctx.emitU32(tagStrIdx);
-    ctx.emitU16(staticAttrs.length);
-    for (const attr of staticAttrs) {
-      ctx.emitU32(attr.keyIdx);
-      ctx.emitU32(attr.valIdx);
-    }
-  } else {
-    // OPEN_TAG: opcode(1) + str_idx(4) + attr_count(2) + [key(4) + val(4)] * count
-    ctx.emit(OP_OPEN_TAG);
-    ctx.emitU32(tagStrIdx);
-    ctx.emitU16(staticAttrs.length);
-    for (const attr of staticAttrs) {
-      ctx.emitU32(attr.keyIdx);
-      ctx.emitU32(attr.valIdx);
-    }
-  }
-
-  // Emit DYN_ATTR for each dynamic attribute
-  for (const dyn of dynAttrs) {
-    ctx.emit(OP_DYN_ATTR);
-    ctx.emitU32(dyn.keyIdx);
-    ctx.emitU16(dyn.slotId);
-  }
-
-  // Process children (3rd+ args) -- only for non-void tags
-  if (!isVoid) {
-    for (let i = 2; i < args.length; i++) {
-      const childArg = args[i];
-      if (!childArg || t.isSpreadElement(childArg)) continue;
-
-      const child = childArg as t.Expression;
-
-      // String literal -> TEXT
-      if (t.isStringLiteral(child)) {
-        ctx.emit(OP_TEXT);
-        ctx.emitU32(ctx.addString(child.value));
-        continue;
-      }
-
-      // Numeric literal -> TEXT
-      if (t.isNumericLiteral(child)) {
-        ctx.emit(OP_TEXT);
-        ctx.emitU32(ctx.addString(String(child.value)));
-        continue;
-      }
-
-      // Another h() call -> recursive
-      if (
-        t.isCallExpression(child)
-        && t.isIdentifier(child.callee)
-        && child.callee.name === hName
-      ) {
-        emitNode(child, hName, ctx);
-        continue;
-      }
-
-      // Function/arrow expression -> DYN_TEXT
-      if (t.isArrowFunctionExpression(child) || t.isFunctionExpression(child)) {
-        const slotName = `text:${i - 2}`;
-        const slotId = ctx.addSlot(slotName, TYPE_TEXT);
-        const markerId = ctx.nextMarker();
-        ctx.emit(OP_DYN_TEXT);
-        ctx.emitU16(slotId);
-        ctx.emitU16(markerId);
-        continue;
-      }
-
-      // Any other expression -> DYN_TEXT
-      const slotName = `text:${i - 2}`;
-      const slotId = ctx.addSlot(slotName, TYPE_TEXT);
-      const markerId = ctx.nextMarker();
-      ctx.emit(OP_DYN_TEXT);
-      ctx.emitU16(slotId);
-      ctx.emitU16(markerId);
-    }
-
-    // CLOSE_TAG: opcode(1) + str_idx(4)
-    ctx.emit(OP_CLOSE_TAG);
-    ctx.emitU32(tagStrIdx);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * Compile an h() call expression subtree into FMIR binary format.
- * Only handles static and dynamic subtrees (not islands -- those stay as client JS).
- */
-export function emitIr(
-  node: t.CallExpression,
-  hBindingName: string,
-): Uint8Array {
-  const ctx = new IrEmitContext();
-  emitNode(node, hBindingName, ctx);
-  return ctx.toBinary();
 }

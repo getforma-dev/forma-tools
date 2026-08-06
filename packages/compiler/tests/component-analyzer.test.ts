@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { ComponentAnalyzer, type SignalDefault } from '../src/component-analyzer';
+import { describe, it, expect, vi } from 'vitest';
+import { ComponentAnalyzer } from '../src/component-analyzer';
 
 const analyzer = new ComponentAnalyzer('/test/project');
 
@@ -18,6 +18,14 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'OnboardingPage',
       importPath: './OnboardingPage',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['OnboardingPage', './OnboardingPage'],
+      ]),
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['OnboardingPage', { source: './OnboardingPage', imported: 'OnboardingPage' }],
+      ]),
     });
   });
 
@@ -40,6 +48,17 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'Dashboard',
       importPath: './Dashboard',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['Dashboard', './Dashboard'],
+      ]),
+      // A DEFAULT import binds the local name to the module's `default`
+      // export, not to an export named 'Dashboard' — the resolver has to look
+      // for the right one over there.
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['Dashboard', { source: './Dashboard', imported: 'default' }],
+      ]),
     });
   });
 
@@ -53,6 +72,14 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'UserProfile',
       importPath: './pages/UserProfile',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['UserProfile', './pages/UserProfile'],
+      ]),
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['UserProfile', { source: './pages/UserProfile', imported: 'UserProfile' }],
+      ]),
     });
   });
 
@@ -66,17 +93,45 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'App',
       importPath: './App',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['App', './App'],
+      ]),
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['App', { source: './App', imported: 'App' }],
+      ]),
     });
   });
 
-  it('returns null when component is not imported', () => {
+  it('treats a mount of a locally-declared component as an inline mount', () => {
+    // There is no component FILE to open — the component is right here. This
+    // used to return null, which drops the whole page to placeholder IR; the
+    // arrow's body is the tree, and the entry file is the scope it resolves
+    // against.
     const source = `
       import { mount } from 'formajs';
       function LocalComponent() { return null; }
       mount(() => LocalComponent(), '#app');
     `;
     const result = analyzer.parseEntryPoint(source, 'app.ts');
-    expect(result).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.inlineReturnNode!.type).toBe('CallExpression');
+  });
+
+  it('does not treat a PACKAGE import as a component file', () => {
+    // `mount(() => h('div', …), '#app')` matched the named-component pattern
+    // because `h` is an imported identifier — so the plugin went looking for a
+    // component file named 'formajs', failed, and dropped the page to
+    // placeholder IR. Only a relative import names a file this compiler opens.
+    const source = `
+      import { h, mount } from 'formajs';
+      mount(() => h('div', { id: 'app' }, 'hi'), '#app');
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.ts');
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.importPath).toBe('');
   });
 
   it('handles re-exported named import', () => {
@@ -89,6 +144,16 @@ describe('parseEntryPoint', () => {
     expect(result).toEqual({
       componentName: 'Page',
       importPath: './LoginPage',
+      importMap: new Map([
+        ['mount', 'formajs'],
+        ['Page', './LoginPage'],
+      ]),
+      // The ALIAS is the whole point: local `Page` is exported as `LoginPage`
+      // by ./LoginPage, so looking up 'Page' over there would find nothing.
+      importBindings: new Map([
+        ['mount', { source: 'formajs', imported: 'mount' }],
+        ['Page', { source: './LoginPage', imported: 'LoginPage' }],
+      ]),
     });
   });
 
@@ -129,6 +194,35 @@ describe('parseEntryPoint', () => {
     `;
     const result = analyzer.parseEntryPoint(source, 'app.tsx');
     expect(result).toBeNull();
+  });
+
+  it('collects activateIslands names on the named mount path', () => {
+    const source = `
+      import { mount, activateIslands } from 'formajs';
+      import { DashboardPage } from './DashboardPage';
+      import { CounterIsland } from './CounterIsland';
+      mount(() => DashboardPage(), '#app');
+      activateIslands({ CounterIsland });
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.ts');
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('DashboardPage');
+    expect(result!.islandNames).toEqual(new Set(['CounterIsland']));
+  });
+
+  it('collects activateIslands names on the inline block-body mount path', () => {
+    const source = `
+      import { h, mount, activateIslands } from 'formajs';
+      import { CounterIsland } from './CounterIsland';
+      mount(() => {
+        return h('div', null, CounterIsland());
+      }, '#app');
+      activateIslands({ CounterIsland });
+    `;
+    const result = analyzer.parseEntryPoint(source, 'app.ts');
+    expect(result).not.toBeNull();
+    expect(result!.componentName).toBe('__inline__');
+    expect(result!.islandNames).toEqual(new Set(['CounterIsland']));
   });
 
   it('Pattern 3: block-body mount with multiple statements before return', () => {
@@ -226,6 +320,45 @@ describe('parseComponentFile', () => {
     const result = analyzer.parseComponentFile(source, 'Widget.ts', 'Widget');
     expect(result).not.toBeNull();
     expect(result!.returnNode.type).toBe('CallExpression');
+  });
+
+  it('resolves the specifier export shape esbuild emits for .tsx', () => {
+    // Every `export function X()` in a .tsx file arrives here as a bare
+    // declaration plus `export { X }`. Reading only
+    // ExportNamedDeclaration.declaration finds nothing, and the page falls
+    // back to placeholder IR.
+    const source = `
+      import { h } from 'formajs';
+      function Page() { return h('main', null, 'hi'); }
+      export { Page };
+    `;
+    const result = analyzer.parseComponentFile(source, 'page.tsx', 'Page');
+    expect(result).not.toBeNull();
+    expect(result!.returnNode.type).toBe('CallExpression');
+  });
+
+  it('follows an export alias to the real declaration', () => {
+    const source = `
+      import { h } from 'formajs';
+      function PageImpl() { return h('main', null, 'hi'); }
+      export { PageImpl as Page };
+    `;
+    expect(analyzer.parseComponentFile(source, 'page.ts', 'Page')).not.toBeNull();
+  });
+
+  it('reports WHY a name could not be followed instead of returning a bare null', () => {
+    const details: string[] = [];
+    const result = analyzer.parseComponentFile(
+      `export const Page = 'not a component';`,
+      'page.ts',
+      'Page',
+      { onUnresolved: (d) => details.push(d) },
+    );
+    expect(result).toBeNull();
+    // The file and the construct: "no export named Page" would send the author
+    // looking for a missing export that is right there.
+    expect(details.join('\n')).toContain('page.ts');
+    expect(details.join('\n')).toContain('StringLiteral');
   });
 
   it('does not extract return from nested function', () => {
@@ -376,158 +509,89 @@ describe('extractFileConstants', () => {
       { 'data-testid': 'card', 'aria-label': 'info' },
     ]);
   });
+
+  it('extracts export const array declarations', () => {
+    const source = `
+      export const FEATURES = [
+        { name: 'Auth', enabled: true },
+      ];
+    `;
+    const result = analyzer.extractFileConstants(source, 'file.ts');
+    expect(result.size).toBe(1);
+    expect(result.get('FEATURES')).toEqual([{ name: 'Auth', enabled: true }]);
+  });
 });
 
 // ===========================================================================
-// Task 8: Signal Initial Value Detection
+// String Constant Extraction — extractStringConstants
 // ===========================================================================
 
-describe('extractSignalDefaults', () => {
-  it('detects string initial value', () => {
+describe('extractStringConstants', () => {
+  it('folds an export const string declaration', () => {
     const source = `
-      import { createSignal } from 'formajs';
+      export const ICON_PATH = 'M4 6h16' + 'M4 12h16';
+      const LOCAL = 'plain';
+    `;
+    const result = analyzer.extractStringConstants(source, 'icons.ts');
+    expect(result.get('ICON_PATH')).toBe('M4 6h16M4 12h16');
+    expect(result.get('LOCAL')).toBe('plain');
+  });
+
+  it('folds a reference chain through an export const', () => {
+    const source = `
+      export const HEAD = 'M10 0 ';
+      const BODY = HEAD + 'L20 30';
+    `;
+    const result = analyzer.extractStringConstants(source, 'icons.ts');
+    expect(result.get('BODY')).toBe('M10 0 L20 30');
+  });
+
+  it('drops a const shadowed by a nested variable declaration', () => {
+    const source = `
+      const cls = 'icon';
+      const KEEP = 'kept';
       export function Page() {
-        const [email, setEmail] = createSignal('');
-        return null;
+        const cls = computeClass();
+        return h('div', { class: cls });
       }
     `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.size).toBe(1);
-    expect(result.get('email')).toEqual({ type: 'text', default: '' });
+    const result = analyzer.extractStringConstants(source, 'page.ts');
+    // Shadowed name must not fold — the walker cannot tell which binding an
+    // identifier refers to, and baking the module value into a static attr
+    // would be unrecoverable client-side.
+    expect(result.has('cls')).toBe(false);
+    expect(result.get('KEEP')).toBe('kept');
   });
 
-  it('detects non-empty string initial value', () => {
+  it('drops a const shadowed by a function parameter', () => {
     const source = `
-      import { createSignal } from 'formajs';
-      export function Page() {
-        const [name, setName] = createSignal('Alice');
-        return null;
-      }
+      const label = 'Default';
+      function format(label) { return label.trim(); }
     `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.get('name')).toEqual({ type: 'text', default: 'Alice' });
+    const result = analyzer.extractStringConstants(source, 'file.ts');
+    expect(result.has('label')).toBe(false);
   });
 
-  it('detects boolean initial value', () => {
+  it('drops a folded const whose UTF-8 encoding exceeds 65535 bytes and warns', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const source = `
-      import { createSignal } from 'formajs';
-      export function Page() {
-        const [submitting, setSubmitting] = createSignal(false);
-        const [visible, setVisible] = createSignal(true);
-        return null;
-      }
+      const HUGE = '${'x'.repeat(70000)}';
+      const SMALL = 'ok';
     `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.get('submitting')).toEqual({ type: 'bool', default: false });
-    expect(result.get('visible')).toEqual({ type: 'bool', default: true });
+    const result = analyzer.extractStringConstants(source, 'big.ts');
+    // A >64KB string cannot be encoded in the FMIR string table (u16 length
+    // prefix), so it must never enter the fold map.
+    expect(result.has('HUGE')).toBe(false);
+    expect(result.get('SMALL')).toBe('ok');
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`const 'HUGE'`),
+    );
+    warnSpy.mockRestore();
   });
 
-  it('detects number initial value', () => {
-    const source = `
-      import { createSignal } from 'formajs';
-      export function Page() {
-        const [count, setCount] = createSignal(0);
-        const [price, setPrice] = createSignal(9.99);
-        return null;
-      }
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.get('count')).toEqual({ type: 'number', default: 0 });
-    expect(result.get('price')).toEqual({ type: 'number', default: 9.99 });
-  });
-
-  it('detects null initial value', () => {
-    const source = `
-      import { createSignal } from 'formajs';
-      export function Page() {
-        const [error, setError] = createSignal<string | null>(null);
-        return null;
-      }
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.get('error')).toEqual({ type: 'null', default: null });
-  });
-
-  it('detects all signal types in the same function', () => {
-    const source = `
-      import { createSignal } from 'formajs';
-      export function OnboardingPage() {
-        const [email, setEmail] = createSignal('');
-        const [submitting, setSubmitting] = createSignal(false);
-        const [showPassword, setShowPassword] = createSignal(false);
-        const [error, setError] = createSignal<string | null>(null);
-        return null;
-      }
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'OnboardingPage');
-    expect(result.size).toBe(4);
-    expect(result.get('email')).toEqual({ type: 'text', default: '' });
-    expect(result.get('submitting')).toEqual({ type: 'bool', default: false });
-    expect(result.get('showPassword')).toEqual({ type: 'bool', default: false });
-    expect(result.get('error')).toEqual({ type: 'null', default: null });
-  });
-
-  it('ignores non-createSignal patterns', () => {
-    const source = `
-      import { createSignal } from 'formajs';
-      export function Page() {
-        const [a, b] = someOtherFunction('hello');
-        const items = [1, 2, 3];
-        const name = 'test';
-        return null;
-      }
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.size).toBe(0);
-  });
-
-  it('returns empty map when no signals exist', () => {
-    const source = `
-      export function Page() {
-        return null;
-      }
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.size).toBe(0);
-  });
-
-  it('returns empty map when function not found', () => {
-    const source = `
-      export function Other() {
-        const [val, setVal] = createSignal('test');
-        return null;
-      }
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.size).toBe(0);
-  });
-
-  it('ignores signals with unsupported initial values', () => {
-    const source = `
-      import { createSignal } from 'formajs';
-      export function Page() {
-        const [data, setData] = createSignal({ key: 'val' });
-        const [list, setList] = createSignal([1, 2, 3]);
-        const [name, setName] = createSignal('hello');
-        return null;
-      }
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    // Only 'name' should be detected — object and array are unsupported
-    expect(result.size).toBe(1);
-    expect(result.get('name')).toEqual({ type: 'text', default: 'hello' });
-  });
-
-  it('works with exported const arrow function', () => {
-    const source = `
-      import { createSignal } from 'formajs';
-      export const Page = () => {
-        const [count, setCount] = createSignal(0);
-        return null;
-      };
-    `;
-    const result = analyzer.extractSignalDefaults(source, 'page.ts', 'Page');
-    expect(result.size).toBe(1);
-    expect(result.get('count')).toEqual({ type: 'number', default: 0 });
+  it('keeps a folded const at exactly 65535 bytes', () => {
+    const source = `const EDGE = '${'x'.repeat(65535)}';`;
+    const result = analyzer.extractStringConstants(source, 'edge.ts');
+    expect(result.get('EDGE')).toHaveLength(65535);
   });
 });

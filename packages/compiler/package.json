@@ -1,6 +1,6 @@
 {
   "name": "@getforma/compiler",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -17,6 +17,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
+    "emit:corpus": "npm run build && node scripts/emit-corpus.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

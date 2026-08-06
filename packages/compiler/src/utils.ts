@@ -41,3 +41,22 @@ export function isStaticLiteral(expr: t.Expression): boolean {
 export function isUndefinedIdentifier(node: t.Node): boolean {
   return t.isIdentifier(node) && node.name === 'undefined';
 }
+
+// ---------------------------------------------------------------------------
+// Slot Naming
+// ---------------------------------------------------------------------------
+
+/**
+ * Reserve the next occurrence of `base` in a per-page occurrence registry and
+ * return the unique name for it: the first occurrence keeps `base` verbatim,
+ * the Nth gets `base#N`. Shared by every slot-name family (signals, list bases,
+ * show, attr, text) so one documented scheme governs all of them — and so a
+ * name that appears once on a page keeps the spelling downstream consumers pin.
+ * Verified by: packages/compiler/tests/ir-walk.test.ts > "keeps single-occurrence attr and text names unsuffixed"
+ * Verified by: packages/compiler/tests/signal-scope.test.ts > "suffixes the second scope to declare a name"
+ */
+export function uniqueName(counts: Map<string, number>, base: string): string {
+  const occurrence = (counts.get(base) ?? 0) + 1;
+  counts.set(base, occurrence);
+  return occurrence > 1 ? `${base}#${occurrence}` : base;
+}
