@@ -258,13 +258,12 @@ describe('Island Registry', () => {
       expect(islands[2]!.name).toBe('funcC');
     });
 
-    it('boolean literal child (true) gets generated island name', () => {
-      // `true` is not caught by isNullish (only `false` is) and falls through
-      // emitChild's catch-all to unnamed emitIsland()
+    it('boolean literal child (true) registers no island at all', () => {
+      // `true` used to fall through emitChild's catch-all to an unnamed
+      // emitIsland(), which put an unhydratable `island_<n>` shell in the
+      // page's island table for a child the client renders as nothing.
       const { ctx } = walkAndEmitWithContext(`h('div', null, true)`);
-      const islands = ctx.getIslands();
-      expect(islands.length).toBe(1);
-      expect(islands[0]!.name).toMatch(/^island_\d+$/);
+      expect(ctx.getIslands()).toEqual([]);
     });
   });
 

@@ -34,7 +34,7 @@ import {
   enterSignalScope,
   newSignalRegistry,
 } from '../src/signal-scope';
-import { assertBinaryInvariants, getIslands, parseOpcodeList } from './helpers/fmir';
+import { assertBinaryInvariants, getIslands, getSlots, parseOpcodeList } from './helpers/fmir';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,7 +93,12 @@ function emitWithWarnings(code: string, walkCtx: WalkContext = {}, signals?: str
     }
     const binary = ctx.toBinary();
     assertBinaryInvariants(binary);
-    return { warnings, ops: parseOpcodeList(binary), islands: getIslands(binary) };
+    return {
+      warnings,
+      ops: parseOpcodeList(binary),
+      islands: getIslands(binary),
+      slots: getSlots(binary),
+    };
   } finally {
     spy.mockRestore();
   }
@@ -232,6 +237,80 @@ const DEGRADATIONS: Array<[string, string, WalkContext, string[], string?]> = [
   ],
 ];
 
+/**
+ * Degradations in ATTRIBUTE position, which do NOT emit an island.
+ *
+ * A degraded attribute mints a slot with no default: the element still
+ * renders, just without the attribute. That is why this whole class was
+ * silent — there is no island shell to notice, and an empty slot is a
+ * perfectly well-formed slot. It is also why it is the more dangerous half:
+ * a page missing an island is obvious on sight, and a page missing every
+ * tooltip is not.
+ *
+ * [label, source, walk context, fragments the warning must contain, signals]
+ */
+const ATTR_DEGRADATIONS: Array<[string, string, WalkContext, string[], string?]> = [
+  [
+    'concatenated attribute with an unresolvable operand',
+    `h('button', { title: 'Enable ' + lookupName() })`,
+    {},
+    [
+      "attribute 'title' on <button>",
+      "a bare '+' expression",
+      'OMITTED from the server-rendered HTML',
+      'hydration does not re-apply a non-function prop',
+    ],
+  ],
+  [
+    'template-literal attribute with an unresolvable operand',
+    'h(\'div\', { class: `card ${tone()}` })',
+    {},
+    ["attribute 'class' on <div>", 'a template literal'],
+  ],
+  [
+    'attribute bound to an unresolvable call',
+    `h('div', { title: computeTitle() })`,
+    {},
+    ["attribute 'title' on <div>", 'computeTitle(...)'],
+  ],
+  [
+    'style object attribute',
+    `h('div', { style: { color: 'red' } })`,
+    {},
+    ["attribute 'style' on <div>", 'an object literal'],
+  ],
+  [
+    'spread props',
+    `h('div', { ...rest }, 'x')`,
+    {},
+    ['spread props {...rest} on <div>', 'NOT rendered server-side'],
+  ],
+  [
+    'computed prop key',
+    `h('div', { [attrName]: 'v' }, 'x')`,
+    {},
+    ['computed prop key on <div>', 'NOT rendered server-side'],
+  ],
+  [
+    'method-valued prop',
+    `h('div', { title() { return 'x'; } }, 'y')`,
+    {},
+    ["method-valued prop 'title' on <div>"],
+  ],
+  [
+    'props argument that is not an object literal',
+    `h('div', props, 'x')`,
+    {},
+    ['props on <div> passed as props', 'NONE of the attributes'],
+  ],
+  [
+    'dangerouslySetInnerHTML',
+    `h('div', { dangerouslySetInnerHTML: { __html: '<b>x</b>' } })`,
+    {},
+    ['dangerouslySetInnerHTML on <div>', 'the element ships empty'],
+  ],
+];
+
 describe('build diagnostics', () => {
   describe.each(DEGRADATIONS)('%s', (_label, code, walkCtx, fragments, signals) => {
     it('warns, naming the construct and the consequence', () => {
@@ -250,6 +329,27 @@ describe('build diagnostics', () => {
       // the channel.
       const { islands } = emitWithWarnings(code, walkCtx, signals);
       expect(islands.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe.each(ATTR_DEGRADATIONS)('%s', (_label, code, walkCtx, fragments, signals) => {
+    it('warns, naming the attribute and the consequence', () => {
+      const { warnings } = emitWithWarnings(code, walkCtx, signals);
+
+      expect(warnings, 'the degradation must produce exactly one diagnostic')
+        .toHaveLength(1);
+      for (const fragment of fragments) {
+        expect(warnings[0]).toContain(fragment);
+      }
+    });
+
+    it('names the file it happened in', () => {
+      const { warnings } = emitWithWarnings(
+        code,
+        { ...walkCtx, sourceFile: 'src/pages/StatusPage.ts' },
+        signals,
+      );
+      expect(warnings[0]).toContain('in src/pages/StatusPage.ts');
     });
   });
 
@@ -333,6 +433,18 @@ describe('build diagnostics', () => {
       },
     ],
     [
+      'a concatenated child and attribute the compiler can fold',
+      `h('button', { title: 'Enable ' + name() }, 'Player ' + name(), ' #' + count())`,
+      {},
+      `const [name] = createSignal('Xbox'); const [count] = createSignal(3);`,
+    ],
+    [
+      'an eager expression that folds to nothing the client renders either',
+      `h('div', null, ready() && 'Go')`,
+      {},
+      `const [ready] = createSignal(false);`,
+    ],
+    [
       'a statically unrolled spread',
       `h('nav', null, ...NAV.map((i) => h('a', { href: i.href }, i.label)))`,
       {
@@ -355,6 +467,65 @@ describe('build diagnostics', () => {
   // -------------------------------------------------------------------------
   // 4: completeness — no fallback path may skip the diagnostic
   // -------------------------------------------------------------------------
+
+  /**
+   * The island half of this contract is checked statically below, because an
+   * island shell is a call site you can grep for. The ATTRIBUTE half cannot
+   * be: a degraded attribute is just a slot whose default bytes are empty,
+   * produced by the same `addSlot` line as a healthy one. So it is checked
+   * behaviourally instead — over every expression form that can appear in an
+   * attribute value, evaluable and not.
+   *
+   * The property: an attribute that will be MISSING from the server-rendered
+   * HTML must have been reported. This is the rule the walker broke for the
+   * entire `+`/template/call/member/object family, and the reason ksx shipped
+   * controls with no tooltips and a clean build log.
+   */
+  it('never leaves an attribute empty without saying so', () => {
+    const SIGNALS = `const [name] = createSignal('Xbox'); const [count] = createSignal(3);`;
+    const VALUES = [
+      // evaluable — must produce a default and stay silent
+      `'Enable ' + name()`,
+      `'Slot ' + count() + ' ready'`,
+      `count() + 1`,
+      '`Enable ${name()}`',
+      `name()`,
+      `String(count())`,
+      `count() > 1 ? 'many' : 'one'`,
+      `('x' + name()) as string`,
+      // not evaluable — must warn
+      `'Enable ' + missing()`,
+      '`x ${missing()}`',
+      `missing()`,
+      `missing`,
+      `obj.field`,
+      `{ color: 'red' }`,
+      `['a', 'b']`,
+      `new Date()`,
+      `missing ? 'a' : 'b'`,
+      `count() == 3`,
+    ];
+
+    const silentlyEmpty: string[] = [];
+    for (const value of VALUES) {
+      const { warnings, slots } = emitWithWarnings(
+        `h('div', { title: ${value} })`,
+        {},
+        SIGNALS,
+      );
+      const attr = slots.find((s) => s.name === 'attr:title');
+      // No attr slot at all means the value folded to null/false, which is an
+      // absent attribute on the client too — not a degradation.
+      if (attr && attr.default === '' && warnings.length === 0) {
+        silentlyEmpty.push(value);
+      }
+    }
+
+    expect(
+      silentlyEmpty,
+      'these attribute values ship with no value and no diagnostic',
+    ).toEqual([]);
+  });
 
   it('warns at every emitIsland call site in the walker', () => {
     const source = readFileSync(resolve(__dirname, '../src/ir-walk.ts'), 'utf8');

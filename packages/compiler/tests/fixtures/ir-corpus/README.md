@@ -51,6 +51,30 @@ the same byte. Only the Rust side turns the wrong byte into missing rows.
 | `jsx-page` | an **all-`.tsx`** app: entry, page, sibling sub-component and island, every one of them reaching the analyzer through esbuild's `export { X }` rewrite |
 | `barrel-exports` | every component reached through an `index.ts` barrel: `export { X } from`, `export * from`, and `export { XImpl as X }` |
 | `sub-component-scopes` | signals declared in the four scopes the old hand-written extractors did not look in, plus the same-name **collision** rule and a truthy `SHOW_IF` default |
+| `eager-concat` | expressions evaluated EAGERLY — `'Player ' + name()` with no `() => …` wrapper — in **child** and **attribute** position, including a multi-operand concat mixing a string and a **number** |
+
+### Why `eager-concat` exists
+
+Every other case binds its dynamic values through a function, which is the one
+shape the walker had a fold for. Real pages also write the value directly:
+`h('span', null, 'Player ' + name())`. The walker understood neither position,
+and degraded them *differently*:
+
+* **Child position** fell through to `emitIsland`, so the element shipped as an
+  empty island shell — nothing server-side until the bundle hydrated. It warned,
+  at least.
+* **Attribute position** hit the props catch-all, which minted `attr:<key>` with
+  **no default and no diagnostic**. The attribute went out with no value and the
+  build log was clean. That is what stripped the tooltips off ksx's controls for
+  the entire life of that UI, and it is why this case exists on the Rust side
+  rather than only in the JS suite: an empty-default slot is a perfectly
+  well-formed slot, so nothing short of rendering it shows the hole.
+
+The `@page defaults` section is the whole point. It must read `Player Xbox`,
+`title="Enable Xbox"` and `title="Slot 3 ready"` — that last one also pins that
+a NUMERIC signal survives concatenation as `3`. An evaluator that lost the type
+renders `Slot [object Object] ready` or `Slot  ready`, both of which are
+otherwise valid FMIR that every structural assertion in the suite accepts.
 
 ### Why `sub-component-scopes` exists
 

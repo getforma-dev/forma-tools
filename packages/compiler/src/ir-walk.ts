@@ -154,6 +154,11 @@ function describeNode(node: t.Node): string {
   if (t.isTemplateLiteral(node)) return 'a template literal';
   if (t.isConditionalExpression(node)) return 'a bare ternary (not wrapped in a function)';
   if (t.isLogicalExpression(node)) return `a bare '${node.operator}' expression (not wrapped in a function)`;
+  // A BinaryExpression is what `'Player ' + name()` parses to. Reporting it as
+  // "a BinaryExpression" named the AST node instead of the code, which is the
+  // one thing a build warning must not do.
+  if (t.isBinaryExpression(node)) return `a bare '${node.operator}' expression (not wrapped in a function)`;
+  if (t.isUnaryExpression(node)) return `a bare '${node.operator}' expression (not wrapped in a function)`;
   if (t.isSpreadElement(node)) return 'a spread child';
   if (t.isObjectExpression(node)) return 'an object literal';
   if (t.isArrayExpression(node)) return 'an array literal';
@@ -331,6 +336,24 @@ function evalNode(node: t.Expression, env: EvalEnv): EvalValue | undefined {
     return env.signal(node.callee.name)?.default;
   }
 
+  // Explicit cast: String(expr) / Number(expr). Pages write these around a
+  // signal read to pin the type; without folding them the cast alone was
+  // enough to turn an otherwise evaluable value into an empty attribute.
+  // Only a string or number operand folds: `String(null)` is "null" in JS but
+  // `null` is also how this evaluator spells "absent", and guessing between
+  // the two would put the wrong text on the page.
+  if (
+    t.isCallExpression(node)
+    && t.isIdentifier(node.callee)
+    && (node.callee.name === 'String' || node.callee.name === 'Number')
+    && node.arguments.length === 1
+    && t.isExpression(node.arguments[0]!)
+  ) {
+    const inner = evalNode(node.arguments[0] as t.Expression, env);
+    if (typeof inner !== 'string' && typeof inner !== 'number') return undefined;
+    return node.callee.name === 'String' ? String(inner) : Number(inner);
+  }
+
   // Unary negation: !expr or !!expr
   if (t.isUnaryExpression(node) && node.operator === '!') {
     const inner = evalNode(node.argument as t.Expression, env);
@@ -354,17 +377,61 @@ function evalNode(node: t.Expression, env: EvalEnv): EvalValue | undefined {
     return evalNode(node.right as t.Expression, env);
   }
 
-  // Binary +: numeric when both sides are numbers, string concatenation
-  // otherwise — the same rule JavaScript applies.
-  if (t.isBinaryExpression(node) && node.operator === '+') {
+  if (t.isBinaryExpression(node)) {
     const left = evalNode(node.left as t.Expression, env);
     const right = evalNode(node.right as t.Expression, env);
     if (left === undefined || right === undefined) return undefined;
-    if (typeof left === 'number' && typeof right === 'number') return left + right;
-    return evalToText(left) + evalToText(right);
+
+    // Binary +: numeric when both sides are numbers, string concatenation
+    // otherwise — the same rule JavaScript applies.
+    if (node.operator === '+') {
+      if (typeof left === 'number' && typeof right === 'number') return left + right;
+      return evalToText(left) + evalToText(right);
+    }
+
+    // Strict equality is exact over the primitives this evaluator holds.
+    // Loose `==` / `!=` is deliberately NOT folded: its coercion table would
+    // have to distinguish JS `null` from `undefined`, and EvalValue spells
+    // both as `null` — a fold that guesses there would put the wrong SHOW_IF
+    // branch or the wrong attribute on the page rather than warning.
+    if (node.operator === '===') return left === right;
+    if (node.operator === '!==') return left !== right;
+
+    // Arithmetic and ordering, restricted to operands of the SAME primitive
+    // type, where JavaScript's answer needs no coercion rules. `'2' * x` and
+    // friends fall through to the diagnostic instead of being guessed at.
+    if (typeof left === 'number' && typeof right === 'number') {
+      switch (node.operator) {
+        case '-': return left - right;
+        case '*': return left * right;
+        case '/': return left / right;
+        case '%': return left % right;
+        case '<': return left < right;
+        case '<=': return left <= right;
+        case '>': return left > right;
+        case '>=': return left >= right;
+      }
+    }
+    if (typeof left === 'string' && typeof right === 'string') {
+      switch (node.operator) {
+        case '<': return left < right;
+        case '<=': return left <= right;
+        case '>': return left > right;
+        case '>=': return left >= right;
+      }
+    }
+    return undefined;
   }
 
   if (t.isParenthesizedExpression(node)) {
+    return evalNode(node.expression, env);
+  }
+
+  // TypeScript wrappers carry no runtime value of their own. The walker parses
+  // ORIGINAL .ts source, so `('Slot ' + count()) as string` and `title!` reach
+  // the evaluator with the cast still on them; refusing them degraded an
+  // expression purely because it had been annotated.
+  if (t.isTSAsExpression(node) || t.isTSSatisfiesExpression(node) || t.isTSNonNullExpression(node)) {
     return evalNode(node.expression, env);
   }
 
@@ -641,31 +708,89 @@ export function walkHTree(
   const dynAttrs: Array<{ keyIdx: number; slotId: number }> = [];
 
   const propsArg = args.length > 1 ? args[1] : undefined;
-  if (
-    propsArg
+  const hasProps = propsArg !== undefined
     && !t.isNullLiteral(propsArg)
-    && !isUndefinedIdentifier(propsArg)
-    && !t.isSpreadElement(propsArg)
-    && t.isObjectExpression(propsArg)
-  ) {
+    && !isUndefinedIdentifier(propsArg);
+
+  // A props argument that is not an object literal — `h('div', props, …)`,
+  // `h('div', ...rest)` — used to drop straight through this block, taking
+  // EVERY attribute on the element with it and saying nothing.
+  // Verified by: packages/compiler/tests/ir-diagnostics.test.ts > "props argument that is not an object literal"
+  if (hasProps && (t.isSpreadElement(propsArg) || !t.isObjectExpression(propsArg))) {
+    warnDegraded(
+      walkCtx,
+      `props on <${tag}> passed as ${t.isSpreadElement(propsArg) ? 'a spread argument' : describeNode(propsArg)} rather than an object literal`,
+      `NONE of the attributes it carries are rendered server-side — write them as an object literal on the h('${tag}', { … }) call`,
+    );
+  }
+
+  if (hasProps && !t.isSpreadElement(propsArg) && t.isObjectExpression(propsArg)) {
     for (const prop of propsArg.properties) {
-      if (t.isSpreadElement(prop) || !t.isObjectProperty(prop)) continue;
-      if (prop.computed) continue;
+      // `{...rest}`: the walker cannot know what is in it, so none of it is
+      // rendered server-side. Silently dropping it is how an element ships
+      // missing half its attributes with a clean build log.
+      if (t.isSpreadElement(prop)) {
+        warnDegraded(
+          walkCtx,
+          `spread props {...${exprToText(prop.argument)}} on <${tag}>`,
+          'the attributes it carries are NOT rendered server-side — list them explicitly on the h() call to server-render them',
+        );
+        continue;
+      }
+
+      if (prop.computed) {
+        warnDegraded(
+          walkCtx,
+          `computed prop key on <${tag}>`,
+          'the attribute is NOT rendered server-side — use a literal key so the compiler can name the attribute',
+        );
+        continue;
+      }
 
       const key = t.isIdentifier(prop.key)
         ? prop.key.name
         : t.isStringLiteral(prop.key)
           ? prop.key.value
           : null;
-      if (key === null) continue;
+      if (key === null) {
+        warnDegraded(
+          walkCtx,
+          `prop with a ${prop.key.type} key on <${tag}>`,
+          'the attribute is NOT rendered server-side — use a plain identifier or string key',
+        );
+        continue;
+      }
 
-      const val = prop.value as t.Expression;
-
-      // Rule 7: Skip event handlers
+      // Rule 7: Skip event handlers. Not a degradation: an event listener has
+      // no server-side representation by design, and the client attaches it.
       if (isEventProp(key)) continue;
 
-      // Skip ref and dangerouslySetInnerHTML
-      if (key === 'ref' || key === 'dangerouslySetInnerHTML') continue;
+      // `ref` is a callback, not an attribute — nothing to render.
+      if (key === 'ref') continue;
+
+      // A method-valued prop (`{ title() { … } }`) is a function the walker
+      // has no binding form for once it is not an event handler.
+      if (t.isObjectMethod(prop)) {
+        warnDegraded(
+          walkCtx,
+          `method-valued prop '${key}' on <${tag}>`,
+          `the attribute is NOT rendered server-side — write it as an arrow property (\`${key}: () => …\`) for a reactive binding`,
+        );
+        continue;
+      }
+
+      // Raw markup is deliberately not server-rendered from IR, but the page
+      // author has to know the content is missing until the client runs.
+      if (key === 'dangerouslySetInnerHTML') {
+        warnDegraded(
+          walkCtx,
+          `dangerouslySetInnerHTML on <${tag}>`,
+          'its markup is NOT rendered server-side and appears only once the client hydrates — the element ships empty',
+        );
+        continue;
+      }
+
+      const val = prop.value as t.Expression;
 
       // Static literal value -> static attribute pair
       if (isStaticLiteral(val)) {
@@ -753,17 +878,41 @@ export function walkHTree(
         continue;
       }
 
-      // Any other expression -> DYN_ATTR
-      // Bare identifiers/members that resolved nowhere render empty in SSR —
-      // warn so the silent-MISSING failure mode is visible at build time.
-      if ((t.isIdentifier(val) && !isUndefinedIdentifier(val)) || t.isMemberExpression(val)) {
-        console.warn(
-          `   IR: attribute '${key}' on <${tag}> references '${exprToText(val)}' which cannot be resolved statically — SSR will render this attribute empty; inline the literal, use a module-level const, or wrap in a function for a reactive value`,
+      // Any other expression -> DYN_ATTR, folded to an SSR default when every
+      // operand resolves.
+      //
+      // `title: 'Enable ' + name()` is not a reactive binding — the client
+      // computes it once, while h() builds the element — but it is not opaque
+      // either: the operands are a literal and a signal whose default is in
+      // lexical scope. This arm used to mint the slot with NO default and NO
+      // diagnostic, so the attribute shipped with no value and nothing said
+      // so. That is what stripped the tooltips off ksx's controls.
+      // Verified by: packages/compiler/tests/ir-walk.test.ts > "folds a concatenated attribute value into an SSR default"
+      const evaluated = evalNode(val, evalEnv(walkCtx));
+      if (evaluated === undefined) {
+        // The consequence is stated as PERMANENTLY missing, not
+        // missing-until-hydration: a prop whose value is not a function is
+        // skipped by the client's hydration pass as "static and already in
+        // the SSR HTML" (formajs src/dom/hydrate.ts, applyDynamicProps), so
+        // an attribute the server omits is never written at all.
+        // Verified by: packages/compiler/tests/ir-diagnostics.test.ts > "concatenated attribute with an unresolvable operand"
+        warnDegraded(
+          walkCtx,
+          `attribute '${key}' on <${tag}> is ${describeNode(val)}, which the compiler cannot evaluate`,
+          'the attribute is OMITTED from the server-rendered HTML and hydration does not re-apply a'
+          + ' non-function prop, so it never appears — inline the literal, use a module-level const,'
+          + ' or wrap it in a function (`() => …`) for a reactive binding',
         );
       }
       const keyIdx = ctx.addString(key);
-      const slotName = attrSlotName(key, walkCtx);
-      const slotId = ctx.addSlot(slotName, TYPE_TEXT);
+      const slotId = ctx.addSlot(
+        attrSlotName(key, walkCtx),
+        // Same typing rule as the function-valued arm above: a boolean must
+        // land in a TYPE_BOOL slot or `disabled="false"` ships as DISABLED.
+        typeof evaluated === 'boolean' ? TYPE_BOOL : TYPE_TEXT,
+        SOURCE_CLIENT,
+        defaultBytesFor(evaluated),
+      );
       dynAttrs.push({ keyIdx, slotId });
     }
   }
@@ -1170,6 +1319,67 @@ function emitChild(
         return;
       }
     }
+  }
+
+  // A bare signal read in child position: h('span', null, name()).
+  // Without this it reached walkCallExpression, which sees an identifier
+  // callee, fails to resolve `name` to a component file, and ships an island
+  // shell named after the signal. Bound to the signal's OWN slot, exactly as
+  // the `() => name()` arrow form is.
+  // Verified by: packages/compiler/tests/ir-walk.test.ts > "binds a bare signal-read child to the signal's own slot"
+  if (
+    t.isCallExpression(child)
+    && t.isIdentifier(child.callee)
+    && child.arguments.length === 0
+  ) {
+    const binding = lookupSignal(walkCtx.signalScope, child.callee.name);
+    if (binding) {
+      ctx.recordSlotRef(binding.slotId);
+      const markerId = ctx.nextMarker();
+      ctx.emit(OP_DYN_TEXT);
+      ctx.emitU16(binding.slotId);
+      ctx.emitU16(markerId);
+      return;
+    }
+  }
+
+  // A child expression the compiler can FOLD to a value.
+  //
+  // `'Player ' + name()` is not a reactive binding — the client evaluates it
+  // once, while h() is building the tree — but it is not opaque either: every
+  // operand is a literal, a module constant, or a signal whose default is in
+  // lexical scope, so the server can render exactly what the client's first
+  // paint shows. This arm did not exist, so the whole element degraded to an
+  // empty island shell that rendered nothing until the bundle hydrated.
+  // Verified by: packages/compiler/tests/ir-walk.test.ts > "folds a concatenated child into a DYN_TEXT slot with an SSR default"
+  //
+  // It sits ABOVE the call-expression dispatch because some evaluable
+  // expressions ARE calls: `String(count())` has a capitalized callee, so the
+  // sub-component path below reads it as a component and ships an
+  // `ISLAND_START String` shell for what is really the text "3".
+  // Verified by: packages/compiler/tests/ir-walk.test.ts > "folds a String() cast child instead of islanding it as a component"
+  const folded = evalNode(child, evalEnv(walkCtx));
+  if (folded !== undefined) {
+    // A folded null or boolean emits NOTHING, because that is what the client
+    // does with one: `h()` drops `null`, `true` and `false` children outright
+    // (formajs src/dom/element.ts) and so does the client transform's
+    // analyzeChild. Rendering "true" server-side would put text on the page
+    // the client has no counterpart for. Same rule as Rule 12, extended to
+    // the forms that only become null/boolean after evaluation
+    // (`ready() && 'Go'` with ready defaulting to false).
+    if (folded !== null && typeof folded !== 'boolean') {
+      const slotId = ctx.addSlot(
+        textSlotName(childIndex, walkCtx),
+        TYPE_TEXT,
+        SOURCE_CLIENT,
+        defaultBytesFor(folded),
+      );
+      const markerId = ctx.nextMarker();
+      ctx.emit(OP_DYN_TEXT);
+      ctx.emitU16(slotId);
+      ctx.emitU16(markerId);
+    }
+    return;
   }
 
   // Non-h() call expressions (createShow, sub-components, etc.)

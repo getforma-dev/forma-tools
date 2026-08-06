@@ -158,6 +158,7 @@ A page the compiler fully understands prints nothing.
 |---|---|
 | `h('div', { class: 'x' }, 'text')` | Static markup |
 | `h('div', { class: () => cls() }, () => text())` | Slot-backed attribute / text |
+| `h('span', { title: 'Enable ' + name() }, 'Player ' + name())` | Same, for a value computed EAGERLY (no `() => …`): folded to the value the client's first paint shows — see below |
 | `createShow` / a ternary inside `() => …` | `SHOW_IF` with both branches |
 | `createList(src, keyFn, (row) => …)` | `LIST` + per-row `PROP`s |
 | `h(Fragment, null, …)` / `Fragment(…)` | Children inline, no wrapper — every child kind, same as an element's |
@@ -346,7 +347,45 @@ Two safety rules limit folding:
 - **Shadowing** — a module const whose name is *also declared in any nested scope* (a component-local `const cls = ...`, a function parameter, a catch binding) is never folded, even when the shadowing declaration is in an unrelated function. The walker has no scope tracking, so folding a shadowed name could bake the module value into a static attribute with no slot — unrecoverable client-side. Shadowed names fall through to the unresolvable-identifier warning below.
 - **64KB limit** — FMIR string-table entries carry a u16 byte-length prefix, so a const that folds to more than 65535 UTF-8 bytes (e.g. a huge inline SVG path) is dropped from folding with a build warning. The binary emitter also hard-fails (with a descriptive error, caught and downgraded to the no-IR fallback) rather than ever writing a corrupt string table.
 
-An attribute value that is a bare identifier or member expression the compiler **cannot** resolve statically now emits a build warning — SSR would render that attribute empty, which previously failed silently. Fix by inlining the literal, using a module-level `const`, or wrapping in a function for a reactive value.
+### Eagerly-computed values (no `() => …`)
+
+A value a page computes once, in place, is folded to the value the client's
+first paint shows — in **child** and **attribute** position alike:
+
+```ts
+h("span", null, "Player " + name())                 // → DYN_TEXT, default "Player Xbox"
+h("button", { title: "Enable " + name() }, "Enable") // → title="Enable Xbox"
+h("b", { title: "Slot " + count() + " ready" })      // → title="Slot 3 ready"
+```
+
+This runs the same evaluator as a `() => …` binding — concatenation, template
+literals, `?:`, `&&`/`||`, `!`, arithmetic and comparison over same-typed
+operands, `String()`/`Number()` casts, TS `as`/`!` annotations, module string
+constants, and signal defaults from the lexical scope chain.
+
+Two things to know about the emission:
+
+- It is **not a reactive binding.** The client evaluates the expression once,
+  while `h()` builds the element, so the value never updates on its own. The
+  slot exists so a *server* can inject a value; wrap the expression in
+  `() => …` if it must track the signal.
+- A value that folds to `null`, `true` or `false` emits **nothing** in child
+  position and omits the attribute — matching `h()`, which drops those
+  children and does not write a false attribute.
+
+An expression the compiler **cannot** fold — an operand it cannot resolve, an
+object or array literal, a call it cannot follow — warns, naming the file, the
+construct and the consequence. In attribute position that consequence is
+permanent, not cosmetic: the attribute is missing from the server-rendered HTML
+*and* hydration skips non-function prop values as "already in the SSR HTML", so
+it never appears at all. Fix by inlining the literal, using a module-level
+`const`, or wrapping in a function for a reactive value.
+
+The same is true of four prop shapes the compiler cannot see into, all of which
+now warn: `{...spread}` props, a computed key (`{ [k]: v }`), a method-valued
+prop (`{ title() {…} }`), and a props argument that is not an object literal
+(`h('div', props, …)` — which drops *every* attribute on the element).
+`dangerouslySetInnerHTML` is deliberately not server-rendered, and now says so.
 
 ## Component Analyzer
 

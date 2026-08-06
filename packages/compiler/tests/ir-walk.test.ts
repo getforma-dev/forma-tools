@@ -461,7 +461,7 @@ describe('IR Walk Engine', () => {
       ]);
       expect(getStrings(binary)).toEqual(['div', 'class', 'attr:class']);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`attribute 'class' on <div> references 'cls'`),
+        expect.stringContaining(`attribute 'class' on <div> is cls, which the compiler cannot evaluate`),
       );
       warnSpy.mockRestore();
     });
@@ -487,7 +487,7 @@ describe('IR Walk Engine', () => {
         { id: 0, name: 'attr:d', nameIdx: 2, typeHint: 0x01, source: 0x01, default: '' },
       ]);
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(`attribute 'd' on <path> references 'silBody'`),
+        expect.stringContaining(`attribute 'd' on <path> is silBody, which the compiler cannot evaluate`),
       );
       warnSpy.mockRestore();
     });
@@ -1097,17 +1097,23 @@ describe('IR Walk Engine', () => {
       expect(parseOpcodeList(binary)).toEqual(['OPEN_TAG div', 'TEXT "text"', 'CLOSE_TAG div']);
     });
 
-    it('does not skip true children (emits an island)', () => {
-      const binary = walkAndEmit(`h('div', null, true)`);
+    it('skips true children, the same as false', () => {
+      // `h()` drops `null`, `true` and `false` children outright
+      // (formajs src/dom/element.ts), so the server must emit nothing for
+      // them too. This used to ship an empty island shell — a `<div>` the
+      // client has no counterpart for, and one more fallback island in the
+      // page's island table.
+      const binary = walkAndEmit(`h('div', null, true, 'text')`);
+      expect(parseOpcodeList(binary)).toEqual(['OPEN_TAG div', 'TEXT "text"', 'CLOSE_TAG div']);
+    });
 
-      expect(parseOpcodeList(binary)).toEqual([
-        'OPEN_TAG div',
-        'ISLAND_START island_0#0',
-        'OPEN_TAG div',
-        'CLOSE_TAG div',
-        'ISLAND_END island_0#0',
-        'CLOSE_TAG div',
-      ]);
+    it('skips a child that only EVALUATES to false', () => {
+      // `ready() && 'Go'` with ready defaulting to false is the same nothing,
+      // reached one fold later. Emitting the island shell here put an empty
+      // <div> on the server-rendered page where the client renders nothing.
+      const { ctx, walkCtx } = withSignals(`const [ready] = createSignal(false);`);
+      const binary = walkIntoAndEmit(`h('div', null, ready() && 'Go', 'text')`, ctx, walkCtx);
+      expect(parseOpcodeList(binary)).toEqual(['OPEN_TAG div', 'TEXT "text"', 'CLOSE_TAG div']);
     });
   });
 
@@ -1425,6 +1431,155 @@ describe('IR Walk Engine', () => {
       });
 
       expect(attrDefault(binary, 'attr:d')).toBe('M10 20 L30 40');
+    });
+  });
+
+  // =========================================================================
+  // Eagerly-evaluated expressions: the same fold, OUTSIDE a function wrapper
+  //
+  // `'Player ' + name()` is what a page writes when the text is computed once
+  // rather than bound. The walker had a fold for the `() => …` form and none
+  // for this one, so the two halves of the same expression class diverged:
+  // in child position it shipped an empty island shell, and in attribute
+  // position it minted a slot with NO default and NO diagnostic — an
+  // attribute with no value, silently, which is how ksx's controls lost
+  // their tooltips for the whole life of that UI.
+  // =========================================================================
+
+  describe('eagerly-evaluated (non-function) expressions', () => {
+    const slotByName = (binary: Uint8Array, name: string) =>
+      getSlots(binary).find(s => s.name === name);
+
+    it('folds a concatenated child into a DYN_TEXT slot with an SSR default', () => {
+      const { ctx, walkCtx } = withSignals(`const [name] = createSignal('Xbox');`);
+      const binary = walkIntoAndEmit(`h('span', null, 'Player ' + name())`, ctx, walkCtx);
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG span',
+        'DYN_TEXT text:0 marker=0',
+        'CLOSE_TAG span',
+      ]);
+      expect(slotByName(binary, 'text:0')!.default).toBe('Player Xbox');
+      // …and did NOT degrade to the island shell it used to emit.
+      expect(getIslands(binary)).toEqual([]);
+    });
+
+    it('folds a concatenated attribute value into an SSR default', () => {
+      const { ctx, walkCtx } = withSignals(`const [name] = createSignal('Xbox');`);
+      const binary = walkIntoAndEmit(
+        `h('button', { title: 'Enable ' + name() }, 'Enable')`,
+        ctx,
+        walkCtx,
+      );
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG button',
+        'DYN_ATTR title -> attr:title',
+        'TEXT "Enable"',
+        'CLOSE_TAG button',
+      ]);
+      expect(slotByName(binary, 'attr:title')!.default).toBe('Enable Xbox');
+    });
+
+    it('keeps a numeric operand TYPED through a multi-operand concatenation', () => {
+      // The failure this pins is not "no default" but a WRONG one: a
+      // stringly-typed evaluator renders `count()` as an object or drops it,
+      // and the page ships "Slot [object Object] ready" or "Slot  ready".
+      const { ctx, walkCtx } = withSignals(`const [count] = createSignal(3);`);
+      const binary = walkIntoAndEmit(
+        `h('b', { title: 'Slot ' + count() + ' ready' }, 'ok')`,
+        ctx,
+        walkCtx,
+      );
+
+      expect(slotByName(binary, 'attr:title')!.default).toBe('Slot 3 ready');
+    });
+
+    it('folds arithmetic on a numeric signal without coercing it to a string', () => {
+      const { ctx, walkCtx } = withSignals(`const [count] = createSignal(3);`);
+      const binary = walkIntoAndEmit(`h('p', null, count() - 1)`, ctx, walkCtx);
+
+      expect(slotByName(binary, 'text:0')!.default).toBe('2');
+    });
+
+    it('folds a String() cast child instead of islanding it as a component', () => {
+      // `String` is capitalized, so the sub-component path claimed it and
+      // emitted `ISLAND_START String` — an island named after a built-in,
+      // which no client registry can ever hydrate.
+      const { ctx, walkCtx } = withSignals(`const [count] = createSignal(3);`);
+      const binary = walkIntoAndEmit(`h('p', null, String(count()))`, ctx, walkCtx);
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG p',
+        'DYN_TEXT text:0 marker=0',
+        'CLOSE_TAG p',
+      ]);
+      expect(slotByName(binary, 'text:0')!.default).toBe('3');
+      expect(getIslands(binary)).toEqual([]);
+    });
+
+    it("binds a bare signal-read child to the signal's own slot", () => {
+      // `h('span', null, name())` used to reach the sub-component resolver,
+      // which cannot find a file for `name` and shipped an island shell
+      // NAMED AFTER THE SIGNAL.
+      const { ctx, walkCtx } = withSignals(`const [name] = createSignal('Xbox');`);
+      const binary = walkIntoAndEmit(`h('span', null, name())`, ctx, walkCtx);
+
+      expect(parseOpcodeList(binary)).toEqual([
+        'OPEN_TAG span',
+        'DYN_TEXT name marker=0',
+        'CLOSE_TAG span',
+      ]);
+      expect(getIslands(binary)).toEqual([]);
+    });
+
+    it('folds a TypeScript cast rather than degrading on the annotation', () => {
+      const { ctx, walkCtx } = withSignals(`const [name] = createSignal('Xbox');`);
+      const binary = walkIntoAndEmit(
+        `h('span', { title: ('Player ' + name()) as string })`,
+        ctx,
+        walkCtx,
+      );
+
+      expect(slotByName(binary, 'attr:title')!.default).toBe('Player Xbox');
+    });
+
+    it('gives an eagerly-folded boolean attribute a BOOL slot, not text "false"', () => {
+      const { ctx, walkCtx } = withSignals(`const [busy] = createSignal(false);`);
+      const binary = walkIntoAndEmit(`h('button', { disabled: !!busy() })`, ctx, walkCtx);
+
+      const slot = slotByName(binary, 'attr:disabled')!;
+      expect(slot.typeHint).toBe(0x02); // TYPE_BOOL
+      expect(slot.default).toBe('false');
+    });
+
+    it('still degrades — loudly — when an operand cannot be resolved', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { ctx, walkCtx } = withSignals(`const [name] = createSignal('Xbox');`);
+      const binary = walkIntoAndEmit(
+        `h('span', null, 'Player ' + lookupName())`,
+        ctx,
+        { ...walkCtx, sourceFile: 'src/pages/Roster.ts' },
+      );
+
+      expect(getIslands(binary)).toHaveLength(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('src/pages/Roster.ts'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not fold a loose == comparison it cannot evaluate exactly', () => {
+      // `null` and `undefined` are the SAME value to this evaluator, and
+      // loose equality is the one operator whose answer depends on telling
+      // them apart. Warning beats guessing.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { ctx, walkCtx } = withSignals(`const [sel] = createSignal(null);`);
+      const binary = walkIntoAndEmit(`h('p', { title: sel() == 0 })`, ctx, walkCtx);
+
+      expect(slotByName(binary, 'attr:title')!.default).toBe('');
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
     });
   });
 
