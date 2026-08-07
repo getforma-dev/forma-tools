@@ -230,9 +230,13 @@ specs in `admin/e2e/smoke.spec.ts`.
 
 ## 7. Scope, hazards, and what to leave alone
 
-- **`ksx` also consumes this compiler.** Any change here ships to it. Keep the
-  change additive: a signal that cannot be resolved must behave exactly as it
-  does today, warning included.
+- **This is platform infrastructure, not a two-consumer package.** `ksx` and
+  `gatewasm` consume it today and more products are intended to build on it, so
+  a regression here fans out rather than staying local. Keep the change strictly
+  additive: a signal that cannot be resolved must behave exactly as it does
+  today, warning included, and no existing IR output should change byte-for-byte
+  except where a default is now correctly folded. Diffing emitted `.ir` for an
+  unrelated app before and after is a cheap way to prove that.
 - **Namespace and default imports** (`import * as store`, `import store from`)
   are out of scope for a first pass. Skipping them is correct; silently
   half-resolving them is not.
