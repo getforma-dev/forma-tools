@@ -867,3 +867,87 @@ describe('generateRealIr — diagnostics when a page cannot be resolved', () => 
     expect(warned).toContain('does not resolve to a readable file');
   });
 });
+
+// ===========================================================================
+// Imported signal defaults: the store.ts architecture folds
+// ===========================================================================
+
+describe('generateRealIr — signals imported from a store module', () => {
+  it('folds the login page shape: an href ternary over an imported signal', () => {
+    // The shape that shipped a dead link: the signal lives in store.ts with a
+    // literal '' default, the page reads it in an href ternary. Before the
+    // fix the attribute slot had NO default, so the server omitted href and
+    // the link was dead until hydration.
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount } from 'formajs';
+        import { LoginPage } from './login-page';
+        mount(() => LoginPage(), '#app');
+      `,
+      'store.ts': `
+        import { createSignal } from 'formajs';
+        export const [ownerInviteToken, setOwnerInviteToken] = createSignal('');
+      `,
+      'login-page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function LoginPage() {
+          return h('div', { id: 'app' },
+            h('a', {
+              href: () => ownerInviteToken()
+                ? '/platform/onboarding?owner_invite=' + encodeURIComponent(ownerInviteToken())
+                : '/platform/onboarding',
+            }, 'Start onboarding'));
+        }
+      `,
+    }, 'app.ts'));
+
+    // The signal's own slot carries the store's literal default…
+    expect(slotByName(result.binary, 'ownerInviteToken')!.default).toBe('');
+    // …and the attribute slot carries the folded else-branch, so the
+    // server-rendered <a> has its href with JavaScript off.
+    expect(slotByName(result.binary, 'attr:href')!.default).toBe('/platform/onboarding');
+    // The whole point: no "cannot evaluate" degradation for this attribute.
+    expect(warnings()).not.toContain("attribute 'href'");
+  });
+
+  it('a page and an island importing the same store signal share ONE slot', () => {
+    const result = emitReal(writeProject({
+      'app.ts': `
+        import { mount, activateIslands } from 'formajs';
+        import { Page } from './page';
+        import { Badge } from './badge';
+        activateIslands({ Badge });
+        mount(() => Page(), '#app');
+      `,
+      'store.ts': `
+        import { createSignal } from 'formajs';
+        export const [status, setStatus] = createSignal('idle');
+      `,
+      'page.ts': `
+        import { h } from 'formajs';
+        import { status } from './store';
+        import { Badge } from './badge';
+        export function Page() {
+          return h('main', { id: 'app' }, h('b', null, () => status()), Badge());
+        }
+      `,
+      'badge.ts': `
+        import { h } from 'formajs';
+        import { status } from './store';
+        export function Badge() {
+          return h('i', null, () => status());
+        }
+      `,
+    }, 'app.ts'));
+
+    // One signal, one slot — the page's binding and the island's binding both
+    // resolve to the store module's frame, so a server injecting 'status'
+    // reaches every reader. 'status#2' existing would be the one-signal-two-
+    // slots hazard.
+    const statusSlots = slotNames(result.binary).filter((n) => n.startsWith('status'));
+    expect(statusSlots).toEqual(['status']);
+    expect(slotByName(result.binary, 'status')!.default).toBe('idle');
+    expect(warnings()).toBe('');
+  });
+});

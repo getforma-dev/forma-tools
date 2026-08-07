@@ -18,18 +18,23 @@ export {
 } from './component-analyzer.js';
 export {
   collectSignalDeclarations,
+  createSignalImportResolver,
   enterComponentScope,
   enterSignalScope,
   lookupSignal,
   newSignalRegistry,
+  resolveModuleSignalImports,
+  type ResolvedSignalImport,
   type SignalBinding,
   type SignalDefault,
+  type SignalImportResolver,
   type SignalRegistry,
   type SignalScope,
 } from './signal-scope.js';
 export {
   resolveExportedConstant,
   resolveExportedFunction,
+  resolveExportedSignal,
   resolveImportedConstant,
   readImportBindings,
   returnExpressionOf,
@@ -39,6 +44,8 @@ export {
   type ImportBinding,
   type ResolveConstantOptions,
   type ResolveExportOptions,
+  type ResolveSignalOptions,
+  type SignalExportLookup,
 } from './export-resolver.js';
 export {
   fsModuleLoader,

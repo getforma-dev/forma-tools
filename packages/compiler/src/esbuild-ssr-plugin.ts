@@ -21,9 +21,11 @@ import { readImportBindings, resolveExportedFunction } from './export-resolver';
 import { fsModuleLoader, loadComponentSource, resolveFilePath } from './module-loader';
 import {
   collectSignalDeclarations,
+  createSignalImportResolver,
   enterComponentScope,
   enterSignalScope,
   newSignalRegistry,
+  resolveModuleSignalImports,
   type SignalScope,
 } from './signal-scope';
 import { moduleConstantScope, walkHTree, walkCallExpression, type WalkContext } from './ir-walk';
@@ -174,6 +176,21 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       return null;
     }
 
+    // Follows imports so a signal declared in a store module folds on this
+    // page. One per page — its caches keep resolution to one read + parse per
+    // module however many files import from it. The injected reader judges an
+    // imported signal by exactly the rules a local one gets: same collector,
+    // same module-const folding.
+    const signalImports = createSignalImportResolver(fsModuleLoader, (source, filePath) =>
+      collectSignalDeclarations(
+        (parse(source, PARSE_OPTS) as unknown as t.File).program.body,
+        {
+          filePath,
+          constants: moduleConstantScope(source, filePath, fsModuleLoader).stringConstants,
+        },
+      ),
+    );
+
     // ── Handle inline return from block-body mount() (Pattern 3) ──
     if (entryInfo.componentName === '__inline__' && entryInfo.inlineReturnNode) {
       const ctx = new IrEmitContext();
@@ -205,6 +222,16 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         ctx,
         signalRegistry,
       );
+      // An inline-mount page can keep its signals in a store module too — the
+      // module frame gets the same import resolution enterComponentScope does.
+      resolveModuleSignalImports(
+        signalScope,
+        entryAst as unknown as t.File,
+        entryPointPath,
+        signalImports,
+        ctx,
+        signalRegistry,
+      );
       if (entryInfo.inlineMountBody) {
         signalScope = enterSignalScope(
           signalScope,
@@ -225,6 +252,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
         resolveImportedConstant,
         signalScope,
         signalRegistry,
+        signalImports,
         resolveComponent,
         loadModule: fsModuleLoader,
         visited: new Set(),
@@ -320,6 +348,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       constants: stringConstants,
       ctx,
       registry: signalRegistry,
+      imports: signalImports,
     });
 
     // 8. Build resolve callback for sub-components
@@ -337,6 +366,7 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
       resolveImportedConstant,
       signalScope,
       signalRegistry,
+      signalImports,
       resolveComponent,
       loadModule: fsModuleLoader,
       visited: new Set(),

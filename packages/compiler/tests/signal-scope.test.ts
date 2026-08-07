@@ -14,11 +14,14 @@ import type * as T from '@babel/types';
 
 import {
   collectSignalDeclarations,
+  createSignalImportResolver,
   enterComponentScope,
   enterSignalScope,
   lookupSignal,
   newSignalRegistry,
+  type SignalImportResolver,
 } from '../src/signal-scope';
+import { type ModuleLoader } from '../src/module-loader';
 import { IrEmitContext } from '../src/ir-emit';
 import { getSlots } from './helpers/fmir';
 
@@ -72,6 +75,29 @@ describe('collectSignalDeclarations — evaluating initial values', () => {
       ['count', { type: 'number', default: 0 }],
       ['price', { type: 'number', default: 9.99 }],
       ['error', { type: 'null', default: null }],
+    ]);
+    expect(warnings()).toBe('');
+  });
+
+  it('unwraps TypeScript cast expressions down to their literal', () => {
+    // `createSignal(null as string | null)` is how a store widens a signal's
+    // type — gatewasm's login store declares five signals this way. The cast
+    // is erased at runtime; refusing to look through it cost each one its
+    // slot, and every binding that read one degraded.
+    const result = collect(`
+      import { createSignal } from 'formajs';
+      const [error] = createSignal(null as string | null);
+      const [mode] = createSignal('idle' as 'idle' | 'busy');
+      const [count] = createSignal(0 as const);
+      const [label] = createSignal('ok' satisfies string);
+      const [flag] = createSignal(false!);
+    `);
+    expect([...result]).toEqual([
+      ['error', { type: 'null', default: null }],
+      ['mode', { type: 'text', default: 'idle' }],
+      ['count', { type: 'number', default: 0 }],
+      ['label', { type: 'text', default: 'ok' }],
+      ['flag', { type: 'bool', default: false }],
     ]);
     expect(warnings()).toBe('');
   });
@@ -396,5 +422,191 @@ describe('enterComponentScope', () => {
       export function Card() { return h('div', null); }
     `, 'Card', `const [pageOnly] = createSignal('page');`);
     expect(lookupSignal(scope, 'pageOnly')).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// Imported signals: a default declared in another module folds here
+// ===========================================================================
+
+describe('enterComponentScope — imported signals', () => {
+  /** In-memory module loader, keyed by bare specifier (same shape as
+   *  export-resolver.test.ts). */
+  function loaderFor(files: Record<string, string>): ModuleLoader {
+    return (_fromFile, importPath) => {
+      for (const candidate of [importPath, `${importPath}.ts`, `${importPath}/index.ts`]) {
+        if (candidate in files) return { path: candidate, source: files[candidate]! };
+      }
+      return null;
+    };
+  }
+
+  /**
+   * Component scope of `entry` with imports followed across `files`.
+   * Pass `shared` to enter a second component against the same page state,
+   * which is how slot identity across importers is observed.
+   */
+  function importScope(
+    files: Record<string, string>,
+    entry: string,
+    fnName: string,
+    shared?: {
+      ctx: IrEmitContext;
+      registry: ReturnType<typeof newSignalRegistry>;
+      imports: SignalImportResolver;
+    },
+  ) {
+    const ctx = shared?.ctx ?? new IrEmitContext();
+    const registry = shared?.registry ?? newSignalRegistry();
+    const imports = shared?.imports ?? createSignalImportResolver(
+      loaderFor(files),
+      (source, filePath) =>
+        collectSignalDeclarations(
+          (parse(source, PARSE_OPTS).program.body) as T.Statement[],
+          { filePath },
+        ),
+    );
+    const ast = parse(files[entry]!, PARSE_OPTS) as unknown as T.File;
+
+    let fn: any = null;
+    const visit = (node: any): void => {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'FunctionDeclaration' && node.id?.name === fnName) fn = node;
+      if (node.type === 'VariableDeclarator' && node.id?.name === fnName) fn = node.init;
+      for (const key of Object.keys(node)) {
+        const child = (node as any)[key];
+        if (Array.isArray(child)) child.forEach(visit);
+        else if (child && typeof child === 'object' && child.type) visit(child);
+      }
+    };
+    visit(ast.program);
+
+    return {
+      ctx, registry, imports,
+      scope: enterComponentScope({
+        ast, fn, fnName, filePath: entry, ctx, registry, imports,
+      }),
+    };
+  }
+
+  const STORE = `
+    import { createSignal } from 'formajs';
+    export const [ownerInviteToken, setOwnerInviteToken] = createSignal('');
+  `;
+
+  it('folds an imported signal\'s literal default', () => {
+    // The gatewasm shape: the signal lives in store.ts, the page reads it.
+    const { ctx, scope } = importScope({
+      './store.ts': STORE,
+      './page.ts': `
+        import { createSignal, h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+
+    const binding = lookupSignal(scope, 'ownerInviteToken');
+    expect(binding).toBeDefined();
+    expect(binding!.default).toEqual({ type: 'text', default: '' });
+    expect(getSlots(ctx.toBinary()).map((s) => s.name)).toContain('ownerInviteToken');
+  });
+
+  it('two files importing the same signal resolve to ONE slot', () => {
+    const files = {
+      './store.ts': STORE,
+      './a.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function A() { return h('a', null); }
+      `,
+      './b.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function B() { return h('b', null); }
+      `,
+    };
+    const first = importScope(files, './a.ts', 'A');
+    const second = importScope(files, './b.ts', 'B', first);
+
+    const a = lookupSignal(first.scope, 'ownerInviteToken')!;
+    const b = lookupSignal(second.scope, 'ownerInviteToken')!;
+    expect(a.slotId).toBe(b.slotId);
+    // One signal, one slot — not ownerInviteToken plus ownerInviteToken#2.
+    expect(getSlots(first.ctx.toBinary()).filter((s) => s.name.startsWith('ownerInviteToken')))
+      .toHaveLength(1);
+  });
+
+  it('a renamed import resolves under its local name', () => {
+    const { scope } = importScope({
+      './store.ts': STORE,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken as tok } from './store';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+
+    const binding = lookupSignal(scope, 'tok');
+    expect(binding).toBeDefined();
+    // The slot belongs to the defining module's name, not the alias.
+    expect(binding!.slotName).toBe('ownerInviteToken');
+    expect(binding!.default).toEqual({ type: 'text', default: '' });
+  });
+
+  it('a re-exported signal resolves through the barrel', () => {
+    const files = {
+      './store.ts': STORE,
+      './index.ts': `export { ownerInviteToken } from './store';`,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './index';
+        export function Page() { return h('a', null); }
+      `,
+      './direct.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function Direct() { return h('a', null); }
+      `,
+    };
+    const viaBarrel = importScope(files, './page.ts', 'Page');
+    const direct = importScope(files, './direct.ts', 'Direct', viaBarrel);
+
+    const b1 = lookupSignal(viaBarrel.scope, 'ownerInviteToken');
+    expect(b1).toBeDefined();
+    expect(b1!.default).toEqual({ type: 'text', default: '' });
+    // Barrel or not, it is the same signal in the same defining module.
+    expect(b1!.slotId).toBe(lookupSignal(direct.scope, 'ownerInviteToken')!.slotId);
+  });
+
+  it('an import cycle terminates instead of recursing', () => {
+    const { scope } = importScope({
+      './a.ts': `export { s } from './b';`,
+      './b.ts': `export { s } from './a';`,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { s } from './a';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 's')).toBeUndefined();
+  });
+
+  it('a non-literal initialiser still degrades with the existing diagnostic', () => {
+    // The fix must not invent a default it cannot honour: no binding, and the
+    // collector's existing warning still names the signal and the cause.
+    const { scope } = importScope({
+      './store.ts': `
+        import { createSignal } from 'formajs';
+        export const [x, setX] = createSignal(compute());
+      `,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { x } from './store';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+
+    expect(lookupSignal(scope, 'x')).toBeUndefined();
+    expect(warnings()).toContain("signal 'x' is initialized with a CallExpression");
   });
 });

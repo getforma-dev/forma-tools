@@ -53,6 +53,7 @@ the same byte. Only the Rust side turns the wrong byte into missing rows.
 | `sub-component-scopes` | signals declared in the four scopes the old hand-written extractors did not look in, plus the same-name **collision** rule and a truthy `SHOW_IF` default |
 | `eager-concat` | expressions evaluated EAGERLY — `'Player ' + name()` with no `() => …` wrapper — in **child** and **attribute** position, including a multi-operand concat mixing a string and a **number** |
 | `imported-const-table` | Rule 9's spread unroll over tables declared in **another module** — inside a registered island, through an inert page↔island import cycle, and through a barrel that **aliases** the export |
+| `imported-signal-defaults` | signal defaults declared in **another module** (the store.ts architecture): an href **ternary** folding an imported signal's `''` default into the attribute's SSR value, and page + island reading the same store signal — one through an **aliasing barrel** — sharing **one** slot |
 
 ### Why `eager-concat` exists
 
@@ -129,6 +130,27 @@ It is in `RESOLUTION_CASES` on the Rust side for the same reason `jsx-page` is:
 the golden alone would not catch a relapse, because an island shell is a
 perfectly valid module and `UPDATE_GOLDEN` would bless it. That assertion fails
 on the minted `island_<n>` first.
+
+### Why `imported-signal-defaults` exists
+
+The store.ts architecture — signals declared in one module, read from pages
+and islands — is the one Forma's own docs recommend, and the compiler could
+not fold a single signal-backed binding across that file boundary: the scope
+chain was built from each file's own program body, so an imported signal had
+no binding, no named slot, and no SSR default. gatewasm measured 158 such
+degradations across 17 files, including the login page's onboarding link
+shipping with no `href` for months.
+
+The case is that shape: `store.ts` declares two signals with literal defaults,
+`page.ts` folds one into an href ternary's SSR default and reads the other
+directly, and the registered island `badge.ts` reads the SAME signal through a
+barrel that aliases it. The slot table having exactly one `status` slot is the
+point — `status#2` is the one-signal-two-slots hazard, where name-addressed
+injection reaches the page's copy and leaves the island's stale.
+
+It is in `RESOLUTION_CASES` on the Rust side too: a relapse leaves the island
+a valid empty shell and the href slot defaultless, both of which a regenerated
+golden would bless without the island-and-slots assertion failing first.
 
 ### Why `jsx-page` and `barrel-exports` exist
 
