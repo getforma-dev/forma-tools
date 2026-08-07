@@ -188,6 +188,34 @@ Two details worth deciding explicitly rather than by accident:
 
 ## 6. How to verify
 
+**Running anything in this repo.** It is an npm workspace:
+
+```bash
+npm ci                                   # root — installs all workspaces
+npm test                                 # every workspace
+npm run test -w packages/compiler        # just the compiler (vitest)
+npm run test:watch -w packages/compiler  # while iterating
+npm run build -w packages/compiler       # required before `npm link` below
+```
+
+**The golden corpus will fail, and that is the point.** `packages/compiler/ir-corpus`
+holds committed `.ir` output, cross-checked against `forma`'s Rust walker
+(`forma/crates/forma-ir` has corpus tests over the same fixtures). Your fix
+changes emitted IR by design — a previously-omitted attribute now folds — so
+those goldens will diff.
+
+**Read every diff before regenerating.** Each one should be an attribute
+gaining a value it should always have had. Anything else — a changed slot id, a
+removed attribute, a reordered opcode — means the fix did more than intended.
+Only then:
+
+```bash
+npm run emit:corpus -w packages/compiler
+```
+
+Regenerating first and reading after is how a real regression gets committed as
+a "expected golden update".
+
 **In this repo.** Add cases to `packages/compiler/tests/signal-scope.test.ts`,
 which already has the vocabulary for this ("a nested helper sees the signals
 declared beside it"). At minimum:
