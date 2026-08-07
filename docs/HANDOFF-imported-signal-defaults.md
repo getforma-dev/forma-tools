@@ -204,6 +204,25 @@ Mutation-check each: revert the fix and confirm the test goes red. Three tests
 written during the gatewasm work looked correct and could not fail — worth
 assuming yours might too until you have seen them fail.
 
+**Getting your change into gatewasm at all.** `gatewasm` consumes the
+*published* `@getforma/compiler`, not your working copy — so editing this repo
+and rebuilding gatewasm changes nothing, with no error to explain why. Link it
+first:
+
+```bash
+cd forma-tools/packages/compiler && npm run build && npm link
+cd gatewasm/admin && npm link @getforma/compiler
+npm run build:ssr        # now runs YOUR compiler
+```
+
+Undo with `npm unlink @getforma/compiler && npm ci` before committing anything
+in gatewasm, so its lockfile never records a linked package.
+
+Only once it works linked: tag `compiler-v0.3.2` from the CLI (that is what
+triggers publishing — there is no GitHub Release step), then bump
+`gatewasm/admin/package.json` and re-record its IR baseline in the same commit,
+so the two can never disagree about how many degradations are expected.
+
 **End to end, in gatewasm.** This is the real proof:
 
 ```bash
