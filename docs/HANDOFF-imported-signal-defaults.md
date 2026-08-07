@@ -2,7 +2,14 @@
 
 **Repo:** `getforma-dev/forma-tools`, package `@getforma/compiler` (currently 0.3.1)
 **Written:** 2026-08-07, from a gatewasm SSR migration that stalled on this.
-**Status:** diagnosed, not started. No code changed in this repo.
+**Status:** ✅ SHIPPED in 0.3.2 (2026-08-07). Implemented as specified — see the
+0.3.2 CHANGELOG entry for what landed, including one cause this document did
+not know about: gatewasm's stores wrap literal defaults in TypeScript casts
+(`createSignal(null as string | null)`), which the evaluator also refused and
+now unwraps. Two corrections to §6/§7 discovered during implementation: the
+module loader does NOT cache reads or parses (the fix threads its own
+page-level memo), and the golden corpus is compared in the `forma` repo's
+`fmir-contract` CI job, not by a local vitest. Kept for the diagnosis record.
 
 You are picking up a single, well-bounded compiler gap. Everything below was
 verified by reading the source and by reproducing the symptom in a real app;

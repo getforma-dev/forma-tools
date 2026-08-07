@@ -45,6 +45,7 @@ import {
   lookupSignal,
   newSignalRegistry,
   type SignalDefault,
+  type SignalImportResolver,
   type SignalRegistry,
   type SignalScope,
 } from './signal-scope.js';
@@ -477,6 +478,10 @@ export interface WalkContext {
   /** Page-wide signal slot-name occurrences and scope memo. Same eager-init
    *  and by-reference sharing rules as listNames. */
   signalRegistry?: SignalRegistry;
+  /** Follows a module's imports so a signal declared in a store file folds
+   *  wherever it is read. Created once per page (its caches are page-wide);
+   *  absent = imports are not followed. */
+  signalImports?: SignalImportResolver;
   /** Path of the file whose tree is currently being walked. Only used to name
    *  the file in build diagnostics — nested walks (sub-components, islands)
    *  carry the resolved component's own path so a warning points at the file
@@ -674,6 +679,7 @@ function inlinedWalkContext(
       // A helper declared inside another function is only reachable from its
       // own file, and the caller's chain is then its lexical environment.
       callerScope: sub.filePath === walkCtx.sourceFile ? walkCtx.signalScope ?? null : null,
+      imports: walkCtx.signalImports,
     }),
     sourceFile: sub.filePath,
     visited,

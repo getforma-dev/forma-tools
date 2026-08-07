@@ -57,7 +57,13 @@ import {
   SLOT_TYPE_NUMBER,
   SLOT_TYPE_TEXT,
 } from './ir-emit.js';
-import type { ComponentFunction } from './export-resolver.js';
+import {
+  readImportBindings,
+  resolveExportedSignal,
+  type ComponentFunction,
+  type SignalExportLookup,
+} from './export-resolver.js';
+import type { ModuleLoader } from './module-loader.js';
 import { uniqueName } from './utils.js';
 
 // ---------------------------------------------------------------------------
@@ -192,6 +198,18 @@ function evaluateSignalDefault(
   }
 
   if (t.isParenthesizedExpression(node)) {
+    return evaluateSignalDefault(node.expression, constants);
+  }
+
+  // `createSignal(null as string | null)` — the way a store widens a signal's
+  // type. Casts are erased at runtime, so the literal underneath is the
+  // default; refusing to look through one cost the signal its slot.
+  if (
+    t.isTSAsExpression(node)
+    || t.isTSTypeAssertion(node)
+    || t.isTSSatisfiesExpression(node)
+    || t.isTSNonNullExpression(node)
+  ) {
     return evaluateSignalDefault(node.expression, constants);
   }
 
@@ -449,6 +467,10 @@ export interface ComponentScopeInput {
    *  component's lexical environment. Pass null when the component comes from
    *  another file: that file's module scope is then the whole chain. */
   callerScope?: SignalScope | null;
+  /** Follows this module's imports so a signal declared in another file can
+   *  fold here. Absent = imports are not followed (the pre-fix behavior).
+   *  Create one per page with `createSignalImportResolver` and share it. */
+  imports?: SignalImportResolver;
 }
 
 /**
@@ -470,6 +492,10 @@ export function enterComponentScope(input: ComponentScopeInput): SignalScope {
     registry,
   );
 
+  if (input.imports) {
+    resolveModuleSignalImports(moduleScope, ast, filePath, input.imports, ctx, registry);
+  }
+
   const nested = fn ? !isProgramScopeFunction(ast, fn) : false;
   const parent = nested ? (input.callerScope ?? moduleScope) : moduleScope;
 
@@ -482,4 +508,135 @@ export function enterComponentScope(input: ComponentScopeInput): SignalScope {
     ctx,
     registry,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Imported signals: resolve a default declared in another module
+// ---------------------------------------------------------------------------
+
+/**
+ * Follows a module's imports to the signals they name in their DEFINING
+ * modules, so `import { tok } from './store'` folds the default that
+ * `store.ts` declares.
+ *
+ * Created once per page and shared by every scope entry on it: the caches are
+ * what keep resolution to one read + parse per module however many files
+ * import from it.
+ */
+export interface SignalImportResolver {
+  /**
+   * Every imported binding of `ast` that resolves to a signal with a
+   * statically evaluable default: local name → its defining module.
+   *
+   * Quiet by design. This runs eagerly over ALL imports — components, utils,
+   * types — and most of them are not signals, so a binding that does not
+   * resolve is simply skipped: the use site keeps today's degradation warning,
+   * which is the diagnostic that actually points at a consequence.
+   */
+  resolve(ast: T.File, filePath: string): Map<string, ResolvedSignalImport>;
+}
+
+export interface ResolvedSignalImport {
+  /** The module that declares the signal, after aliases and re-exports. */
+  definingPath: string;
+  /** The getter's name in the defining module. */
+  name: string;
+  /** The defining module's COMPLETE top-level signal declarations. The
+   *  `#module` frame is memoized on its first entry (`registry.frames`), so
+   *  whoever enters it first must enter it whole — entering with a partial
+   *  map would permanently hide the rest of that module's signals. */
+  declarations: Map<string, SignalDefault>;
+}
+
+export function createSignalImportResolver(
+  loadModule: ModuleLoader,
+  readSignals: (source: string, filePath: string) => Map<string, SignalDefault>,
+): SignalImportResolver {
+  /** One collect per module path, however many importers ask. */
+  const declarationsByPath = new Map<string, Map<string, SignalDefault>>();
+  const readSignalsCached = (source: string, filePath: string): Map<string, SignalDefault> => {
+    const cached = declarationsByPath.get(filePath);
+    if (cached) return cached;
+    const declarations = readSignals(source, filePath);
+    declarationsByPath.set(filePath, declarations);
+    return declarations;
+  };
+
+  /** One traversal per (importing file, specifier, imported name). */
+  const lookups = new Map<string, ResolvedSignalImport | null>();
+
+  return {
+    resolve(ast: T.File, filePath: string): Map<string, ResolvedSignalImport> {
+      const resolved = new Map<string, ResolvedSignalImport>();
+      for (const [localName, binding] of readImportBindings(ast)) {
+        // Namespace and default imports carry no declared name to chase —
+        // skipping them (rather than half-resolving) is the contract.
+        if (binding.imported === '*' || binding.imported === 'default') continue;
+        // The compiler follows relative imports only; `formajs` itself and
+        // every other package import is skipped without a read.
+        if (!binding.source.startsWith('.') && !binding.source.startsWith('/')) continue;
+
+        const key = `${filePath}>${binding.source}>${binding.imported}`;
+        let hit = lookups.get(key);
+        if (hit === undefined) {
+          hit = null;
+          const mod = loadModule(filePath, binding.source);
+          if (mod) {
+            const lookup: SignalExportLookup<SignalDefault> = resolveExportedSignal(
+              mod.source,
+              mod.path,
+              binding.imported,
+              { loadModule, readSignals: readSignalsCached },
+            );
+            if (lookup.kind === 'found' && lookup.declarations.has(lookup.name)) {
+              hit = {
+                definingPath: lookup.filePath,
+                name: lookup.name,
+                declarations: lookup.declarations,
+              };
+            }
+          }
+          lookups.set(key, hit);
+        }
+        if (hit) resolved.set(localName, hit);
+      }
+      return resolved;
+    },
+  };
+}
+
+/**
+ * Expose a module's resolved signal imports in its `#module` frame, under
+ * their local names, as the DEFINING module's bindings.
+ *
+ * The binding object is shared by reference with the defining module's frame —
+ * `enterSignalScope`'s memo on `${definingPath}#module` returns the same frame
+ * to every importer — so however many files import a signal, it is ONE slot,
+ * and a server injecting it by name reaches all of them. Minting a fresh
+ * binding here instead would be the one-signal-N-slots hazard the collision
+ * warning in `enterSignalScope` describes.
+ *
+ * A name the module declares itself always wins; an import under that name is
+ * a syntax error in JS anyway.
+ */
+export function resolveModuleSignalImports(
+  moduleScope: SignalScope,
+  ast: T.File,
+  filePath: string,
+  imports: SignalImportResolver,
+  ctx: IrEmitContext,
+  registry: SignalRegistry,
+): void {
+  for (const [localName, resolved] of imports.resolve(ast, filePath)) {
+    if (moduleScope.bindings.has(localName)) continue;
+    const definingScope = enterSignalScope(
+      null,
+      `${resolved.definingPath}#module`,
+      resolved.declarations,
+      ctx,
+      registry,
+    );
+    const binding = definingScope.bindings.get(resolved.name);
+    if (binding) moduleScope.bindings.set(localName, binding);
+  }
 }

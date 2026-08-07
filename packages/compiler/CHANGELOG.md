@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.2] - 2026-08-07
+
+### Fixed
+- **A signal declared in another module had no binding, no named slot and no SSR default — the store.ts architecture Forma's own docs recommend could not fold a single signal-backed attribute, conditional or text node.** `enterComponentScope` built a module frame from the file's own program body only, so `import { ownerInviteToken } from './store'` left every read of that signal degrading to "whatever is static" while hydration papered over it — invisible unless JavaScript was off, which is when a login page matters most. gatewasm measured **158 diagnostics across 17 files**, among them a platform login page whose "Start onboarding" link server-rendered with no `href` for months while the build printed the reason on every run.
+
+  A module's imports are now resolved to the signals they name in their DEFINING modules — through aliases (`import { x as y }`), re-export chains and `export *` barrels — reusing the export resolver's traversal (one import walker, one module loader, one cycle guard) rather than adding a second one, via a signal-flavoured `resolveExportedSignal` modelled on the constant-table resolver it sits beside. **Slot identity falls out of the frame memo:** an imported binding is resolved to the defining module's own frame and shared by reference, so however many files import a signal it is ONE slot, and a server injecting it by name reaches every reader — page and island alike. Namespace (`import * as store`) and default imports are skipped whole rather than half-resolved; a signal whose default the compiler cannot evaluate keeps today's degradation and its warning; resolution failures during the (quiet, eager) import scan change nothing at all. The 13 existing corpus `.ir` files are byte-identical — only a default that was always meant to fold now does.
+- **A literal default wrapped in a TypeScript cast was refused.** `createSignal(null as string | null)` is how a store widens a signal's type — gatewasm's login store declares five signals this way — and the cast is erased at runtime, so refusing it cost the signal its slot and every binding that read it. `as`, `satisfies`, non-null `!` and old-style `<T>` assertions now unwrap to the literal underneath, for local and imported signals alike.
+
+### Added
+- **FMIR corpus case `imported-signal-defaults`** — the store.ts shape: `store.ts` declares two signals with literal defaults, the page folds one into an href TERNARY's SSR default (the dead-link shape) and reads the other directly, and a REGISTERED ISLAND reads the same signal through a barrel that aliases it (`export { status as liveStatus }`). The golden's `@page defaults` regime carries `href="/platform/onboarding"` and `idle` in page text and island props from ONE `status` slot. It is in the Rust side's `RESOLUTION_CASES`: a relapse leaves the island a valid empty shell and the href slot defaultless, both of which `UPDATE_GOLDEN` would bless — the island-and-slots assertion fails first.
+
 ## [0.3.1] - 2026-08-06
 
 0.3.0 is tagged but was never published; these fixes ship in its place.
