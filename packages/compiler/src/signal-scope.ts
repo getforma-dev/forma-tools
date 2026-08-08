@@ -96,6 +96,15 @@ export interface SignalScope {
   key: string;
   bindings: Map<string, SignalBinding>;
   parent: SignalScope | null;
+  /** @internal Scope id without the parent prefix — names the file in
+   *  diagnostics minted after entry (lazy frames). */
+  scopeId?: string;
+  /** @internal Declarations not yet minted into slots. Only frames entered
+   *  lazily by import resolution carry this; a walk entry drains it. */
+  pending?: Map<string, SignalDefault>;
+  /** @internal Captured at lazy entry so pending declarations can mint
+   *  later. Page-scoped, same lifetime as the frame itself. */
+  mint?: { ctx: IrEmitContext; registry: SignalRegistry };
 }
 
 /**
@@ -396,30 +405,86 @@ export function enterSignalScope(
 ): SignalScope {
   const key = `${parent ? parent.key : ''}>${scopeId}`;
   const memoized = registry.frames.get(key);
-  if (memoized) return memoized;
-
-  const bindings = new Map<string, SignalBinding>();
-  for (const [name, sigDefault] of declarations) {
-    const slotName = uniqueName(registry.names, name);
-    if (slotName !== name) {
-      // The rename is correct — two scopes declaring `count` are two different
-      // signals and must not share a slot — but it is invisible in the source,
-      // and a server injecting `count` would fill only the first. Say so.
-      warnSignal(
-        scopeId.split('#')[0]!,
-        `signal '${name}' is also declared in another scope on this page, so this one gets `
-        + `the slot name '${slotName}' — inject it under that exact name. If the two are meant `
-        + `to be ONE signal, declare it once and import it rather than re-declaring it`,
-      );
-    }
-    const { typeHint, defaultBytes } = encodeSignalDefault(sigDefault);
-    const slotId = ctx.addSlot(slotName, typeHint, SLOT_SOURCE_CLIENT, defaultBytes, false);
-    bindings.set(name, { name, slotName, slotId, default: sigDefault });
+  if (memoized) {
+    // A frame first entered lazily by import resolution upgrades in place
+    // the moment the walk enters it as a real scope: every remaining
+    // declaration mints now, in declaration order, into the SAME frame —
+    // so a module that is both a store and a walked component keeps one
+    // slot per signal whichever entry happened first.
+    materializeAll(memoized);
+    return memoized;
   }
 
-  const scope: SignalScope = { key, bindings, parent };
+  const scope: SignalScope = { key, scopeId, bindings: new Map(), parent };
+  registry.frames.set(key, scope);
+  scope.pending = new Map(declarations);
+  scope.mint = { ctx, registry };
+  materializeAll(scope);
+  return scope;
+}
+
+/**
+ * Enter a defining module's frame WITHOUT minting slots — used by import
+ * resolution, which knows the full declaration map but not which signals the
+ * page actually reads. Only names that are later materialized (because some
+ * file imports them, or because the walk upgrades the frame) get slots, so
+ * an unread store signal costs nothing and cannot claim a slot name ahead of
+ * a component's own signal.
+ */
+function enterSignalScopeLazy(
+  scopeId: string,
+  declarations: Map<string, SignalDefault>,
+  ctx: IrEmitContext,
+  registry: SignalRegistry,
+): SignalScope {
+  const key = `>${scopeId}`;
+  const memoized = registry.frames.get(key);
+  if (memoized) return memoized;
+
+  const scope: SignalScope = {
+    key,
+    scopeId,
+    bindings: new Map<string, SignalBinding>(),
+    parent: null,
+    pending: new Map(declarations),
+    mint: { ctx, registry },
+  };
   registry.frames.set(key, scope);
   return scope;
+}
+
+/** Mint one pending declaration of `scope` into a slot-carrying binding. */
+function materializeBinding(scope: SignalScope, name: string): SignalBinding | undefined {
+  const existing = scope.bindings.get(name);
+  if (existing) return existing;
+  const sigDefault = scope.pending?.get(name);
+  if (sigDefault === undefined || !scope.mint) return undefined;
+  scope.pending!.delete(name);
+
+  const { ctx, registry } = scope.mint;
+  const slotName = uniqueName(registry.names, name);
+  if (slotName !== name) {
+    // The rename is correct — two scopes declaring `count` are two different
+    // signals and must not share a slot — but it is invisible in the source,
+    // and a server injecting `count` would fill only the first. Say so.
+    warnSignal(
+      (scope.scopeId ?? scope.key).split('#')[0]!,
+      `signal '${name}' is also declared in another scope on this page, so this one gets `
+      + `the slot name '${slotName}' — inject it under that exact name. If the two are meant `
+      + `to be ONE signal, declare it once and import it rather than re-declaring it`,
+    );
+  }
+  const { typeHint, defaultBytes } = encodeSignalDefault(sigDefault);
+  const slotId = ctx.addSlot(slotName, typeHint, SLOT_SOURCE_CLIENT, defaultBytes, false);
+  const binding: SignalBinding = { name, slotName, slotId, default: sigDefault };
+  scope.bindings.set(name, binding);
+  return binding;
+}
+
+/** Mint every still-pending declaration, in declaration order. */
+function materializeAll(scope: SignalScope): void {
+  if (!scope.pending?.size) return;
+  for (const name of [...scope.pending.keys()]) materializeBinding(scope, name);
 }
 
 /** The binding `name` resolves to, searching outward through the chain. */
@@ -559,19 +624,17 @@ export interface ResolvedSignalImport {
   name: string;
   /** The defining module's COMPLETE top-level signal declarations. The
    *  `#module` frame is memoized on its first entry (`registry.frames`), so
-   *  whoever enters it first must enter it whole — entering with a partial
-   *  map would permanently hide the rest of that module's signals.
-   *
-   *  ACCEPTED TRADEOFF of whole-frame entry: every evaluable signal the
-   *  store declares gets a slot, including ones no file on the page reads,
-   *  and because import resolution runs when the ROOT scope is built, such
-   *  a signal claims its base slot name before a later-inlined component's
-   *  own same-named signal (which then mints `name#2`). A server injecting
-   *  by name must use the collision warning's suffixed name in that case.
-   *  The alternative — lazy per-name entry — would violate the memo
-   *  contract above; slot-table bloat and the rename hazard are the price
-   *  of one-slot-per-signal identity, and the collision warning names the
-   *  rename whenever it happens. */
+   *  whoever enters it first must enter it with the whole map — but entry
+   *  is LAZY: the map is carried on the frame and a declaration only mints
+   *  a slot when something materializes it (an actual import of that name,
+   *  or the walk upgrading the frame because the module is itself a
+   *  component). An unread store signal therefore costs no slot and cannot
+   *  claim a base slot name ahead of a component's own signal; a signal
+   *  that IS read claims its name when it materializes, and the collision
+   *  warning still names any rename. One nuance remains: for a module that
+   *  is both imported-from and walked, slot IDS follow materialization
+   *  order (imported names first, the rest at walk entry) — names and
+   *  defaults are unaffected, and injection is by name. */
   declarations: Map<string, SignalDefault>;
 }
 
@@ -688,14 +751,17 @@ export function resolveModuleSignalImports(
 ): void {
   for (const [localName, resolved] of imports.resolve(ast, filePath)) {
     if (moduleScope.bindings.has(localName)) continue;
-    const definingScope = enterSignalScope(
-      null,
+    // Lazy entry + single-name materialization: the defining module's frame
+    // carries its COMPLETE declaration map (the memo contract), but only the
+    // signal actually imported mints a slot here. Unread store signals cost
+    // nothing until — unless — something reads them.
+    const definingScope = enterSignalScopeLazy(
       `${resolved.definingPath}#module`,
       resolved.declarations,
       ctx,
       registry,
     );
-    const binding = definingScope.bindings.get(resolved.name);
+    const binding = materializeBinding(definingScope, resolved.name);
     if (binding) moduleScope.bindings.set(localName, binding);
   }
 }
