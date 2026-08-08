@@ -614,6 +614,91 @@ describe('enterComponentScope — imported signals', () => {
     expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
   });
 
+  it('a store signal nobody imports mints NO slot', () => {
+    // Import resolution enters the defining module's frame with its full
+    // declaration map, but only the names actually imported materialize into
+    // slots — an unread store signal must not bloat the page's slot table.
+    const { ctx, scope } = importScope({
+      './store.ts': `
+        import { createSignal } from 'formajs';
+        export const [ownerInviteToken, setOwnerInviteToken] = createSignal('');
+        export const [unreadExtra, setUnreadExtra] = createSignal('never-read');
+      `,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeDefined();
+    const names = getSlots(ctx.toBinary()).map((s) => s.name);
+    expect(names).toContain('ownerInviteToken');
+    expect(names).not.toContain('unreadExtra');
+  });
+
+  it('an unread store signal cannot steal a component signal\'s base slot name', () => {
+    // Before lazy materialization, whole-frame entry minted the store's
+    // unimported `count` at root time, so a later component's own `count`
+    // was renamed to count#2 — and a server injecting 'count' reached the
+    // slot of a signal nobody read. Now the unread declaration never mints
+    // and the component keeps the base name.
+    const files = {
+      './store.ts': `
+        import { createSignal } from 'formajs';
+        export const [count, setCount] = createSignal(0);
+        export const [status, setStatus] = createSignal('idle');
+      `,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { status } from './store';
+        export function Page() { return h('b', null, () => status()); }
+      `,
+      './widget.ts': `
+        import { createSignal, h } from 'formajs';
+        export function Widget() {
+          const [count] = createSignal(7);
+          return h('i', null, () => count());
+        }
+      `,
+    };
+    const first = importScope(files, './page.ts', 'Page');
+    const widget = importScope(files, './widget.ts', 'Widget', first);
+    const binding = lookupSignal(widget.scope, 'count')!;
+    expect(binding.slotName).toBe('count');
+    expect(binding.default).toEqual({ type: 'number', default: 7 });
+  });
+
+  it('a store that is also walked as a component upgrades to a full frame', () => {
+    // Mixed entry: another file imports a signal FROM a module that is later
+    // entered by the walk as a component file. The lazy import-entered frame
+    // must upgrade in place — the component's own other signals still mint
+    // and resolve, through the SAME memoized frame.
+    const files = {
+      './shared.ts': `
+        import { createSignal, h } from 'formajs';
+        export const [alpha, setAlpha] = createSignal('a');
+        export const [beta, setBeta] = createSignal('b');
+        export function Card() { return h('div', null, () => beta()); }
+      `,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { alpha } from './shared';
+        export function Page() { return h('a', null); }
+      `,
+    };
+    const first = importScope(files, './page.ts', 'Page');   // lazy-enters shared#module, mints only alpha
+    const card = importScope(files, './shared.ts', 'Card', first); // walk-enters the same frame
+    expect(lookupSignal(first.scope, 'alpha')).toBeDefined();
+    expect(lookupSignal(card.scope, 'beta')).toBeDefined();
+    // One frame: alpha resolved via import and alpha seen from inside the
+    // component must be the SAME binding object (same slot).
+    expect(lookupSignal(card.scope, 'alpha')!.slotId)
+      .toBe(lookupSignal(first.scope, 'alpha')!.slotId);
+    const names = getSlots(first.ctx.toBinary()).map((s) => s.name);
+    expect(names).toContain('alpha');
+    expect(names).toContain('beta');
+  });
+
   it('a nested function DECLARATION shadowing the imported name blocks the fold', () => {
     // Same hazard as the const shadow, different declaration form: a
     // `function tok() {}` inside a component binds the name too, and the
