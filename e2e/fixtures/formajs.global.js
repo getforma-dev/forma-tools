@@ -18,9 +18,9 @@ var FormaJS = (() => {
   };
   var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-  // src/index.ts
-  var src_exports = {};
-  __export(src_exports, {
+  // ../formajs/dist/forma.esm.js
+  var forma_esm_exports = {};
+  __export(forma_esm_exports, {
     $: () => $,
     $$: () => $$,
     Fragment: () => Fragment,
@@ -49,6 +49,7 @@ var FormaJS = (() => {
     createSuspense: () => createSuspense,
     createSwitch: () => createSwitch,
     createText: () => createText,
+    createUnownedRoot: () => createUnownedRoot,
     deactivateAllIslands: () => deactivateAllIslands,
     deactivateIsland: () => deactivateIsland,
     defineComponent: () => defineComponent,
@@ -56,6 +57,8 @@ var FormaJS = (() => {
     disposeComponent: () => disposeComponent,
     fragment: () => fragment,
     getBatchDepth: () => getBatchDepth,
+    getOwner: () => getOwner,
+    getSignalName: () => getSignalName,
     h: () => h,
     hydrateIsland: () => hydrateIsland,
     inject: () => inject,
@@ -80,21 +83,23 @@ var FormaJS = (() => {
     provide: () => provide,
     reconcileList: () => reconcileList,
     removeClass: () => removeClass,
+    runWithOwner: () => runWithOwner,
+    sanitizePropsDeep: () => sanitizePropsDeep,
     setAttr: () => setAttr,
     setHTMLUnsafe: () => setHTMLUnsafe,
     setStyle: () => setStyle,
     setText: () => setText,
     siblings: () => siblings,
+    svg: () => svg,
     template: () => template,
     templateMany: () => templateMany,
     toggleClass: () => toggleClass,
     trackDisposer: () => trackDisposer,
     trigger: () => trigger,
     unprovide: () => unprovide,
-    untrack: () => untrack
+    untrack: () => untrack,
+    value: () => value
   });
-
-  // node_modules/alien-signals/esm/system.mjs
   function createReactiveSystem({ update, notify, unwatched }) {
     return {
       link: link2,
@@ -104,21 +109,18 @@ var FormaJS = (() => {
       shallowPropagate: shallowPropagate2
     };
     function link2(dep, sub, version) {
-      const prevDep = sub.depsTail;
-      if (prevDep !== void 0 && prevDep.dep === dep) {
+      let prevDep = sub.depsTail;
+      if (prevDep !== void 0 && prevDep.dep === dep)
         return;
-      }
-      const nextDep = prevDep !== void 0 ? prevDep.nextDep : sub.deps;
+      let nextDep = prevDep !== void 0 ? prevDep.nextDep : sub.deps;
       if (nextDep !== void 0 && nextDep.dep === dep) {
-        nextDep.version = version;
-        sub.depsTail = nextDep;
+        nextDep.version = version, sub.depsTail = nextDep;
         return;
       }
-      const prevSub = dep.subsTail;
-      if (prevSub !== void 0 && prevSub.version === version && prevSub.sub === sub) {
+      let prevSub = dep.subsTail;
+      if (prevSub !== void 0 && prevSub.version === version && prevSub.sub === sub)
         return;
-      }
-      const newLink = sub.depsTail = dep.subsTail = {
+      let newLink = sub.depsTail = dep.subsTail = {
         version,
         dep,
         sub,
@@ -127,77 +129,21 @@ var FormaJS = (() => {
         prevSub,
         nextSub: void 0
       };
-      if (nextDep !== void 0) {
-        nextDep.prevDep = newLink;
-      }
-      if (prevDep !== void 0) {
-        prevDep.nextDep = newLink;
-      } else {
-        sub.deps = newLink;
-      }
-      if (prevSub !== void 0) {
-        prevSub.nextSub = newLink;
-      } else {
-        dep.subs = newLink;
-      }
+      nextDep !== void 0 && (nextDep.prevDep = newLink), prevDep !== void 0 ? prevDep.nextDep = newLink : sub.deps = newLink, prevSub !== void 0 ? prevSub.nextSub = newLink : dep.subs = newLink;
     }
     function unlink2(link3, sub = link3.sub) {
-      const dep = link3.dep;
-      const prevDep = link3.prevDep;
-      const nextDep = link3.nextDep;
-      const nextSub = link3.nextSub;
-      const prevSub = link3.prevSub;
-      if (nextDep !== void 0) {
-        nextDep.prevDep = prevDep;
-      } else {
-        sub.depsTail = prevDep;
-      }
-      if (prevDep !== void 0) {
-        prevDep.nextDep = nextDep;
-      } else {
-        sub.deps = nextDep;
-      }
-      if (nextSub !== void 0) {
-        nextSub.prevSub = prevSub;
-      } else {
-        dep.subsTail = prevSub;
-      }
-      if (prevSub !== void 0) {
-        prevSub.nextSub = nextSub;
-      } else if ((dep.subs = nextSub) === void 0) {
-        unwatched(dep);
-      }
-      return nextDep;
+      let dep = link3.dep, prevDep = link3.prevDep, nextDep = link3.nextDep, nextSub = link3.nextSub, prevSub = link3.prevSub;
+      return nextDep !== void 0 ? nextDep.prevDep = prevDep : sub.depsTail = prevDep, prevDep !== void 0 ? prevDep.nextDep = nextDep : sub.deps = nextDep, nextSub !== void 0 ? nextSub.prevSub = prevSub : dep.subsTail = prevSub, prevSub !== void 0 ? prevSub.nextSub = nextSub : (dep.subs = nextSub) === void 0 && unwatched(dep), nextDep;
     }
     function propagate2(link3) {
-      let next = link3.nextSub;
-      let stack;
+      let next = link3.nextSub, stack;
       top: do {
-        const sub = link3.sub;
-        let flags = sub.flags;
-        if (!(flags & (4 | 8 | 16 | 32))) {
-          sub.flags = flags | 32;
-        } else if (!(flags & (4 | 8))) {
-          flags = 0;
-        } else if (!(flags & 4)) {
-          sub.flags = flags & ~8 | 32;
-        } else if (!(flags & (16 | 32)) && isValidLink(link3, sub)) {
-          sub.flags = flags | (8 | 32);
-          flags &= 1;
-        } else {
-          flags = 0;
-        }
-        if (flags & 2) {
-          notify(sub);
-        }
-        if (flags & 1) {
-          const subSubs = sub.subs;
+        let sub = link3.sub, flags = sub.flags;
+        if (flags & 60 ? flags & 12 ? flags & 4 ? !(flags & 48) && isValidLink(link3, sub) ? (sub.flags = flags | 40, flags &= 1) : flags = 0 : sub.flags = flags & -9 | 32 : flags = 0 : sub.flags = flags | 32, flags & 2 && notify(sub), flags & 1) {
+          let subSubs = sub.subs;
           if (subSubs !== void 0) {
-            const nextSub = (link3 = subSubs).nextSub;
-            if (nextSub !== void 0) {
-              stack = { value: next, prev: stack };
-              next = nextSub;
-            }
+            let nextSub = (link3 = subSubs).nextSub;
+            nextSub !== void 0 && (stack = { value: next, prev: stack }, next = nextSub);
             continue;
           }
         }
@@ -205,73 +151,48 @@ var FormaJS = (() => {
           next = link3.nextSub;
           continue;
         }
-        while (stack !== void 0) {
-          link3 = stack.value;
-          stack = stack.prev;
-          if (link3 !== void 0) {
+        for (; stack !== void 0; )
+          if (link3 = stack.value, stack = stack.prev, link3 !== void 0) {
             next = link3.nextSub;
             continue top;
           }
-        }
         break;
       } while (true);
     }
     function checkDirty2(link3, sub) {
-      let stack;
-      let checkDepth = 0;
-      let dirty = false;
+      let stack, checkDepth = 0, dirty = false;
       top: do {
-        const dep = link3.dep;
-        const flags = dep.flags;
-        if (sub.flags & 16) {
+        let dep = link3.dep, flags = dep.flags;
+        if (sub.flags & 16)
           dirty = true;
-        } else if ((flags & (1 | 16)) === (1 | 16)) {
+        else if ((flags & 17) === 17) {
           if (update(dep)) {
-            const subs = dep.subs;
-            if (subs.nextSub !== void 0) {
-              shallowPropagate2(subs);
-            }
-            dirty = true;
+            let subs = dep.subs;
+            subs.nextSub !== void 0 && shallowPropagate2(subs), dirty = true;
           }
-        } else if ((flags & (1 | 32)) === (1 | 32)) {
-          if (link3.nextSub !== void 0 || link3.prevSub !== void 0) {
-            stack = { value: link3, prev: stack };
-          }
-          link3 = dep.deps;
-          sub = dep;
-          ++checkDepth;
+        } else if ((flags & 33) === 33) {
+          (link3.nextSub !== void 0 || link3.prevSub !== void 0) && (stack = { value: link3, prev: stack }), link3 = dep.deps, sub = dep, ++checkDepth;
           continue;
         }
         if (!dirty) {
-          const nextDep = link3.nextDep;
+          let nextDep = link3.nextDep;
           if (nextDep !== void 0) {
             link3 = nextDep;
             continue;
           }
         }
-        while (checkDepth--) {
-          const firstSub = sub.subs;
-          const hasMultipleSubs = firstSub.nextSub !== void 0;
-          if (hasMultipleSubs) {
-            link3 = stack.value;
-            stack = stack.prev;
-          } else {
-            link3 = firstSub;
-          }
-          if (dirty) {
+        for (; checkDepth--; ) {
+          let firstSub = sub.subs, hasMultipleSubs = firstSub.nextSub !== void 0;
+          if (hasMultipleSubs ? (link3 = stack.value, stack = stack.prev) : link3 = firstSub, dirty) {
             if (update(sub)) {
-              if (hasMultipleSubs) {
-                shallowPropagate2(firstSub);
-              }
-              sub = link3.sub;
+              hasMultipleSubs && shallowPropagate2(firstSub), sub = link3.sub;
               continue;
             }
             dirty = false;
-          } else {
-            sub.flags &= ~32;
-          }
+          } else
+            sub.flags &= -33;
           sub = link3.sub;
-          const nextDep = link3.nextDep;
+          let nextDep = link3.nextDep;
           if (nextDep !== void 0) {
             link3 = nextDep;
             continue top;
@@ -282,29 +203,20 @@ var FormaJS = (() => {
     }
     function shallowPropagate2(link3) {
       do {
-        const sub = link3.sub;
-        const flags = sub.flags;
-        if ((flags & (32 | 16)) === 32) {
-          sub.flags = flags | 16;
-          if ((flags & (2 | 4)) === 2) {
-            notify(sub);
-          }
-        }
+        let sub = link3.sub, flags = sub.flags;
+        (flags & 48) === 32 && (sub.flags = flags | 16, (flags & 6) === 2 && notify(sub));
       } while ((link3 = link3.nextSub) !== void 0);
     }
     function isValidLink(checkLink, sub) {
       let link3 = sub.depsTail;
-      while (link3 !== void 0) {
-        if (link3 === checkLink) {
+      for (; link3 !== void 0; ) {
+        if (link3 === checkLink)
           return true;
-        }
         link3 = link3.prevDep;
       }
       return false;
     }
   }
-
-  // node_modules/alien-signals/esm/index.mjs
   var cycle = 0;
   var batchDepth = 0;
   var notifyIndex = 0;
@@ -313,44 +225,29 @@ var FormaJS = (() => {
   var queued = [];
   var { link, unlink, propagate, checkDirty, shallowPropagate } = createReactiveSystem({
     update(node) {
-      if (node.depsTail !== void 0) {
-        return updateComputed(node);
-      } else {
-        return updateSignal(node);
-      }
+      return node.depsTail !== void 0 ? updateComputed(node) : updateSignal(node);
     },
     notify(effect2) {
-      let insertIndex = queuedLength;
-      let firstInsertedIndex = insertIndex;
-      do {
-        queued[insertIndex++] = effect2;
-        effect2.flags &= ~2;
-        effect2 = effect2.subs?.sub;
-        if (effect2 === void 0 || !(effect2.flags & 2)) {
+      let insertIndex = queuedLength, firstInsertedIndex = insertIndex;
+      do
+        if (queued[insertIndex++] = effect2, effect2.flags &= -3, effect2 = effect2.subs?.sub, effect2 === void 0 || !(effect2.flags & 2))
           break;
-        }
-      } while (true);
-      queuedLength = insertIndex;
-      while (firstInsertedIndex < --insertIndex) {
-        const left = queued[firstInsertedIndex];
-        queued[firstInsertedIndex++] = queued[insertIndex];
-        queued[insertIndex] = left;
+      while (true);
+      for (queuedLength = insertIndex; firstInsertedIndex < --insertIndex; ) {
+        let left = queued[firstInsertedIndex];
+        queued[firstInsertedIndex++] = queued[insertIndex], queued[insertIndex] = left;
       }
     },
     unwatched(node) {
-      if (!(node.flags & 1)) {
-        effectScopeOper.call(node);
-      } else if (node.depsTail !== void 0) {
-        node.depsTail = void 0;
-        node.flags = 1 | 16;
-        purgeDeps(node);
-      }
+      node.flags & 1 ? node.depsTail !== void 0 && (node.depsTail = void 0, node.flags = 17, purgeDeps(node)) : effectScopeOper.call(node);
     }
   });
+  function getActiveSub() {
+    return activeSub;
+  }
   function setActiveSub(sub) {
-    const prevSub = activeSub;
-    activeSub = sub;
-    return prevSub;
+    let prevSub = activeSub;
+    return activeSub = sub, prevSub;
   }
   function getBatchDepth() {
     return batchDepth;
@@ -359,9 +256,7 @@ var FormaJS = (() => {
     ++batchDepth;
   }
   function endBatch() {
-    if (!--batchDepth) {
-      flush();
-    }
+    --batchDepth || flush();
   }
   function isSignal(fn) {
     return fn.name === "bound " + signalOper.name;
@@ -396,38 +291,31 @@ var FormaJS = (() => {
     });
   }
   function effect(fn) {
-    const e = {
+    let e = {
       fn,
       subs: void 0,
       subsTail: void 0,
       deps: void 0,
       depsTail: void 0,
-      flags: 2 | 4
-    };
-    const prevSub = setActiveSub(e);
-    if (prevSub !== void 0) {
-      link(e, prevSub, 0);
-    }
+      flags: 6
+    }, prevSub = setActiveSub(e);
+    prevSub !== void 0 && link(e, prevSub, 0);
     try {
       e.fn();
     } finally {
-      activeSub = prevSub;
-      e.flags &= ~4;
+      activeSub = prevSub, e.flags &= -5;
     }
     return effectOper.bind(e);
   }
   function effectScope(fn) {
-    const e = {
+    let e = {
       deps: void 0,
       depsTail: void 0,
       subs: void 0,
       subsTail: void 0,
       flags: 0
-    };
-    const prevSub = setActiveSub(e);
-    if (prevSub !== void 0) {
-      link(e, prevSub, 0);
-    }
+    }, prevSub = setActiveSub(e);
+    prevSub !== void 0 && link(e, prevSub, 0);
     try {
       fn();
     } finally {
@@ -436,134 +324,99 @@ var FormaJS = (() => {
     return effectScopeOper.bind(e);
   }
   function trigger(fn) {
-    const sub = {
+    let sub = {
       deps: void 0,
       depsTail: void 0,
       flags: 2
-    };
-    const prevSub = setActiveSub(sub);
+    }, prevSub = setActiveSub(sub);
     try {
       fn();
     } finally {
       activeSub = prevSub;
       let link2 = sub.deps;
-      while (link2 !== void 0) {
-        const dep = link2.dep;
+      for (; link2 !== void 0; ) {
+        let dep = link2.dep;
         link2 = unlink(link2, sub);
-        const subs = dep.subs;
-        if (subs !== void 0) {
-          sub.flags = 0;
-          propagate(subs);
-          shallowPropagate(subs);
-        }
+        let subs = dep.subs;
+        subs !== void 0 && (sub.flags = 0, propagate(subs), shallowPropagate(subs));
       }
-      if (!batchDepth) {
-        flush();
-      }
+      batchDepth || flush();
     }
   }
   function updateComputed(c) {
-    ++cycle;
-    c.depsTail = void 0;
-    c.flags = 1 | 4;
-    const prevSub = setActiveSub(c);
+    ++cycle, c.depsTail = void 0, c.flags = 5;
+    let prevSub = setActiveSub(c);
     try {
-      const oldValue = c.value;
+      let oldValue = c.value;
       return oldValue !== (c.value = c.getter(oldValue));
     } finally {
-      activeSub = prevSub;
-      c.flags &= ~4;
-      purgeDeps(c);
+      activeSub = prevSub, c.flags &= -5, purgeDeps(c);
     }
   }
   function updateSignal(s) {
-    s.flags = 1;
-    return s.currentValue !== (s.currentValue = s.pendingValue);
+    return s.flags = 1, s.currentValue !== (s.currentValue = s.pendingValue);
   }
   function run(e) {
-    const flags = e.flags;
+    let flags = e.flags;
     if (flags & 16 || flags & 32 && checkDirty(e.deps, e)) {
-      ++cycle;
-      e.depsTail = void 0;
-      e.flags = 2 | 4;
-      const prevSub = setActiveSub(e);
+      ++cycle, e.depsTail = void 0, e.flags = 6;
+      let prevSub = setActiveSub(e);
       try {
         e.fn();
       } finally {
-        activeSub = prevSub;
-        e.flags &= ~4;
-        purgeDeps(e);
+        activeSub = prevSub, e.flags &= -5, purgeDeps(e);
       }
-    } else {
+    } else
       e.flags = 2;
-    }
   }
   function flush() {
     try {
-      while (notifyIndex < queuedLength) {
-        const effect2 = queued[notifyIndex];
-        queued[notifyIndex++] = void 0;
-        run(effect2);
+      for (; notifyIndex < queuedLength; ) {
+        let effect2 = queued[notifyIndex];
+        queued[notifyIndex++] = void 0, run(effect2);
       }
     } finally {
-      while (notifyIndex < queuedLength) {
-        const effect2 = queued[notifyIndex];
-        queued[notifyIndex++] = void 0;
-        effect2.flags |= 2 | 8;
+      for (; notifyIndex < queuedLength; ) {
+        let effect2 = queued[notifyIndex];
+        queued[notifyIndex++] = void 0, effect2.flags |= 10;
       }
-      notifyIndex = 0;
-      queuedLength = 0;
+      notifyIndex = 0, queuedLength = 0;
     }
   }
   function computedOper() {
-    const flags = this.flags;
-    if (flags & 16 || flags & 32 && (checkDirty(this.deps, this) || (this.flags = flags & ~32, false))) {
+    let flags = this.flags;
+    if (flags & 16 || flags & 32 && (checkDirty(this.deps, this) || (this.flags = flags & -33, false))) {
       if (updateComputed(this)) {
-        const subs = this.subs;
-        if (subs !== void 0) {
-          shallowPropagate(subs);
-        }
+        let subs = this.subs;
+        subs !== void 0 && shallowPropagate(subs);
       }
     } else if (!flags) {
-      this.flags = 1 | 4;
-      const prevSub = setActiveSub(this);
+      this.flags = 5;
+      let prevSub = setActiveSub(this);
       try {
         this.value = this.getter();
       } finally {
-        activeSub = prevSub;
-        this.flags &= ~4;
+        activeSub = prevSub, this.flags &= -5;
       }
     }
-    const sub = activeSub;
-    if (sub !== void 0) {
-      link(this, sub, cycle);
-    }
-    return this.value;
+    let sub = activeSub;
+    return sub !== void 0 && link(this, sub, cycle), this.value;
   }
   function signalOper(...value2) {
     if (value2.length) {
       if (this.pendingValue !== (this.pendingValue = value2[0])) {
-        this.flags = 1 | 16;
-        const subs = this.subs;
-        if (subs !== void 0) {
-          propagate(subs);
-          if (!batchDepth) {
-            flush();
-          }
-        }
+        this.flags = 17;
+        let subs = this.subs;
+        subs !== void 0 && (propagate(subs), batchDepth || flush());
       }
     } else {
-      if (this.flags & 16) {
-        if (updateSignal(this)) {
-          const subs = this.subs;
-          if (subs !== void 0) {
-            shallowPropagate(subs);
-          }
-        }
+      if (this.flags & 16 && updateSignal(this)) {
+        let subs = this.subs;
+        subs !== void 0 && shallowPropagate(subs);
       }
       let sub = activeSub;
-      while (sub !== void 0) {
-        if (sub.flags & (1 | 2)) {
+      for (; sub !== void 0; ) {
+        if (sub.flags & 3) {
           link(this, sub, cycle);
           break;
         }
@@ -576,57 +429,113 @@ var FormaJS = (() => {
     effectScopeOper.call(this);
   }
   function effectScopeOper() {
-    this.depsTail = void 0;
-    this.flags = 0;
-    purgeDeps(this);
-    const sub = this.subs;
-    if (sub !== void 0) {
-      unlink(sub);
-    }
+    this.depsTail = void 0, this.flags = 0, purgeDeps(this);
+    let sub = this.subs;
+    sub !== void 0 && unlink(sub);
   }
   function purgeDeps(sub) {
-    const depsTail = sub.depsTail;
-    let dep = depsTail !== void 0 ? depsTail.nextDep : sub.deps;
-    while (dep !== void 0) {
+    let depsTail = sub.depsTail, dep = depsTail !== void 0 ? depsTail.nextDep : sub.deps;
+    for (; dep !== void 0; )
       dep = unlink(dep, sub);
-    }
   }
-
-  // src/reactive/signal.ts
-  function applySignalSet(s, v, equals) {
-    if (typeof v !== "function") {
-      if (equals) {
-        const prevSub2 = setActiveSub(void 0);
-        const prev2 = s();
-        setActiveSub(prevSub2);
-        if (equals(prev2, v)) return;
+  var __DEV__ = false;
+  var INSTANCE_KEY = /* @__PURE__ */ Symbol.for("@getforma/core#instances");
+  function registerInstance() {
+    let host = globalThis, registry = host[INSTANCE_KEY] ?? (host[INSTANCE_KEY] = { count: 0, warned: false });
+    registry.count += 1, registry.count > 1 && !registry.warned && (registry.warned = true, console.warn(
+      `[forma] Duplicate @getforma/core instance detected (${registry.count} copies loaded). Signals, the owner tree, the component registry and the island registry are per-copy, so state created through one copy is invisible to the other. Usual causes: mixing \`import\` and \`require\` of @getforma/core in one process, or loading '@getforma/core' alongside '@getforma/core/runtime-hardened' or '@getforma/core/browser', which bundle their own private copy of the core.`
+    ));
+  }
+  registerInstance();
+  var _errorHandlers = /* @__PURE__ */ new Set();
+  function onError(handler) {
+    return _errorHandlers.add(handler), () => {
+      _errorHandlers.delete(handler);
+    };
+  }
+  function reportError(error, source) {
+    for (let handler of _errorHandlers)
+      try {
+        handler(error, source ? { source } : {});
+      } catch {
       }
-      s(v);
+  }
+  var signalNames = /* @__PURE__ */ new WeakMap();
+  function getSignalName(fn) {
+    return typeof fn == "function" ? signalNames.get(fn) : void 0;
+  }
+  function value(v) {
+    return () => v;
+  }
+  function applySignalSet(s, v, equals) {
+    if (typeof v != "function") {
+      if (!equals) {
+        s(v);
+        return;
+      }
+      let prevSub2 = setActiveSub(void 0), prev2 = s();
+      if (setActiveSub(prevSub2), equals(prev2, v)) return;
+      s(v), Object.is(prev2, v) && forceNotify(s);
       return;
     }
-    const prevSub = setActiveSub(void 0);
-    const prev = s();
+    let prevSub = setActiveSub(void 0), prev = s();
     setActiveSub(prevSub);
-    const next = v(prev);
-    if (equals && equals(prev, next)) return;
-    s(next);
+    let next = v(prev);
+    equals && equals(prev, next) || (s(next), equals && Object.is(prev, next) && forceNotify(s));
+  }
+  function forceNotify(s) {
+    trigger(() => {
+      s();
+    });
   }
   function createSignal(initialValue, options) {
-    const s = signal(initialValue);
-    const getter = s;
-    const eq = options?.equals;
-    const setter = (v) => applySignalSet(s, v, eq);
-    return [getter, setter];
+    let s = signal(initialValue), getter = s;
+    let eq = options?.equals;
+    return [getter, (v) => applySignalSet(s, v, eq)];
   }
-
-  // src/reactive/root.ts
   var currentRoot = null;
   var rootStack = [];
-  function createRoot(fn) {
-    const scope = { disposers: [], scopeDispose: null };
-    rootStack.push(currentRoot);
-    currentRoot = scope;
-    const dispose = () => {
+  var currentOwner = null;
+  function getOwner() {
+    return currentOwner;
+  }
+  function runWithOwner(owner, fn) {
+    let prev = currentOwner;
+    currentOwner = owner;
+    try {
+      return fn();
+    } finally {
+      currentOwner = prev;
+    }
+  }
+  function registerOwnerDisposer(owner, dispose) {
+    owner.disposers.push(dispose);
+  }
+  function createChildOwner() {
+    return { disposers: [] };
+  }
+  function disposeOwner(owner) {
+    let ds = owner.disposers;
+    for (let d of ds)
+      try {
+        d();
+      } catch {
+      }
+    ds.length = 0;
+  }
+  function createRootImpl(fn, owned) {
+    let scope = { disposers: [], scopeDispose: null }, parentRoot = owned ? currentRoot : null;
+    rootStack.push(currentRoot), currentRoot = scope;
+    let prevOwner = currentOwner;
+    currentOwner = scope;
+    let disposed = false, setupComplete = false, disposeRequestedDuringSetup = false, runDisposers = () => {
+      for (let d of scope.disposers)
+        try {
+          d();
+        } catch {
+        }
+      scope.disposers.length = 0;
+    }, runTeardown = () => {
       if (scope.scopeDispose) {
         try {
           scope.scopeDispose();
@@ -634,235 +543,166 @@ var FormaJS = (() => {
         }
         scope.scopeDispose = null;
       }
-      for (const d of scope.disposers) {
-        try {
-          d();
-        } catch {
+      runDisposers();
+    }, dispose = () => {
+      if (!disposed) {
+        if (disposed = true, !setupComplete) {
+          disposeRequestedDuringSetup = true, runDisposers();
+          return;
         }
+        runTeardown();
       }
-      scope.disposers.length = 0;
     };
+    parentRoot && parentRoot.disposers.push(dispose);
     let result;
     try {
-      scope.scopeDispose = effectScope(() => {
-        result = fn(dispose);
-      });
+      if (owned)
+        scope.scopeDispose = effectScope(() => {
+          result = fn(dispose);
+        });
+      else {
+        let prevSub = setActiveSub(void 0);
+        try {
+          scope.scopeDispose = effectScope(() => {
+            result = fn(dispose);
+          });
+        } finally {
+          setActiveSub(prevSub);
+        }
+      }
+      setupComplete = true, disposeRequestedDuringSetup && runTeardown();
     } finally {
-      currentRoot = rootStack.pop() ?? null;
+      currentRoot = rootStack.pop() ?? null, currentOwner = prevOwner;
     }
     return result;
   }
+  function createRoot(fn) {
+    return createRootImpl(fn, true);
+  }
+  function createUnownedRoot(fn) {
+    return createRootImpl(fn, false);
+  }
   function registerDisposer(dispose) {
-    if (currentRoot) {
-      currentRoot.disposers.push(dispose);
-    }
+    currentOwner && currentOwner.disposers.push(dispose);
   }
   function hasActiveRoot() {
-    return currentRoot !== null;
+    return currentOwner !== null;
   }
-
-  // src/reactive/cleanup.ts
   var currentCleanupCollector = null;
   function onCleanup(fn) {
     currentCleanupCollector?.(fn);
   }
   function setCleanupCollector(collector) {
-    const prev = currentCleanupCollector;
-    currentCleanupCollector = collector;
-    return prev;
+    let prev = currentCleanupCollector;
+    return currentCleanupCollector = collector, prev;
   }
-
-  // src/reactive/dev.ts
-  var __DEV__ = typeof process !== "undefined" ? process.env?.NODE_ENV !== "production" : true;
-  var _errorHandler = null;
-  function onError(handler) {
-    _errorHandler = handler;
-  }
-  function reportError(error, source) {
-    if (_errorHandler) {
-      try {
-        _errorHandler(error, source ? { source } : {});
-      } catch {
-      }
-    }
-    if (__DEV__) {
-      console.error(`[forma] ${source ?? "Unknown"} error:`, error);
-    }
-  }
-
-  // src/reactive/effect.ts
   var POOL_SIZE = 32;
   var MAX_REENTRANT_RUNS = 100;
   var pool = [];
   for (let i = 0; i < POOL_SIZE; i++) pool.push([]);
   var poolIdx = POOL_SIZE;
+  var PENDING = 32;
   function acquireArray() {
     if (poolIdx > 0) {
-      const arr = pool[--poolIdx];
-      arr.length = 0;
-      return arr;
+      let arr = pool[--poolIdx];
+      return arr.length = 0, arr;
     }
     return [];
   }
   function releaseArray(arr) {
-    arr.length = 0;
-    if (poolIdx < POOL_SIZE) {
-      pool[poolIdx++] = arr;
-    }
+    arr.length = 0, poolIdx < POOL_SIZE && (pool[poolIdx++] = arr);
   }
   function runCleanup(fn) {
-    if (fn === void 0) return;
-    try {
-      fn();
-    } catch (e) {
-      reportError(e, "effect cleanup");
-    }
-  }
-  function runCleanups(bag) {
-    if (bag === void 0) return;
-    for (let i = 0; i < bag.length; i++) {
+    if (fn !== void 0)
       try {
-        bag[i]();
+        fn();
       } catch (e) {
         reportError(e, "effect cleanup");
       }
-    }
+  }
+  function runCleanups(bag) {
+    if (bag !== void 0)
+      for (let i = 0; i < bag.length; i++)
+        try {
+          bag[i]();
+        } catch (e) {
+          reportError(e, "effect cleanup");
+        }
   }
   function internalEffect(fn) {
-    const dispose = effect(fn);
-    if (hasActiveRoot()) {
-      registerDisposer(dispose);
-    }
-    return dispose;
+    let firstRun = true, dispose = effect(() => {
+      if (firstRun) {
+        firstRun = false, fn();
+        return;
+      }
+      try {
+        fn();
+      } catch (e) {
+        reportError(e, "binding");
+      }
+    });
+    return hasActiveRoot() && registerDisposer(dispose), dispose;
   }
   function createEffect(fn) {
-    const shouldRegister = hasActiveRoot();
-    let cleanup2;
-    let cleanupBag;
-    let nextCleanup;
-    let nextCleanupBag;
-    const addCleanup = (cb) => {
+    let ownerAtCreate = getOwner(), childOwner = createChildOwner(), cleanup2, cleanupBag, nextCleanup, nextCleanupBag, addCleanup = (cb) => {
       if (nextCleanupBag !== void 0) {
         nextCleanupBag.push(cb);
         return;
       }
       if (nextCleanup !== void 0) {
-        const bag = acquireArray();
-        bag.push(nextCleanup, cb);
-        nextCleanup = void 0;
-        nextCleanupBag = bag;
+        let bag = acquireArray();
+        bag.push(nextCleanup, cb), nextCleanup = void 0, nextCleanupBag = bag;
         return;
       }
       nextCleanup = cb;
-    };
-    let skipCleanupInfra = false;
-    let firstRun = true;
-    let running = false;
-    let rerunRequested = false;
-    const runOnce = () => {
-      if (cleanup2 !== void 0) {
-        runCleanup(cleanup2);
-        cleanup2 = void 0;
-      }
-      if (cleanupBag !== void 0) {
-        runCleanups(cleanupBag);
-        releaseArray(cleanupBag);
-        cleanupBag = void 0;
-      }
-      if (skipCleanupInfra) {
-        try {
-          fn();
-        } catch (e) {
-          reportError(e, "effect");
-        }
-        return;
-      }
-      nextCleanup = void 0;
-      nextCleanupBag = void 0;
-      const prevCollector = setCleanupCollector(addCleanup);
+    }, runOnce = () => {
+      disposeOwner(childOwner), cleanup2 !== void 0 && (runCleanup(cleanup2), cleanup2 = void 0), cleanupBag !== void 0 && (runCleanups(cleanupBag), releaseArray(cleanupBag), cleanupBag = void 0), nextCleanup = void 0, nextCleanupBag = void 0;
+      let prevCollector = setCleanupCollector(addCleanup);
       try {
-        const result = fn();
-        if (typeof result === "function") {
-          addCleanup(result);
-        }
-        if (nextCleanup === void 0 && nextCleanupBag === void 0) {
-          if (firstRun) skipCleanupInfra = true;
-          return;
-        }
-        if (nextCleanupBag !== void 0) {
-          cleanupBag = nextCleanupBag;
-        } else {
-          cleanup2 = nextCleanup;
-        }
+        let result = runWithOwner(childOwner, fn);
+        typeof result == "function" && addCleanup(result), nextCleanupBag !== void 0 ? cleanupBag = nextCleanupBag : nextCleanup !== void 0 && (cleanup2 = nextCleanup);
       } catch (e) {
-        reportError(e, "effect");
-        if (nextCleanupBag !== void 0) {
-          cleanupBag = nextCleanupBag;
-        } else {
-          cleanup2 = nextCleanup;
-        }
+        reportError(e, "effect"), nextCleanupBag !== void 0 ? cleanupBag = nextCleanupBag : nextCleanup !== void 0 && (cleanup2 = nextCleanup);
       } finally {
         setCleanupCollector(prevCollector);
-        firstRun = false;
       }
+    }, dispose = effect(() => {
+      let node = getActiveSub(), reentrantRuns = 0;
+      do {
+        if (node && (node.flags &= ~PENDING), runOnce(), node === void 0 || (node.flags & PENDING) === 0) break;
+        if (++reentrantRuns >= MAX_REENTRANT_RUNS) {
+          node.flags &= ~PENDING, reportError(
+            new Error(`createEffect exceeded ${MAX_REENTRANT_RUNS} self-triggered re-runs (cycle?)`),
+            "effect"
+          );
+          break;
+        }
+      } while (true);
+    }), disposed = false, wrappedDispose = () => {
+      disposed || (disposed = true, dispose(), disposeOwner(childOwner), cleanup2 !== void 0 && (runCleanup(cleanup2), cleanup2 = void 0), cleanupBag !== void 0 && (runCleanups(cleanupBag), releaseArray(cleanupBag), cleanupBag = void 0));
     };
-    const safeFn = () => {
-      if (running) {
-        rerunRequested = true;
-        return;
-      }
-      running = true;
-      try {
-        let reentrantRuns = 0;
-        do {
-          rerunRequested = false;
-          runOnce();
-          if (rerunRequested) {
-            reentrantRuns++;
-            if (reentrantRuns >= MAX_REENTRANT_RUNS) {
-              reportError(
-                new Error(`createEffect exceeded ${MAX_REENTRANT_RUNS} re-entrant runs`),
-                "effect"
-              );
-              rerunRequested = false;
-            }
-          }
-        } while (rerunRequested);
-      } finally {
-        running = false;
-      }
-    };
-    const dispose = effect(safeFn);
-    let disposed = false;
-    const wrappedDispose = () => {
-      if (disposed) return;
-      disposed = true;
-      dispose();
-      if (cleanup2 !== void 0) {
-        runCleanup(cleanup2);
-        cleanup2 = void 0;
-      }
-      if (cleanupBag !== void 0) {
-        runCleanups(cleanupBag);
-        releaseArray(cleanupBag);
-        cleanupBag = void 0;
-      }
-    };
-    if (shouldRegister) {
-      registerDisposer(wrappedDispose);
-    }
-    return wrappedDispose;
+    return ownerAtCreate && registerOwnerDisposer(ownerAtCreate, wrappedDispose), wrappedDispose;
   }
-
-  // src/reactive/computed.ts
+  var ERR = /* @__PURE__ */ Symbol("formaComputedError");
+  function isErrBox(v) {
+    return typeof v == "object" && v !== null && ERR in v;
+  }
   function createComputed(fn) {
-    return computed(fn);
+    let errored = false, error, lastGood, raw = computed(() => {
+      try {
+        let v = fn(lastGood);
+        return errored = false, error = void 0, lastGood = v, v;
+      } catch (e) {
+        return errored = true, error = e, reportError(e, "computed"), { [ERR]: e };
+      }
+    }), reader = () => {
+      let v = raw();
+      if (errored || isErrBox(v)) throw error;
+      return v;
+    };
+    return Object.defineProperty(reader, "name", { value: raw.name, configurable: true }), reader;
   }
-
-  // src/reactive/memo.ts
   var createMemo = createComputed;
-
-  // src/reactive/batch.ts
   function batch(fn) {
     startBatch();
     try {
@@ -871,54 +711,39 @@ var FormaJS = (() => {
       endBatch();
     }
   }
-
-  // src/reactive/untrack.ts
   function untrack(fn) {
-    const prev = setActiveSub(void 0);
+    let prev = setActiveSub(void 0);
     try {
       return fn();
     } finally {
       setActiveSub(prev);
     }
   }
-
-  // src/reactive/on.ts
   function on(deps, fn, options) {
-    let prev;
-    let isFirst = true;
+    let prev, isFirst = true;
     return () => {
-      const value2 = deps();
+      let value2 = deps();
       if (options?.defer && isFirst) {
-        isFirst = false;
-        prev = value2;
-        return void 0;
+        isFirst = false, prev = value2;
+        return;
       }
-      const result = untrack(() => fn(value2, prev));
-      prev = value2;
-      return result;
+      let result = untrack(() => fn(value2, prev));
+      return prev = value2, result;
     };
   }
-
-  // src/reactive/ref.ts
   function createRef(initialValue) {
     return { current: initialValue };
   }
-
-  // src/reactive/reducer.ts
   function createReducer(reducer, initialState) {
-    const [state, setState] = createSignal(initialState);
-    const dispatch = (action) => {
+    let [state, setState] = createSignal(initialState);
+    return [state, (action) => {
       setState((prev) => reducer(prev, action));
-    };
-    return [state, dispatch];
+    }];
   }
-
-  // src/reactive/suspense-context.ts
   var currentSuspenseContext = null;
   var suspenseStack = [];
   function pushSuspenseContext(ctx) {
-    suspenseStack.push(currentSuspenseContext);
-    currentSuspenseContext = ctx;
+    suspenseStack.push(currentSuspenseContext), currentSuspenseContext = ctx;
   }
   function popSuspenseContext() {
     currentSuspenseContext = suspenseStack.pop() ?? null;
@@ -926,432 +751,400 @@ var FormaJS = (() => {
   function getSuspenseContext() {
     return currentSuspenseContext;
   }
-
-  // src/reactive/resource.ts
   function createResource(source, fetcher, options) {
-    const [data, setData] = createSignal(options?.initialValue);
-    const [loading, setLoading] = createSignal(false);
-    const [error, setError] = createSignal(void 0);
-    const suspenseCtx = getSuspenseContext();
-    let abortController = null;
-    let fetchVersion = 0;
-    const doFetch = () => {
-      const sourceValue = untrack(source);
-      if (abortController) {
-        abortController.abort();
-      }
-      const controller = new AbortController();
+    let [data, setData] = createSignal(options?.initialValue), [loading, setLoading] = createSignal(false), [error, setError] = createSignal(void 0), suspenseCtx = getSuspenseContext(), abortController = null, fetchVersion = 0, doFetch = () => {
+      let sourceValue = untrack(source);
+      abortController && abortController.abort();
+      let controller = new AbortController();
       abortController = controller;
-      const version = ++fetchVersion;
-      const isLatest = () => version === fetchVersion;
-      let suspensePending = false;
-      if (suspenseCtx) {
-        suspenseCtx.increment();
-        suspensePending = true;
+      let version = ++fetchVersion, isLatest = () => version === fetchVersion, suspensePending = false;
+      suspenseCtx && (suspenseCtx.increment(), suspensePending = true), batch(() => {
+        setLoading(true), setError(void 0);
+      });
+      let promise;
+      try {
+        promise = Promise.resolve(fetcher(sourceValue, { signal: controller.signal }));
+      } catch (err) {
+        promise = Promise.reject(err);
       }
-      setLoading(true);
-      setError(void 0);
-      Promise.resolve(fetcher(sourceValue)).then((result) => {
-        if (isLatest() && !controller.signal.aborted) {
-          setData(() => result);
-        }
+      promise.then((result) => {
+        isLatest() && !controller.signal.aborted && batch(() => {
+          setData(() => result), setLoading(false);
+        });
       }).catch((err) => {
-        if (isLatest() && !controller.signal.aborted) {
-          if (err?.name !== "AbortError") {
-            setError(err);
-          }
-        }
+        isLatest() && !controller.signal.aborted && err?.name !== "AbortError" && batch(() => {
+          setError(err), setLoading(false);
+        });
       }).finally(() => {
-        if (suspensePending) suspenseCtx?.decrement();
-        if (isLatest()) {
-          setLoading(false);
-          if (abortController === controller) {
-            abortController = null;
-          }
-        }
+        suspensePending && suspenseCtx?.decrement(), isLatest() && abortController === controller && (abortController = null);
       });
     };
     internalEffect(() => {
-      source();
-      doFetch();
+      source(), doFetch();
+    }), hasActiveRoot() && registerDisposer(() => {
+      fetchVersion++, abortController && (abortController.abort(), abortController = null);
     });
-    const resource = (() => data());
-    resource.loading = loading;
-    resource.error = error;
-    resource.refetch = doFetch;
-    resource.mutate = (value2) => setData(() => value2);
-    return resource;
+    let resource = (() => data());
+    return resource.loading = loading, resource.error = error, resource.refetch = doFetch, resource.mutate = (value2) => setData(() => value2), resource;
   }
-
-  // src/dom/list.ts
-  function longestIncreasingSubsequence(arr) {
-    const n = arr.length;
-    if (n === 0) return [];
-    const tails = new Int32Array(n);
-    const tailIndices = new Int32Array(n);
-    const predecessor = new Int32Array(n).fill(-1);
-    let tailsLen = 0;
-    for (let i = 0; i < n; i++) {
-      const val = arr[i];
-      let lo = 0, hi = tailsLen;
-      while (lo < hi) {
-        const mid = lo + hi >> 1;
-        if (tails[mid] < val) lo = mid + 1;
-        else hi = mid;
+  var FORBIDDEN_PROP_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+  var scheduledOrActiveIslands = 0;
+  function trackIsland(el) {
+    el.__formaTracked || (el.__formaTracked = true, scheduledOrActiveIslands++);
+  }
+  function untrackIsland(el) {
+    el.__formaTracked && (delete el.__formaTracked, scheduledOrActiveIslands--);
+  }
+  function hasScheduledOrActiveIslands() {
+    return scheduledOrActiveIslands > 0;
+  }
+  function sanitizeProps(obj) {
+    for (let key of FORBIDDEN_PROP_KEYS)
+      key in obj && delete obj[key];
+    return obj;
+  }
+  function sanitizePropsDeep(props) {
+    let stack = [props], seen = /* @__PURE__ */ new WeakSet();
+    for (; stack.length > 0; ) {
+      let current = stack.pop();
+      if (!(current === null || typeof current != "object") && !seen.has(current)) {
+        seen.add(current);
+        for (let key of FORBIDDEN_PROP_KEYS)
+          Object.prototype.hasOwnProperty.call(current, key) && Object.getOwnPropertyDescriptor(current, key)?.configurable && delete current[key];
+        for (let k of Object.keys(current))
+          stack.push(current[k]);
       }
-      tails[lo] = val;
-      tailIndices[lo] = i;
-      if (lo > 0) predecessor[i] = tailIndices[lo - 1];
-      if (lo >= tailsLen) tailsLen++;
     }
-    const result = new Array(tailsLen);
-    let idx = tailIndices[tailsLen - 1];
-    for (let i = tailsLen - 1; i >= 0; i--) {
-      result[i] = idx;
-      idx = predecessor[idx];
+    return props;
+  }
+  function loadIslandProps(root, id, sharedProps) {
+    let inline = root.getAttribute("data-forma-props");
+    return inline ? sanitizeProps(JSON.parse(inline)) : sharedProps && String(id) in sharedProps ? sanitizeProps(sharedProps[String(id)]) : null;
+  }
+  function loadSharedProps(root) {
+    let scriptBlock = root.querySelector("script#__forma_islands") ?? (root === document ? null : document.querySelector("script#__forma_islands"));
+    if (!scriptBlock) return null;
+    try {
+      let parsed = JSON.parse(scriptBlock.textContent ?? "");
+      return parsed !== null && typeof parsed == "object" ? parsed : null;
+    } catch (err) {
+      return null;
     }
+  }
+  function activateIslands(registry, root = document) {
+    let sharedProps = loadSharedProps(root), islands = root.querySelectorAll("[data-forma-island]");
+    for (let island of islands) {
+      let status = island.getAttribute("data-forma-status");
+      if (status === "active" || status === "hydrating" || status === "disposed" || status === "error" || island.__formaScheduled) continue;
+      delete island.__formaDisposed;
+      let id = parseInt(island.getAttribute("data-forma-island"), 10), componentName = island.getAttribute("data-forma-component"), hydrateFn = registry[componentName];
+      if (!hydrateFn) {
+        island.setAttribute("data-forma-status", "error");
+        continue;
+      }
+      trackIsland(island);
+      let trigger2 = island.getAttribute("data-forma-hydrate") || "load";
+      if (trigger2 === "visible") {
+        island.__formaScheduled = true;
+        let observer = new IntersectionObserver(
+          (entries) => {
+            for (let entry of entries)
+              entry.isIntersecting && (observer.disconnect(), delete island.__formaObserver, hydrateIslandRoot(island, id, componentName, hydrateFn, sharedProps));
+          },
+          { rootMargin: "200px" }
+        );
+        island.__formaObserver = observer, observer.observe(island);
+      } else if (trigger2 === "idle") {
+        island.__formaScheduled = true;
+        let hydrate = () => hydrateIslandRoot(island, id, componentName, hydrateFn, sharedProps);
+        if (typeof requestIdleCallback == "function") {
+          let handle = requestIdleCallback(hydrate);
+          island.__formaIdleCancel = () => cancelIdleCallback(handle);
+        } else {
+          let handle = setTimeout(hydrate, 200);
+          island.__formaIdleCancel = () => clearTimeout(handle);
+        }
+      } else if (trigger2 === "interaction") {
+        island.__formaScheduled = true;
+        let hydrate = () => {
+          island.removeEventListener("pointerdown", hydrate, true), island.removeEventListener("focusin", hydrate, true), delete island.__formaInteractionHandler, hydrateIslandRoot(island, id, componentName, hydrateFn, sharedProps);
+        };
+        island.__formaInteractionHandler = hydrate, island.addEventListener("pointerdown", hydrate, { capture: true, once: true }), island.addEventListener("focusin", hydrate, { capture: true, once: true });
+      } else
+        hydrateIslandRoot(island, id, componentName, hydrateFn, sharedProps);
+    }
+  }
+  function deactivateIsland(el) {
+    let observer = el.__formaObserver;
+    observer && (observer.disconnect(), delete el.__formaObserver);
+    let interactionHandler = el.__formaInteractionHandler;
+    interactionHandler && (el.removeEventListener("pointerdown", interactionHandler, true), el.removeEventListener("focusin", interactionHandler, true), delete el.__formaInteractionHandler);
+    let idleCancel = el.__formaIdleCancel;
+    idleCancel && (idleCancel(), delete el.__formaIdleCancel), delete el.__formaScheduled, untrackIsland(el), el.__formaDisposed = true;
+    let dispose = el.__formaDispose;
+    typeof dispose == "function" && (dispose(), delete el.__formaDispose, el.setAttribute("data-forma-status", "disposed"));
+  }
+  function deactivateAllIslands(root = document) {
+    let islands = root.querySelectorAll("[data-forma-island]");
+    for (let island of islands)
+      deactivateIsland(island);
+  }
+  function hydrateIslandRoot(root, id, componentName, hydrateFn, sharedProps) {
+    if (root.__formaDisposed) return;
+    let disposeRoot;
+    try {
+      delete root.__formaScheduled;
+      let props = loadIslandProps(root, id, sharedProps);
+      root.setAttribute("data-forma-status", "hydrating");
+      let activeRoot = root;
+      createUnownedRoot((dispose) => {
+        disposeRoot = dispose, root.__formaDispose = dispose, activeRoot = hydrateIsland(() => hydrateFn(root, props), root), activeRoot !== root && (delete root.__formaDispose, activeRoot.__formaDispose = dispose, untrackIsland(root), trackIsland(activeRoot));
+      }), activeRoot.setAttribute("data-forma-status", "active");
+    } catch (err) {
+      if (disposeRoot) {
+        try {
+          disposeRoot();
+        } catch {
+        }
+        delete root.__formaDispose;
+      }
+      untrackIsland(root), root.setAttribute("data-forma-status", "error");
+    }
+  }
+  function longestIncreasingSubsequence(arr) {
+    let n = arr.length;
+    if (n === 0) return [];
+    let tails = new Int32Array(n), tailIndices = new Int32Array(n), predecessor = new Int32Array(n).fill(-1), tailsLen = 0;
+    for (let i = 0; i < n; i++) {
+      let val = arr[i], lo = 0, hi = tailsLen;
+      for (; lo < hi; ) {
+        let mid = lo + hi >> 1;
+        tails[mid] < val ? lo = mid + 1 : hi = mid;
+      }
+      tails[lo] = val, tailIndices[lo] = i, lo > 0 && (predecessor[i] = tailIndices[lo - 1]), lo >= tailsLen && tailsLen++;
+    }
+    let result = new Array(tailsLen), idx = tailIndices[tailsLen - 1];
+    for (let i = tailsLen - 1; i >= 0; i--)
+      result[i] = idx, idx = predecessor[idx];
     return result;
   }
   var SMALL_LIST_THRESHOLD = 32;
   var ABORT_SYM = /* @__PURE__ */ Symbol.for("forma-abort");
   var CACHE_SYM = /* @__PURE__ */ Symbol.for("forma-attr-cache");
   var DYNAMIC_CHILD_SYM = /* @__PURE__ */ Symbol.for("forma-dynamic-child");
+  function deactivateIslandsIn(node) {
+    if (hasScheduledOrActiveIslands() && node instanceof Element) {
+      node.hasAttribute("data-forma-island") && deactivateIsland(node);
+      for (let nested of node.querySelectorAll("[data-forma-island]"))
+        deactivateIsland(nested);
+    }
+  }
+  function removeRow(parent2, node, hooks) {
+    if (hooks?.onBeforeRemove) {
+      hooks.onBeforeRemove(node, () => {
+        deactivateIslandsIn(node), node.parentNode && node.parentNode.removeChild(node);
+      });
+      return;
+    }
+    deactivateIslandsIn(node), parent2.removeChild(node);
+  }
   function canPatchStaticElement(target, source) {
     return target instanceof HTMLElement && source instanceof HTMLElement && target.tagName === source.tagName && !target[ABORT_SYM] && !target[CACHE_SYM] && !target[DYNAMIC_CHILD_SYM] && !source[ABORT_SYM] && !source[CACHE_SYM] && !source[DYNAMIC_CHILD_SYM];
   }
   function patchStaticElement(target, source) {
-    const sourceAttrNames = /* @__PURE__ */ new Set();
-    for (const attr of Array.from(source.attributes)) {
-      sourceAttrNames.add(attr.name);
-      if (target.getAttribute(attr.name) !== attr.value) {
-        target.setAttribute(attr.name, attr.value);
-      }
-    }
-    for (const attr of Array.from(target.attributes)) {
-      if (!sourceAttrNames.has(attr.name)) {
-        target.removeAttribute(attr.name);
-      }
-    }
+    let sourceAttrNames = /* @__PURE__ */ new Set();
+    for (let attr of Array.from(source.attributes))
+      sourceAttrNames.add(attr.name), target.getAttribute(attr.name) !== attr.value && target.setAttribute(attr.name, attr.value);
+    for (let attr of Array.from(target.attributes))
+      sourceAttrNames.has(attr.name) || target.removeAttribute(attr.name);
     target.replaceChildren(...Array.from(source.childNodes));
   }
   function reconcileSmall(parent2, oldItems, newItems, oldNodes, keyFn, createFn, updateFn, beforeNode, hooks) {
-    const oldLen = oldItems.length;
-    const newLen = newItems.length;
-    const oldKeys = new Array(oldLen);
-    for (let i = 0; i < oldLen; i++) {
+    let oldLen = oldItems.length, newLen = newItems.length, oldKeys = new Array(oldLen);
+    for (let i = 0; i < oldLen; i++)
       oldKeys[i] = keyFn(oldItems[i]);
-    }
-    const oldIndices = new Array(newLen);
-    const oldUsed = new Uint8Array(oldLen);
+    let oldIndices = new Array(newLen), oldUsed = new Uint8Array(oldLen);
     for (let i = 0; i < newLen; i++) {
-      const key = keyFn(newItems[i]);
-      let found = -1;
-      for (let j = 0; j < oldLen; j++) {
+      let key = keyFn(newItems[i]), found = -1;
+      for (let j = 0; j < oldLen; j++)
         if (!oldUsed[j] && oldKeys[j] === key) {
-          found = j;
-          oldUsed[j] = 1;
+          found = j, oldUsed[j] = 1;
           break;
         }
-      }
       oldIndices[i] = found;
     }
-    for (let i = 0; i < oldLen; i++) {
-      if (!oldUsed[i]) {
-        if (hooks?.onBeforeRemove) {
-          const node = oldNodes[i];
-          hooks.onBeforeRemove(node, () => {
-            if (node.parentNode) node.parentNode.removeChild(node);
-          });
-        } else {
-          parent2.removeChild(oldNodes[i]);
-        }
-      }
-    }
+    for (let i = 0; i < oldLen; i++)
+      oldUsed[i] || removeRow(parent2, oldNodes[i], hooks);
     if (oldLen === newLen) {
       let allSameOrder = true;
-      for (let i = 0; i < newLen; i++) {
+      for (let i = 0; i < newLen; i++)
         if (oldIndices[i] !== i) {
           allSameOrder = false;
           break;
         }
-      }
       if (allSameOrder) {
-        const nodes = new Array(newLen);
+        let nodes = new Array(newLen);
         for (let i = 0; i < newLen; i++) {
-          const node = oldNodes[i];
-          updateFn(node, newItems[i]);
-          nodes[i] = node;
+          let node = oldNodes[i];
+          updateFn(node, newItems[i]), nodes[i] = node;
         }
         return { nodes, items: newItems };
       }
     }
-    const reusedIndices = [];
-    const reusedPositions = [];
-    for (let i = 0; i < newLen; i++) {
-      if (oldIndices[i] !== -1) {
-        reusedIndices.push(oldIndices[i]);
-        reusedPositions.push(i);
-      }
-    }
-    const lisOfReused = longestIncreasingSubsequence(reusedIndices);
-    const lisFlags = new Uint8Array(newLen);
-    for (const li of lisOfReused) {
+    let reusedIndices = [], reusedPositions = [];
+    for (let i = 0; i < newLen; i++)
+      oldIndices[i] !== -1 && (reusedIndices.push(oldIndices[i]), reusedPositions.push(i));
+    let lisOfReused = longestIncreasingSubsequence(reusedIndices), lisFlags = new Uint8Array(newLen);
+    for (let li of lisOfReused)
       lisFlags[reusedPositions[li]] = 1;
-    }
-    const newNodes = new Array(newLen);
-    let nextSibling2 = beforeNode ?? null;
+    let newNodes = new Array(newLen), nextSibling2 = beforeNode ?? null;
     for (let i = newLen - 1; i >= 0; i--) {
-      let node;
-      let isNew = false;
-      if (oldIndices[i] === -1) {
-        node = createFn(newItems[i]);
-        isNew = true;
-      } else {
-        node = oldNodes[oldIndices[i]];
-        updateFn(node, newItems[i]);
-        if (lisFlags[i]) {
-          newNodes[i] = node;
-          nextSibling2 = node;
-          continue;
-        }
+      let node, isNew = false;
+      if (oldIndices[i] === -1)
+        node = createFn(newItems[i]), isNew = true;
+      else if (node = oldNodes[oldIndices[i]], updateFn(node, newItems[i]), lisFlags[i]) {
+        newNodes[i] = node, nextSibling2 = node;
+        continue;
       }
-      if (nextSibling2) {
-        parent2.insertBefore(node, nextSibling2);
-      } else {
-        parent2.appendChild(node);
-      }
-      if (isNew) hooks?.onInsert?.(node);
-      newNodes[i] = node;
-      nextSibling2 = node;
+      nextSibling2 ? parent2.insertBefore(node, nextSibling2) : parent2.appendChild(node), isNew && hooks?.onInsert?.(node), newNodes[i] = node, nextSibling2 = node;
     }
     return { nodes: newNodes, items: newItems };
   }
   function reconcileList(parent2, oldItems, newItems, oldNodes, keyFn, createFn, updateFn, beforeNode, hooks) {
-    const oldLen = oldItems.length;
-    const newLen = newItems.length;
+    let oldLen = oldItems.length, newLen = newItems.length;
     if (newLen === 0) {
-      for (let i = 0; i < oldLen; i++) {
-        if (hooks?.onBeforeRemove) {
-          const node = oldNodes[i];
-          hooks.onBeforeRemove(node, () => {
-            if (node.parentNode) node.parentNode.removeChild(node);
-          });
-        } else {
-          parent2.removeChild(oldNodes[i]);
-        }
-      }
+      for (let i = 0; i < oldLen; i++)
+        removeRow(parent2, oldNodes[i], hooks);
       return { nodes: [], items: [] };
     }
     if (oldLen === 0) {
-      const nodes = new Array(newLen);
+      let nodes = new Array(newLen);
       for (let i = 0; i < newLen; i++) {
-        const node = createFn(newItems[i]);
-        if (beforeNode) {
-          parent2.insertBefore(node, beforeNode);
-        } else {
-          parent2.appendChild(node);
-        }
-        hooks?.onInsert?.(node);
-        nodes[i] = node;
+        let node = createFn(newItems[i]);
+        beforeNode ? parent2.insertBefore(node, beforeNode) : parent2.appendChild(node), hooks?.onInsert?.(node), nodes[i] = node;
       }
       return { nodes, items: newItems };
     }
-    if (oldLen < SMALL_LIST_THRESHOLD) {
+    if (oldLen < SMALL_LIST_THRESHOLD)
       return reconcileSmall(parent2, oldItems, newItems, oldNodes, keyFn, createFn, updateFn, beforeNode, hooks);
-    }
-    const oldKeyMap = /* @__PURE__ */ new Map();
+    let oldKeyMap = /* @__PURE__ */ new Map();
     for (let i = 0; i < oldLen; i++) {
-      oldKeyMap.set(keyFn(oldItems[i]), i);
+      let k = keyFn(oldItems[i]), bucket = oldKeyMap.get(k);
+      bucket ? bucket.push(i) : oldKeyMap.set(k, [i]);
     }
-    const oldIndices = new Array(newLen);
-    const oldUsed = new Uint8Array(oldLen);
+    let oldIndices = new Array(newLen), oldUsed = new Uint8Array(oldLen);
     for (let i = 0; i < newLen; i++) {
-      const key = keyFn(newItems[i]);
-      const oldIdx = oldKeyMap.get(key);
-      if (oldIdx !== void 0) {
-        oldIndices[i] = oldIdx;
-        oldUsed[oldIdx] = 1;
-      } else {
+      let key = keyFn(newItems[i]), bucket = oldKeyMap.get(key);
+      if (bucket && bucket.length > 0) {
+        let oldIdx = bucket.shift();
+        oldIndices[i] = oldIdx, oldUsed[oldIdx] = 1;
+      } else
         oldIndices[i] = -1;
-      }
     }
-    for (let i = 0; i < oldLen; i++) {
-      if (!oldUsed[i]) {
-        if (hooks?.onBeforeRemove) {
-          const node = oldNodes[i];
-          hooks.onBeforeRemove(node, () => {
-            if (node.parentNode) node.parentNode.removeChild(node);
-          });
-        } else {
-          parent2.removeChild(oldNodes[i]);
-        }
-      }
-    }
+    for (let i = 0; i < oldLen; i++)
+      oldUsed[i] || removeRow(parent2, oldNodes[i], hooks);
     if (oldLen === newLen) {
       let allSameOrder = true;
-      for (let i = 0; i < newLen; i++) {
+      for (let i = 0; i < newLen; i++)
         if (oldIndices[i] !== i) {
           allSameOrder = false;
           break;
         }
-      }
       if (allSameOrder) {
-        const nodes = new Array(newLen);
+        let nodes = new Array(newLen);
         for (let i = 0; i < newLen; i++) {
-          const node = oldNodes[i];
-          updateFn(node, newItems[i]);
-          nodes[i] = node;
+          let node = oldNodes[i];
+          updateFn(node, newItems[i]), nodes[i] = node;
         }
         return { nodes, items: newItems };
       }
     }
-    const reusedIndices = [];
-    const reusedPositions = [];
-    for (let i = 0; i < newLen; i++) {
-      if (oldIndices[i] !== -1) {
-        reusedIndices.push(oldIndices[i]);
-        reusedPositions.push(i);
-      }
-    }
-    const lisOfReused = longestIncreasingSubsequence(reusedIndices);
-    const lisFlags = new Uint8Array(newLen);
-    for (const li of lisOfReused) {
+    let reusedIndices = [], reusedPositions = [];
+    for (let i = 0; i < newLen; i++)
+      oldIndices[i] !== -1 && (reusedIndices.push(oldIndices[i]), reusedPositions.push(i));
+    let lisOfReused = longestIncreasingSubsequence(reusedIndices), lisFlags = new Uint8Array(newLen);
+    for (let li of lisOfReused)
       lisFlags[reusedPositions[li]] = 1;
-    }
-    const newNodes = new Array(newLen);
-    let nextSibling2 = beforeNode ?? null;
+    let newNodes = new Array(newLen), nextSibling2 = beforeNode ?? null;
     for (let i = newLen - 1; i >= 0; i--) {
-      let node;
-      let isNew = false;
-      if (oldIndices[i] === -1) {
-        node = createFn(newItems[i]);
-        isNew = true;
-      } else {
-        node = oldNodes[oldIndices[i]];
-        updateFn(node, newItems[i]);
-        if (lisFlags[i]) {
-          newNodes[i] = node;
-          nextSibling2 = node;
-          continue;
-        }
+      let node, isNew = false;
+      if (oldIndices[i] === -1)
+        node = createFn(newItems[i]), isNew = true;
+      else if (node = oldNodes[oldIndices[i]], updateFn(node, newItems[i]), lisFlags[i]) {
+        newNodes[i] = node, nextSibling2 = node;
+        continue;
       }
-      if (nextSibling2) {
-        parent2.insertBefore(node, nextSibling2);
-      } else {
-        parent2.appendChild(node);
-      }
-      if (isNew) hooks?.onInsert?.(node);
-      newNodes[i] = node;
-      nextSibling2 = node;
+      nextSibling2 ? parent2.insertBefore(node, nextSibling2) : parent2.appendChild(node), isNew && hooks?.onInsert?.(node), newNodes[i] = node, nextSibling2 = node;
     }
     return { nodes: newNodes, items: newItems };
   }
   function createList(items, keyFn, renderFn, options) {
-    if (hydrating) {
+    if (hydrating)
       return { type: "list", items, keyFn, renderFn, options };
-    }
-    const startMarker = document.createComment("forma-list-start");
-    const endMarker = document.createComment("forma-list-end");
-    const fragment2 = document.createDocumentFragment();
-    fragment2.appendChild(startMarker);
-    fragment2.appendChild(endMarker);
-    let cache2 = /* @__PURE__ */ new Map();
-    let currentNodes = [];
-    let currentItems = [];
-    const updateOnItemChange = options?.updateOnItemChange ?? "none";
-    internalEffect(() => {
-      const newItems = items();
-      const parent2 = startMarker.parentNode;
-      if (!parent2) {
+    let startMarker = document.createComment("forma-list-start"), endMarker = document.createComment("forma-list-end"), fragment2 = document.createDocumentFragment();
+    fragment2.appendChild(startMarker), fragment2.appendChild(endMarker);
+    let cache2 = /* @__PURE__ */ new Map(), currentNodes = [], currentItems = [], updateOnItemChange = options?.updateOnItemChange ?? "none";
+    return internalEffect(() => {
+      let newItems = items(), parent2 = startMarker.parentNode;
+      if (!parent2)
         return;
-      }
       if (!Array.isArray(newItems)) {
-        if (__DEV__) {
-          console.warn("[forma] createList: value is not an array, treating as empty");
-        }
-        for (const node of currentNodes) {
-          if (node.parentNode === parent2) parent2.removeChild(node);
-        }
-        cache2 = /* @__PURE__ */ new Map();
-        currentNodes = [];
-        currentItems = [];
+        __DEV__ && console.warn("[forma] createList: value is not an array, treating as empty");
+        for (let node of currentNodes)
+          node.parentNode === parent2 && (deactivateIslandsIn(node), parent2.removeChild(node));
+        cache2 = /* @__PURE__ */ new Map(), currentNodes = [], currentItems = [];
         return;
       }
       let cleanItems = newItems;
-      for (let i = 0; i < newItems.length; i++) {
+      for (let i = 0; i < newItems.length; i++)
         if (newItems[i] == null) {
           cleanItems = newItems.filter((item) => item != null);
           break;
         }
-      }
-      if (__DEV__) {
-        const seen = /* @__PURE__ */ new Set();
-        for (const item of cleanItems) {
-          const key = keyFn(item);
-          if (seen.has(key)) {
-            console.warn("[forma] createList: duplicate key detected:", key);
-          }
-          seen.add(key);
-        }
-      }
-      const updateRow = updateOnItemChange === "rerender" ? (node, item) => {
-        const key = keyFn(item);
-        const cached = cache2.get(key);
-        if (!cached) return;
-        if (cached.item === item) return;
-        cached.item = item;
-        if (!(node instanceof HTMLElement)) return;
-        if (node[ABORT_SYM] || node[CACHE_SYM] || node[DYNAMIC_CHILD_SYM]) {
+      if (__DEV__) ;
+      let updateRow = updateOnItemChange === "rerender" ? (node, item) => {
+        let key = keyFn(item), cached = cache2.get(key);
+        if (!cached || cached.item === item || (cached.item = item, !(node instanceof HTMLElement)) || node[ABORT_SYM] || node[CACHE_SYM] || node[DYNAMIC_CHILD_SYM])
           return;
-        }
-        const next = untrack(() => renderFn(item, cached.getIndex));
-        if (canPatchStaticElement(node, next)) {
-          patchStaticElement(node, next);
-          cached.element = node;
-        }
+        let next = untrack(() => renderFn(item, cached.getIndex));
+        canPatchStaticElement(node, next) && (patchStaticElement(node, next), cached.element = node);
       } : (_node, item) => {
-        const key = keyFn(item);
-        const cached = cache2.get(key);
-        if (cached) cached.item = item;
-      };
-      const result = reconcileList(
+        let key = keyFn(item), cached = cache2.get(key);
+        cached && (cached.item = item);
+      }, oldCache = cache2, result = reconcileList(
         parent2,
         currentItems,
         cleanItems,
         currentNodes,
         keyFn,
-        // createFn: create element + cache entry
+        // createFn: create element + cache entry.
+        // Each item is rendered inside createRoot + untrack so that inner
+        // effects are owned by the item's root (not the parent), and are
+        // disposed when the item is removed from the list.
         (item) => {
-          const key = keyFn(item);
-          const [getIndex, setIndex] = createSignal(0);
-          const element = untrack(() => renderFn(item, getIndex));
-          cache2.set(key, { element, item, getIndex, setIndex });
-          return element;
+          let key = keyFn(item), [getIndex, setIndex] = createSignal(0), itemDispose, element = createRoot((dispose) => (itemDispose = dispose, untrack(() => renderFn(item, getIndex))));
+          return cache2.set(key, { element, item, getIndex, setIndex, dispose: itemDispose }), element;
         },
         updateRow,
         // beforeNode: insert items before the end marker
         endMarker
-      );
-      const newCache = /* @__PURE__ */ new Map();
+      ), newCache = /* @__PURE__ */ new Map();
       for (let i = 0; i < cleanItems.length; i++) {
-        const key = keyFn(cleanItems[i]);
-        const cached = cache2.get(key);
-        if (cached) {
-          cached.setIndex(i);
-          newCache.set(key, cached);
-        }
+        let key = keyFn(cleanItems[i]), cached = oldCache.get(key);
+        cached && (cached.setIndex(i), newCache.set(key, cached));
       }
-      cache2 = newCache;
-      currentNodes = result.nodes;
-      currentItems = result.items;
-    });
-    return fragment2;
+      for (let [key, cached] of oldCache)
+        newCache.has(key) || cached.dispose();
+      cache2 = newCache, currentNodes = result.nodes, currentItems = result.items;
+    }), registerDisposer(() => {
+      for (let cached of cache2.values())
+        cached.dispose();
+      cache2 = /* @__PURE__ */ new Map(), currentNodes = [], currentItems = [];
+    }), fragment2;
   }
-
-  // src/dom/show.ts
-  function createShow(when, thenFn, elseFn) {
+  function createShow(when, thenFn, elseFn = () => null) {
     if (hydrating) {
-      const branch = when() ? thenFn() : elseFn?.() ?? null;
+      let branch = when() ? thenFn() : elseFn();
       return {
         type: "show",
         condition: when,
@@ -1360,119 +1153,164 @@ var FormaJS = (() => {
         initialBranch: branch
       };
     }
-    const startMarker = document.createComment("forma-show");
-    const endMarker = document.createComment("/forma-show");
-    const fragment2 = document.createDocumentFragment();
-    fragment2.appendChild(startMarker);
-    fragment2.appendChild(endMarker);
-    let currentNode = null;
-    let lastTruthy = null;
-    let currentDispose = null;
-    const showDispose = internalEffect(() => {
-      const truthy = !!when();
-      const DEBUG = typeof globalThis.__FORMA_DEBUG__ !== "undefined";
-      const DEBUG_LABEL = DEBUG ? thenFn.toString().slice(0, 60) : "";
+    let startMarker = document.createComment("forma-show"), endMarker = document.createComment("/forma-show"), fragment2 = document.createDocumentFragment();
+    fragment2.appendChild(startMarker), fragment2.appendChild(endMarker);
+    let currentNode = null, lastTruthy = null, currentDispose = null, showDispose = internalEffect(() => {
+      let truthy = !!when(), DEBUG = typeof globalThis.__FORMA_DEBUG__ < "u", DEBUG_LABEL = DEBUG ? thenFn.toString().slice(0, 60) : "";
       if (truthy === lastTruthy) {
-        if (DEBUG) console.log("[forma:show] skip (same)", truthy, DEBUG_LABEL);
+        DEBUG && console.log("[forma:show] skip (same)", truthy, DEBUG_LABEL);
         return;
       }
-      if (DEBUG) console.log("[forma:show]", lastTruthy, "\u2192", truthy, DEBUG_LABEL);
-      lastTruthy = truthy;
-      const parent2 = startMarker.parentNode;
+      DEBUG && console.log("[forma:show]", lastTruthy, "\u2192", truthy, DEBUG_LABEL), lastTruthy = truthy;
+      let parent2 = startMarker.parentNode;
       if (!parent2) {
-        if (DEBUG) console.warn("[forma:show] parentNode is null! skipping.", DEBUG_LABEL);
+        DEBUG && console.warn("[forma:show] parentNode is null! skipping.", DEBUG_LABEL);
         return;
       }
-      if (DEBUG) console.log("[forma:show] parent:", parent2.nodeName, "inDoc:", document.contains(parent2));
-      if (currentDispose) {
-        currentDispose();
-        currentDispose = null;
-      }
-      if (currentNode) {
-        if (currentNode.parentNode === parent2) {
+      if (DEBUG && console.log("[forma:show] parent:", parent2.nodeName, "inDoc:", document.contains(parent2)), currentDispose && (currentDispose(), currentDispose = null), currentNode)
+        if (currentNode.parentNode === parent2)
           parent2.removeChild(currentNode);
-        } else {
-          while (startMarker.nextSibling && startMarker.nextSibling !== endMarker) {
+        else
+          for (; startMarker.nextSibling && startMarker.nextSibling !== endMarker; )
             parent2.removeChild(startMarker.nextSibling);
-          }
-        }
-      }
-      const branchFn = truthy ? thenFn : elseFn;
+      let branchFn = truthy ? thenFn : elseFn;
       if (branchFn) {
         let branchDispose;
-        currentNode = createRoot((dispose) => {
-          branchDispose = dispose;
-          return untrack(() => branchFn());
-        });
-        currentDispose = branchDispose;
-      } else {
+        currentNode = createRoot((dispose) => (branchDispose = dispose, untrack(() => branchFn()))), currentDispose = branchDispose;
+      } else
         currentNode = null;
-      }
-      if (currentNode) {
-        parent2.insertBefore(currentNode, endMarker);
-      }
+      currentNode && parent2.insertBefore(currentNode, endMarker);
     });
-    fragment2.__showDispose = () => {
-      showDispose();
-      if (currentDispose) {
-        currentDispose();
-        currentDispose = null;
-      }
-    };
-    return fragment2;
+    return registerDisposer(() => {
+      currentDispose && (currentDispose(), currentDispose = null), currentNode = null;
+    }), fragment2.__showDispose = () => {
+      showDispose(), currentDispose && (currentDispose(), currentDispose = null);
+    }, fragment2;
   }
-
-  // src/dom/hydrate.ts
+  var URL_IGNORED_CHARS_RE = /[\u0000-\u0020\u007F-\u009F]/g;
+  var DANGEROUS_SCHEME_RE = /^(?:javascript|vbscript|data:text\/html)/i;
+  var SVG_DATA_URL_RE = /^data:image\/svg\+xml/i;
+  var IMAGE_CONTEXT_TAGS = /* @__PURE__ */ new Set([
+    "img",
+    "image",
+    "video",
+    "audio",
+    "source",
+    "body",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+    "td",
+    "th"
+  ]);
+  var URL_ATTRS = /* @__PURE__ */ new Set([
+    "href",
+    "src",
+    "action",
+    "formaction",
+    "xlink:href",
+    "poster",
+    "background",
+    "data"
+  ]);
+  function isUrlAttr(name) {
+    return URL_ATTRS.has(name.toLowerCase());
+  }
+  function isDangerousUrl(value2, tag) {
+    let normalized = value2.replace(URL_IGNORED_CHARS_RE, "");
+    return DANGEROUS_SCHEME_RE.test(normalized) ? true : SVG_DATA_URL_RE.test(normalized) ? tag === void 0 || !IMAGE_CONTEXT_TAGS.has(tag.toLowerCase()) : false;
+  }
+  function isEventHandlerAttr(name) {
+    return /^on/i.test(name);
+  }
+  function isUnsafeAttrWrite(tag, name, value2) {
+    return isEventHandlerAttr(name) ? true : isUrlAttr(name) && isDangerousUrl(value2, tag);
+  }
   var ABORT_SYM2 = /* @__PURE__ */ Symbol.for("forma-abort");
   var hydrating = false;
   function setHydrating(value2) {
     hydrating = value2;
   }
   function isDescriptor(v) {
-    return v != null && typeof v === "object" && "type" in v && v.type === "element";
+    return v != null && typeof v == "object" && "type" in v && v.type === "element";
   }
   function isShowDescriptor(v) {
-    return v != null && typeof v === "object" && "type" in v && v.type === "show";
+    return v != null && typeof v == "object" && "type" in v && v.type === "show";
   }
   function isListDescriptor(v) {
-    return v != null && typeof v === "object" && "type" in v && v.type === "list";
+    return v != null && typeof v == "object" && "type" in v && v.type === "list";
   }
+  var KIND_TEXT = 116;
+  var KIND_SHOW = 115;
+  var KIND_LIST = 108;
+  var KIND_ISLAND = 105;
+  function markerIndex(data, kind, offset) {
+    if (data.charCodeAt(offset) !== 102 || data.charCodeAt(offset + 1) !== 58 || data.charCodeAt(offset + 2) !== kind)
+      return -1;
+    let first = offset + 3;
+    if (data.length <= first) return -1;
+    let idx = 0;
+    for (let i = first; i < data.length; i++) {
+      let c = data.charCodeAt(i);
+      if (c < 48 || c > 57) return -1;
+      idx = idx * 10 + (c - 48);
+    }
+    return idx;
+  }
+  var PROP_TO_ATTR = {
+    className: "class",
+    htmlFor: "for",
+    tabIndex: "tabindex"
+  };
   function applyDynamicProps(el, props) {
     if (!props) return;
-    for (const key in props) {
-      const value2 = props[key];
-      if (typeof value2 !== "function") continue;
-      if (key.charCodeAt(0) === 111 && key.charCodeAt(1) === 110 && key.length > 2) {
-        let ac = el[ABORT_SYM2];
-        if (!ac) {
-          ac = new AbortController();
-          el[ABORT_SYM2] = ac;
-        }
-        el.addEventListener(key.slice(2).toLowerCase(), value2, { signal: ac.signal });
+    let ref = null;
+    for (let key in props) {
+      let value2 = props[key];
+      if (key === "ref") {
+        typeof value2 == "function" && (ref = value2);
         continue;
       }
-      const fn = value2;
-      const attrKey = key;
+      if (typeof value2 != "function") continue;
+      if (key.charCodeAt(0) === 111 && key.charCodeAt(1) === 110 && key.length > 2) {
+        let ac = el[ABORT_SYM2];
+        ac || (ac = new AbortController(), el[ABORT_SYM2] = ac), el.addEventListener(key.slice(2).toLowerCase(), value2, { signal: ac.signal });
+        continue;
+      }
+      let attrKey = PROP_TO_ATTR[key] ?? key;
+      if (isEventHandlerAttr(attrKey)) {
+        el.removeAttribute(attrKey);
+        continue;
+      }
+      let fn = value2, tag = el.localName;
       internalEffect(() => {
-        const v = fn();
-        if (v === false || v == null) {
+        let v = fn();
+        if (v === false || v == null)
           el.removeAttribute(attrKey);
-        } else if (v === true) {
+        else if (v === true)
           el.setAttribute(attrKey, "");
-        } else {
-          el.setAttribute(attrKey, String(v));
+        else {
+          let str = String(v);
+          if (isUnsafeAttrWrite(tag, attrKey, str)) {
+            __DEV__ && console.warn(`[forma] Hydration: dropped "${attrKey}" on <${tag}> (unsafe-URL)`), el.removeAttribute(attrKey);
+            return;
+          }
+          el.setAttribute(attrKey, str);
         }
       });
     }
+    ref && ref(el);
   }
   function ensureNode(value2) {
     if (value2 instanceof Node) return value2;
     if (value2 == null || value2 === false || value2 === true) return null;
-    if (typeof value2 === "string") return new Text(value2);
-    if (typeof value2 === "number") return new Text(String(value2));
+    if (typeof value2 == "string") return new Text(value2);
+    if (typeof value2 == "number") return new Text(String(value2));
     if (isDescriptor(value2)) return descriptorToElement(value2);
     if (isShowDescriptor(value2)) {
-      const prevH = hydrating;
+      let prevH = hydrating;
       hydrating = false;
       try {
         return createShow(
@@ -1485,7 +1323,7 @@ var FormaJS = (() => {
       }
     }
     if (isListDescriptor(value2)) {
-      const prevH = hydrating;
+      let prevH = hydrating;
       hydrating = false;
       try {
         return createList(value2.items, value2.keyFn, value2.renderFn, value2.options);
@@ -1496,46 +1334,39 @@ var FormaJS = (() => {
     return null;
   }
   function descriptorToElement(desc) {
-    const prevHydrating = hydrating;
+    let prevHydrating = hydrating;
     hydrating = false;
     try {
-      const children2 = desc.children.map((child) => {
-        if (isDescriptor(child)) return descriptorToElement(child);
-        if (isShowDescriptor(child)) return ensureNode(child);
-        if (isListDescriptor(child)) return ensureNode(child);
-        return child;
-      });
+      let children2 = desc.children.map((child) => isDescriptor(child) ? descriptorToElement(child) : isShowDescriptor(child) || isListDescriptor(child) ? ensureNode(child) : child);
       return h(desc.tag, desc.props, ...children2);
     } finally {
       hydrating = prevHydrating;
     }
   }
   function isIslandStart(data) {
-    return data.length >= 4 && data.charCodeAt(0) === 102 && data.charCodeAt(1) === 58 && data.charCodeAt(2) === 105;
+    return markerIndex(data, KIND_ISLAND, 0) >= 0;
   }
   function isShowStart(data) {
-    return data.length >= 4 && data.charCodeAt(0) === 102 && data.charCodeAt(1) === 58 && data.charCodeAt(2) === 115;
+    return markerIndex(data, KIND_SHOW, 0) >= 0;
   }
   function isTextStart(data) {
-    return data.length >= 4 && data.charCodeAt(0) === 102 && data.charCodeAt(1) === 58 && data.charCodeAt(2) === 116;
+    return markerIndex(data, KIND_TEXT, 0) >= 0;
   }
   function isListStart(data) {
-    return data.length >= 4 && data.charCodeAt(0) === 102 && data.charCodeAt(1) === 58 && data.charCodeAt(2) === 108;
+    return markerIndex(data, KIND_LIST, 0) >= 0;
   }
   function findClosingMarker(start) {
-    const closing = "/" + start.data;
-    let node = start.nextSibling;
-    while (node) {
-      if (node.nodeType === 8 && node.data === closing) {
+    let closing = "/" + start.data, node = start.nextSibling;
+    for (; node; ) {
+      if (node.nodeType === 8 && node.data === closing)
         return node;
-      }
       node = node.nextSibling;
     }
     return null;
   }
   function findTextBetween(start, end) {
     let node = start.nextSibling;
-    while (node && node !== end) {
+    for (; node && node !== end; ) {
       if (node.nodeType === 3) return node;
       node = node.nextSibling;
     }
@@ -1543,361 +1374,272 @@ var FormaJS = (() => {
   }
   function nextElementBetweenMarkers(start, end) {
     let node = start.nextSibling;
-    while (node && node !== end) {
+    for (; node && node !== end; ) {
       if (node.nodeType === 1) return node;
       node = node.nextSibling;
     }
-    return void 0;
   }
   function extractContentBetweenMarkers(start, end) {
-    const frag = document.createDocumentFragment();
-    let node = start.nextSibling;
-    while (node && node !== end) {
-      const next = node.nextSibling;
-      frag.appendChild(node);
-      node = next;
+    let frag = document.createDocumentFragment(), node = start.nextSibling;
+    for (; node && node !== end; ) {
+      let next = node.nextSibling;
+      frag.appendChild(node), node = next;
     }
     return frag;
   }
-  function setupShowEffect(desc, marker) {
-    let currentCondition = !!desc.condition();
-    let thenFragment = null;
-    let elseFragment = null;
-    const hasSSRContent = marker.start.nextSibling !== marker.end;
-    if (!hasSSRContent && currentCondition) {
-      if (__DEV__) console.warn("[forma] Hydration: show condition mismatch \u2014 SSR empty but client condition is true");
-      const trueBranch = desc.whenTrue();
-      if (trueBranch instanceof Node) {
-        marker.start.parentNode.insertBefore(trueBranch, marker.end);
-      }
+  function adoptShowRegion(desc, start, end) {
+    let adoptedDispose = null;
+    desc.initialBranch != null && (adoptedDispose = createRoot((dispose) => (adoptBranchContent(desc.initialBranch, start, end), dispose))), setupShowEffect(desc, start, end, adoptedDispose);
+  }
+  function setupShowEffect(desc, start, end, adoptedDispose) {
+    let currentCondition = !!untrack(() => desc.condition()), thenFragment = null, thenDispose = null, elseFragment = null, elseDispose = null, currentDispose = adoptedDispose, holdingSSR = start.nextSibling !== end, renderBranch = (cond) => {
+      let factory = cond ? desc.whenTrue : desc.whenFalse;
+      if (!factory) return null;
+      let branchDispose, node = createRoot((dispose) => (branchDispose = dispose, untrack(() => {
+        let raw = factory();
+        return raw instanceof Node ? raw : ensureNode(raw);
+      })));
+      return node ? (currentDispose = branchDispose, node) : (branchDispose(), null);
+    };
+    if (holdingSSR && desc.initialBranch == null)
+      extractContentBetweenMarkers(start, end), currentDispose && (currentDispose(), currentDispose = null), holdingSSR = false;
+    else if (!holdingSSR && desc.initialBranch != null) {
+      let branch = renderBranch(currentCondition);
+      branch && start.parentNode.insertBefore(branch, end);
     }
     internalEffect(() => {
-      const next = !!desc.condition();
+      let next = !!desc.condition();
       if (next === currentCondition) return;
       currentCondition = next;
-      const parent2 = marker.start.parentNode;
+      let parent2 = start.parentNode;
       if (!parent2) return;
-      const current = extractContentBetweenMarkers(marker.start, marker.end);
-      if (!next) {
-        thenFragment = current;
-      } else {
-        elseFragment = current;
-      }
-      let branch = next ? thenFragment ?? desc.whenTrue() : desc.whenFalse ? elseFragment ?? desc.whenFalse() : null;
-      if (next && thenFragment) thenFragment = null;
-      if (!next && elseFragment) elseFragment = null;
-      if (branch != null && !(branch instanceof Node)) {
-        branch = ensureNode(branch);
-      }
-      if (branch instanceof Node) {
-        parent2.insertBefore(branch, marker.end);
-      }
+      let leaving = extractContentBetweenMarkers(start, end);
+      holdingSSR ? (holdingSSR = false, currentDispose && currentDispose()) : next ? (elseFragment = leaving, elseDispose = currentDispose) : (thenFragment = leaving, thenDispose = currentDispose), currentDispose = null;
+      let branch;
+      next ? thenFragment ? (branch = thenFragment, currentDispose = thenDispose, thenFragment = null, thenDispose = null) : branch = renderBranch(true) : elseFragment ? (branch = elseFragment, currentDispose = elseDispose, elseFragment = null, elseDispose = null) : branch = renderBranch(false), branch && parent2.insertBefore(branch, end);
+    }), registerDisposer(() => {
+      currentDispose && currentDispose(), thenDispose && thenDispose(), elseDispose && elseDispose(), currentDispose = thenDispose = elseDispose = null, thenFragment = elseFragment = null;
     });
+  }
+  function adoptRow(renderFn, item, getIndex, rowEl) {
+    let prevHydrating = hydrating;
+    hydrating = true;
+    let rendered;
+    try {
+      rendered = untrack(() => renderFn(item, getIndex));
+    } finally {
+      hydrating = prevHydrating;
+    }
+    if (!isDescriptor(rendered)) return rowEl;
+    if (rowEl.tagName !== rendered.tag.toUpperCase()) {
+      let fresh = descriptorToElement(rendered);
+      return rowEl.replaceWith(fresh), fresh;
+    }
+    return adoptNode(rendered, rowEl), rowEl;
+  }
+  function adoptListRegion(desc, start, end) {
+    let listKeyFn = desc.keyFn, listRenderFn = desc.renderFn, ssrKeyMap = /* @__PURE__ */ new Map(), ssrElements = [], duplicateRows = [], node = start.nextSibling;
+    for (; node && node !== end; ) {
+      if (node.nodeType === 1) {
+        let el = node, key = el.getAttribute("data-forma-key");
+        key != null && ssrKeyMap.has(key) ? duplicateRows.push(el) : (ssrElements.push(el), key != null && ssrKeyMap.set(key, el));
+      }
+      node = node.nextSibling;
+    }
+    for (let dup of duplicateRows)
+      dup.parentNode && dup.parentNode.removeChild(dup);
+    let currentItems = untrack(() => desc.items()), useIndexFallback = ssrKeyMap.size === 0 && ssrElements.length > 0, cache2 = /* @__PURE__ */ new Map(), adoptedNodes = [], adoptedItems = [], usedIndices = /* @__PURE__ */ new Set();
+    for (let i = 0; i < currentItems.length; i++) {
+      let item = currentItems[i], key = listKeyFn(item), ssrNode;
+      useIndexFallback ? i < ssrElements.length && (ssrNode = ssrElements[i], usedIndices.add(i)) : (ssrNode = ssrKeyMap.get(String(key)), ssrNode && ssrKeyMap.delete(String(key)));
+      let [getIndex, setIndex] = createSignal(i), rowDispose, element;
+      if (ssrNode) {
+        let row = ssrNode;
+        element = createRoot((dispose) => (rowDispose = dispose, adoptRow(listRenderFn, item, getIndex, row)));
+      } else {
+        let prevHydrating = hydrating;
+        hydrating = false;
+        try {
+          element = createRoot((dispose) => (rowDispose = dispose, untrack(() => listRenderFn(item, getIndex)))), end.parentNode.insertBefore(element, end);
+        } finally {
+          hydrating = prevHydrating;
+        }
+      }
+      cache2.set(key, { getIndex, setIndex, dispose: rowDispose }), adoptedNodes.push(element), adoptedItems.push(item);
+    }
+    if (useIndexFallback)
+      for (let i = 0; i < ssrElements.length; i++)
+        !usedIndices.has(i) && ssrElements[i].parentNode && ssrElements[i].parentNode.removeChild(ssrElements[i]);
+    else
+      for (let [unusedKey, unusedNode] of ssrKeyMap)
+        unusedNode.parentNode && unusedNode.parentNode.removeChild(unusedNode);
+    let parent2 = start.parentNode;
+    for (let adoptedNode of adoptedNodes)
+      parent2.insertBefore(adoptedNode, end);
+    let reconcileNodes = adoptedNodes.slice(), reconcileItems = adoptedItems.slice();
+    internalEffect(() => {
+      let newItems = desc.items(), listParent = start.parentNode;
+      if (!listParent) return;
+      let result = reconcileList(
+        listParent,
+        reconcileItems,
+        newItems,
+        reconcileNodes,
+        listKeyFn,
+        (item) => {
+          let prevHydrating = hydrating;
+          hydrating = false;
+          try {
+            let key = listKeyFn(item), [getIndex, setIndex] = createSignal(0), rowDispose, element = createRoot((dispose) => (rowDispose = dispose, untrack(() => listRenderFn(item, getIndex))));
+            return cache2.set(key, { getIndex, setIndex, dispose: rowDispose }), element;
+          } finally {
+            hydrating = prevHydrating;
+          }
+        },
+        // updateFn: reused rows keep their DOM. The index signal is refreshed in
+        // the pass below, so there is nothing to do per reused row here.
+        () => {
+        },
+        end
+      ), newCache = /* @__PURE__ */ new Map();
+      for (let i = 0; i < newItems.length; i++) {
+        let key = listKeyFn(newItems[i]), cached = cache2.get(key);
+        cached && (cached.setIndex(i), newCache.set(key, cached));
+      }
+      for (let [key, cached] of cache2)
+        newCache.has(key) || cached.dispose();
+      cache2 = newCache, reconcileNodes = result.nodes, reconcileItems = result.items;
+    }), registerDisposer(() => {
+      for (let cached of cache2.values()) cached.dispose();
+      cache2 = /* @__PURE__ */ new Map(), reconcileNodes = [], reconcileItems = [];
+    });
+  }
+  function nextMarkerBetween(regionStart, regionEnd, isStart) {
+    let node = regionStart.nextSibling;
+    for (; node && node !== regionEnd; ) {
+      if (node.nodeType === 8 && isStart(node.data)) return node;
+      node = node.nextSibling;
+    }
+    return null;
   }
   function adoptBranchContent(desc, regionStart, regionEnd) {
     if (isDescriptor(desc)) {
-      const el = nextElementBetweenMarkers(regionStart, regionEnd);
-      if (el) adoptNode(desc, el);
+      let el = nextElementBetweenMarkers(regionStart, regionEnd);
+      el && adoptNode(desc, el);
     } else if (isShowDescriptor(desc)) {
-      let node = regionStart.nextSibling;
-      while (node && node !== regionEnd) {
-        if (node.nodeType === 8 && isShowStart(node.data)) {
-          const innerStart = node;
-          const innerEnd = findClosingMarker(innerStart);
-          if (innerEnd) {
-            if (desc.initialBranch) {
-              adoptBranchContent(desc.initialBranch, innerStart, innerEnd);
-            }
-            setupShowEffect(desc, { start: innerStart, end: innerEnd, cachedContent: null });
-          }
-          break;
-        }
-        node = node.nextSibling;
+      let innerStart = nextMarkerBetween(regionStart, regionEnd, isShowStart);
+      if (innerStart) {
+        let innerEnd = findClosingMarker(innerStart);
+        innerEnd && adoptShowRegion(desc, innerStart, innerEnd);
+      }
+    } else if (isListDescriptor(desc)) {
+      let innerStart = nextMarkerBetween(regionStart, regionEnd, isListStart);
+      if (innerStart) {
+        let innerEnd = findClosingMarker(innerStart);
+        innerEnd && adoptListRegion(desc, innerStart, innerEnd);
       }
     }
   }
   function adoptNode(desc, ssrEl) {
     if (!ssrEl || ssrEl.tagName !== desc.tag.toUpperCase()) {
-      if (__DEV__) console.warn(`Hydration mismatch: expected <${desc.tag}>, got <${ssrEl?.tagName?.toLowerCase() ?? "nothing"}>`);
-      const fresh = descriptorToElement(desc);
-      if (ssrEl) ssrEl.replaceWith(fresh);
+      let fresh = descriptorToElement(desc);
+      ssrEl && ssrEl.replaceWith(fresh);
       return;
     }
     applyDynamicProps(ssrEl, desc.props);
     let cursor = ssrEl.firstChild;
-    for (const child of desc.children) {
-      if (child === false || child == null) continue;
-      if (isDescriptor(child)) {
-        while (cursor && cursor.nodeType === 3 && !cursor.data.trim()) {
-          cursor = cursor.nextSibling;
-        }
-        while (cursor && cursor.nodeType === 1 && cursor.hasAttribute("data-forma-island")) {
-          cursor = cursor.nextSibling;
-        }
-        if (!cursor) {
-          ssrEl.appendChild(descriptorToElement(child));
-          continue;
-        }
-        if (cursor.nodeType === 1) {
-          const el = cursor;
-          cursor = cursor.nextSibling;
-          adoptNode(child, el);
-        } else if (cursor.nodeType === 8 && isIslandStart(cursor.data)) {
-          const end = findClosingMarker(cursor);
-          const fresh = descriptorToElement(child);
-          if (end) {
-            end.parentNode.insertBefore(fresh, end);
-            cursor = end.nextSibling;
-          } else {
-            ssrEl.appendChild(fresh);
-            cursor = null;
-          }
-        } else {
-          ssrEl.appendChild(descriptorToElement(child));
-        }
-      } else if (isShowDescriptor(child)) {
-        while (cursor && !(cursor.nodeType === 8 && isShowStart(cursor.data))) {
-          cursor = cursor.nextSibling;
-        }
-        if (cursor) {
-          const start = cursor;
-          const end = findClosingMarker(start);
-          if (end) {
-            if (child.initialBranch) {
-              adoptBranchContent(child.initialBranch, start, end);
-            }
-            setupShowEffect(child, { start, end, cachedContent: null });
-            cursor = end.nextSibling;
-          }
-        }
-      } else if (isListDescriptor(child)) {
-        while (cursor && !(cursor.nodeType === 8 && isListStart(cursor.data))) {
-          cursor = cursor.nextSibling;
-        }
-        if (cursor) {
-          const start = cursor;
-          const end = findClosingMarker(start);
-          if (end) {
-            const ssrKeyMap = /* @__PURE__ */ new Map();
-            const ssrElements = [];
-            let node = start.nextSibling;
-            while (node && node !== end) {
-              if (node.nodeType === 1) {
-                const el = node;
-                ssrElements.push(el);
-                const key = el.getAttribute("data-forma-key");
-                if (key != null) {
-                  ssrKeyMap.set(key, el);
-                }
-              }
-              node = node.nextSibling;
-            }
-            const currentItems = untrack(() => child.items());
-            const listKeyFn = child.keyFn;
-            const listRenderFn = child.renderFn;
-            const useIndexFallback = ssrKeyMap.size === 0 && ssrElements.length > 0;
-            const adoptedNodes = [];
-            const adoptedItems = [];
-            const usedIndices = /* @__PURE__ */ new Set();
-            for (let i = 0; i < currentItems.length; i++) {
-              const item = currentItems[i];
-              const key = listKeyFn(item);
-              let ssrNode;
-              if (useIndexFallback) {
-                if (i < ssrElements.length) {
-                  ssrNode = ssrElements[i];
-                  usedIndices.add(i);
-                }
-              } else {
-                ssrNode = ssrKeyMap.get(String(key));
-                if (ssrNode) ssrKeyMap.delete(String(key));
-              }
-              if (ssrNode) {
-                adoptedNodes.push(ssrNode);
-                adoptedItems.push(item);
-              } else {
-                if (__DEV__) console.warn(`[FormaJS] Hydration: list item key "${key}" not found in SSR \u2014 rendering fresh`);
-                const prevHydrating = hydrating;
-                hydrating = false;
-                try {
-                  const [getIndex] = createSignal(i);
-                  const fresh = listRenderFn(item, getIndex);
-                  end.parentNode.insertBefore(fresh, end);
-                  adoptedNodes.push(fresh);
-                  adoptedItems.push(item);
-                } finally {
-                  hydrating = prevHydrating;
-                }
-              }
-            }
-            if (useIndexFallback) {
-              for (let i = 0; i < ssrElements.length; i++) {
-                if (!usedIndices.has(i) && ssrElements[i].parentNode) {
-                  ssrElements[i].parentNode.removeChild(ssrElements[i]);
-                }
-              }
-            } else {
-              for (const [unusedKey, unusedNode] of ssrKeyMap) {
-                if (__DEV__) console.warn(`[FormaJS] Hydration: removing extra SSR list item with key "${unusedKey}"`);
-                if (unusedNode.parentNode) {
-                  unusedNode.parentNode.removeChild(unusedNode);
-                }
-              }
-            }
-            const parent2 = start.parentNode;
-            for (const adoptedNode of adoptedNodes) {
-              parent2.insertBefore(adoptedNode, end);
-            }
-            let cache2 = /* @__PURE__ */ new Map();
-            for (let i = 0; i < adoptedItems.length; i++) {
-              const item = adoptedItems[i];
-              const key = listKeyFn(item);
-              const [getIndex, setIndex] = createSignal(i);
-              cache2.set(key, {
-                element: adoptedNodes[i],
-                item,
-                getIndex,
-                setIndex
-              });
-            }
-            let reconcileNodes = adoptedNodes.slice();
-            let reconcileItems = adoptedItems.slice();
-            internalEffect(() => {
-              const newItems = child.items();
-              const parent3 = start.parentNode;
-              if (!parent3) return;
-              const result = reconcileList(
-                parent3,
-                reconcileItems,
-                newItems,
-                reconcileNodes,
-                listKeyFn,
-                (item) => {
-                  const prevHydrating = hydrating;
-                  hydrating = false;
-                  try {
-                    const key = listKeyFn(item);
-                    const [getIndex, setIndex] = createSignal(0);
-                    const element = untrack(() => listRenderFn(item, getIndex));
-                    cache2.set(key, { element, item, getIndex, setIndex });
-                    return element;
-                  } finally {
-                    hydrating = prevHydrating;
-                  }
-                },
-                (_node, item) => {
-                  const key = listKeyFn(item);
-                  const cached = cache2.get(key);
-                  if (cached) cached.item = item;
-                },
-                end
-              );
-              const newCache = /* @__PURE__ */ new Map();
-              for (let i = 0; i < newItems.length; i++) {
-                const key = listKeyFn(newItems[i]);
-                const cached = cache2.get(key);
-                if (cached) {
-                  cached.setIndex(i);
-                  newCache.set(key, cached);
-                }
-              }
-              cache2 = newCache;
-              reconcileNodes = result.nodes;
-              reconcileItems = result.items;
-            });
-            cursor = end.nextSibling;
-          }
-        }
-      } else if (typeof child === "function") {
-        while (cursor && cursor.nodeType === 3 && !cursor.data.trim()) {
-          cursor = cursor.nextSibling;
-        }
-        if (cursor && cursor.nodeType === 1) {
-          const initial = child();
-          if (isDescriptor(initial)) {
-            const el = cursor;
+    for (let child of desc.children)
+      if (!(child === false || child == null))
+        if (isDescriptor(child)) {
+          for (; cursor && cursor.nodeType === 3 && !cursor.data.trim(); )
             cursor = cursor.nextSibling;
-            adoptNode(initial, el);
+          for (; cursor && cursor.nodeType === 1 && cursor.hasAttribute("data-forma-island"); )
+            cursor = cursor.nextSibling;
+          if (!cursor) {
+            ssrEl.appendChild(descriptorToElement(child));
             continue;
           }
-        }
-        if (cursor && cursor.nodeType === 8) {
-          const data = cursor.data;
-          if (isTextStart(data)) {
-            const endMarker = findClosingMarker(cursor);
-            let textNode = cursor.nextSibling;
-            if (!textNode || textNode.nodeType !== 3) {
-              if (__DEV__) console.warn(`[FormaJS] Hydration: created text node for marker ${data} \u2014 SSR walker should emit content between markers`);
-              const created = document.createTextNode("");
-              cursor.parentNode.insertBefore(created, endMarker || cursor.nextSibling);
-              textNode = created;
+          if (cursor.nodeType === 1) {
+            let el = cursor;
+            cursor = cursor.nextSibling, adoptNode(child, el);
+          } else if (cursor.nodeType === 8 && isIslandStart(cursor.data)) {
+            let islandStart = cursor, end = findClosingMarker(islandStart);
+            if ((end ? nextElementBetweenMarkers(islandStart, end) : void 0) && end)
+              cursor = end.nextSibling;
+            else {
+              let fresh = descriptorToElement(child);
+              end ? (end.parentNode.insertBefore(fresh, end), cursor = end.nextSibling) : (ssrEl.appendChild(fresh), cursor = null);
             }
-            internalEffect(() => {
-              textNode.data = String(child());
-            });
-            cursor = endMarker ? endMarker.nextSibling : textNode.nextSibling;
-          } else if (isShowStart(data)) {
-            const start = cursor;
-            const end = findClosingMarker(start);
-            if (end) {
-              let textNode = findTextBetween(start, end);
-              if (!textNode) {
-                if (__DEV__) console.warn(`[FormaJS] Hydration: created text node for show marker ${start.data} \u2014 SSR walker should emit content between markers`);
-                textNode = document.createTextNode("");
-                start.parentNode.insertBefore(textNode, end);
+          } else
+            ssrEl.appendChild(descriptorToElement(child));
+        } else if (isShowDescriptor(child)) {
+          for (; cursor && !(cursor.nodeType === 8 && isShowStart(cursor.data)); )
+            cursor = cursor.nextSibling;
+          if (cursor) {
+            let start = cursor, end = findClosingMarker(start);
+            end && (adoptShowRegion(child, start, end), cursor = end.nextSibling);
+          }
+        } else if (isListDescriptor(child)) {
+          for (; cursor && !(cursor.nodeType === 8 && isListStart(cursor.data)); )
+            cursor = cursor.nextSibling;
+          if (cursor) {
+            let start = cursor, end = findClosingMarker(start);
+            end && (adoptListRegion(child, start, end), cursor = end.nextSibling);
+          }
+        } else if (typeof child == "function") {
+          for (; cursor && cursor.nodeType === 3 && !cursor.data.trim(); )
+            cursor = cursor.nextSibling;
+          if (cursor && cursor.nodeType === 1) {
+            let initial = child();
+            if (isDescriptor(initial)) {
+              let el = cursor;
+              cursor = cursor.nextSibling, adoptNode(initial, el);
+              continue;
+            }
+          }
+          if (cursor && cursor.nodeType === 8) {
+            let data = cursor.data;
+            if (isTextStart(data)) {
+              let endMarker = findClosingMarker(cursor), textNode = cursor.nextSibling;
+              if (!textNode || textNode.nodeType !== 3) {
+                let created = document.createTextNode("");
+                cursor.parentNode.insertBefore(created, endMarker || cursor.nextSibling), textNode = created;
               }
               internalEffect(() => {
                 textNode.data = String(child());
-              });
-              cursor = end.nextSibling;
-            } else {
+              }), cursor = endMarker ? endMarker.nextSibling : textNode.nextSibling;
+            } else if (isShowStart(data)) {
+              let start = cursor, end = findClosingMarker(start);
+              if (end) {
+                let textNode = findTextBetween(start, end);
+                textNode || (textNode = document.createTextNode(""), start.parentNode.insertBefore(textNode, end)), internalEffect(() => {
+                  textNode.data = String(child());
+                }), cursor = end.nextSibling;
+              } else
+                cursor = cursor.nextSibling;
+            } else
               cursor = cursor.nextSibling;
-            }
+          } else if (cursor && cursor.nodeType === 3) {
+            let textNode = cursor;
+            cursor = cursor.nextSibling, internalEffect(() => {
+              textNode.data = String(child());
+            });
           } else {
-            cursor = cursor.nextSibling;
+            let textNode = document.createTextNode("");
+            ssrEl.appendChild(textNode), internalEffect(() => {
+              textNode.data = String(child());
+            });
           }
-        } else if (cursor && cursor.nodeType === 3) {
-          const textNode = cursor;
-          cursor = cursor.nextSibling;
-          internalEffect(() => {
-            textNode.data = String(child());
-          });
-        } else {
-          if (__DEV__) console.warn(`[FormaJS] Hydration: created text node in empty <${ssrEl.tagName.toLowerCase()}> \u2014 IR may not cover this component`);
-          const textNode = document.createTextNode("");
-          ssrEl.appendChild(textNode);
-          internalEffect(() => {
-            textNode.data = String(child());
-          });
-        }
-      } else if (typeof child === "string" || typeof child === "number") {
-        if (cursor && cursor.nodeType === 3) {
-          cursor = cursor.nextSibling;
-        }
-      }
-    }
+        } else (typeof child == "string" || typeof child == "number") && cursor && cursor.nodeType === 3 && (cursor = cursor.nextSibling);
   }
   function hydrateIsland(component, target) {
-    const hasSSRContent = target.childElementCount > 0 || target.childNodes.length > 0 && Array.from(target.childNodes).some((n) => n.nodeType === 1 || n.nodeType === 3 && n.data.trim());
-    if (!hasSSRContent) {
-      if (__DEV__) {
-        const name = target.getAttribute("data-forma-component") || "unknown";
-        console.warn(
-          `[forma] Island "${name}" has no SSR content \u2014 falling back to CSR. This means the IR walker did not render content between ISLAND_START and ISLAND_END.`
-        );
-      }
-      const result = component();
+    if (!(target.childElementCount > 0 || target.childNodes.length > 0 && Array.from(target.childNodes).some((n) => n.nodeType === 1 || n.nodeType === 3 && n.data.trim()))) {
+      let result = component();
       if (result instanceof Element) {
-        for (const attr of Array.from(target.attributes)) {
-          if (attr.name.startsWith("data-forma-")) {
-            result.setAttribute(attr.name, attr.value);
-          }
-        }
-        target.replaceWith(result);
-        return result;
-      } else if (result instanceof Node) {
-        target.appendChild(result);
-      }
+        for (let attr of Array.from(target.attributes))
+          attr.name.startsWith("data-forma-") && result.setAttribute(attr.name, attr.value);
+        return target.replaceWith(result), result;
+      } else result instanceof Node && target.appendChild(result);
       return target;
     }
     setHydrating(true);
@@ -1907,23 +1649,22 @@ var FormaJS = (() => {
     } finally {
       setHydrating(false);
     }
-    if (!descriptor || !isDescriptor(descriptor)) {
-      target.removeAttribute("data-forma-ssr");
-      return target;
-    }
-    if (target.hasAttribute("data-forma-island")) {
-      adoptNode(descriptor, target);
-    } else {
-      adoptNode(descriptor, target.children[0]);
-    }
-    target.removeAttribute("data-forma-ssr");
-    return target;
+    return !descriptor || !isDescriptor(descriptor) ? (target.removeAttribute("data-forma-ssr"), target) : (target.hasAttribute("data-forma-island") ? adoptNode(descriptor, target) : adoptNode(descriptor, target.children[0]), target.removeAttribute("data-forma-ssr"), target);
   }
-
-  // src/dom/element.ts
   var Fragment = /* @__PURE__ */ Symbol.for("forma.fragment");
   var SVG_NS = "http://www.w3.org/2000/svg";
   var XLINK_NS = "http://www.w3.org/1999/xlink";
+  var DUAL_USE_SVG_TAGS = /* @__PURE__ */ new Set(["a", "title", "script", "style", "font"]);
+  var currentNamespace = null;
+  function svg(build) {
+    let prev = currentNamespace;
+    currentNamespace = SVG_NS;
+    try {
+      return build();
+    } finally {
+      currentNamespace = prev;
+    }
+  }
   var SVG_TAGS = /* @__PURE__ */ new Set([
     "svg",
     "path",
@@ -1999,7 +1740,7 @@ var FormaJS = (() => {
   function getProto(tag) {
     if (!ELEMENT_PROTOS) {
       ELEMENT_PROTOS = /* @__PURE__ */ Object.create(null);
-      for (const t of [
+      for (let t of [
         "div",
         "span",
         "p",
@@ -2040,9 +1781,8 @@ var FormaJS = (() => {
         "aside",
         "details",
         "summary"
-      ]) {
+      ])
         ELEMENT_PROTOS[t] = document.createElement(t);
-      }
     }
     return ELEMENT_PROTOS[tag] ?? (ELEMENT_PROTOS[tag] = document.createElement(tag));
   }
@@ -2053,18 +1793,11 @@ var FormaJS = (() => {
   var ABORT_SYM3 = /* @__PURE__ */ Symbol.for("forma-abort");
   function getAbortController(el) {
     let controller = el[ABORT_SYM3];
-    if (!controller) {
-      controller = new AbortController();
-      el[ABORT_SYM3] = controller;
-    }
-    return controller;
+    return controller || (controller = new AbortController(), el[ABORT_SYM3] = controller), controller;
   }
   function cleanup(el) {
-    const controller = el[ABORT_SYM3];
-    if (controller) {
-      controller.abort();
-      delete el[ABORT_SYM3];
-    }
+    let controller = el[ABORT_SYM3];
+    controller && (controller.abort(), delete el[ABORT_SYM3]);
   }
   var CACHE_SYM2 = /* @__PURE__ */ Symbol.for("forma-attr-cache");
   var DYNAMIC_CHILD_SYM2 = /* @__PURE__ */ Symbol.for("forma-dynamic-child");
@@ -2072,63 +1805,59 @@ var FormaJS = (() => {
     return el[CACHE_SYM2] ?? (el[CACHE_SYM2] = /* @__PURE__ */ Object.create(null));
   }
   function handleClass(el, _key, value2) {
-    if (typeof value2 === "function") {
+    if (typeof value2 == "function")
       internalEffect(() => {
-        const v = value2();
-        const cache2 = getCache(el);
-        if (cache2["class"] === v) return;
-        cache2["class"] = v;
-        if (el instanceof HTMLElement) {
-          el.className = v;
-        } else {
-          el.setAttribute("class", v);
-        }
+        let v = value2(), cache2 = getCache(el);
+        cache2.class !== v && (cache2.class = v, el instanceof HTMLElement ? el.className = v : el.setAttribute("class", v));
       });
-    } else {
-      const cache2 = getCache(el);
-      if (cache2["class"] === value2) return;
-      cache2["class"] = value2;
-      if (el instanceof HTMLElement) {
-        el.className = value2;
-      } else {
-        el.setAttribute("class", value2);
+    else {
+      let cache2 = getCache(el);
+      if (cache2.class === value2) return;
+      cache2.class = value2, el instanceof HTMLElement ? el.className = value2 : el.setAttribute("class", value2);
+    }
+  }
+  function parseCssString(css) {
+    let obj = {};
+    for (let decl of css.split(";")) {
+      let colon = decl.indexOf(":");
+      if (colon < 0) continue;
+      let prop = decl.slice(0, colon).trim(), val = decl.slice(colon + 1).trim();
+      if (prop && val) {
+        let camel = prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+        obj[camel] = val;
       }
     }
+    return obj;
+  }
+  function applyStyleObj(el, obj, prevKeys) {
+    let style = el.style, nextKeys = Object.keys(obj);
+    for (let k of prevKeys)
+      k in obj || style.removeProperty(k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()));
+    return Object.assign(style, obj), nextKeys;
   }
   function handleStyle(el, _key, value2) {
-    if (typeof value2 === "function") {
+    if (typeof value2 == "function") {
       let prevKeys = [];
       internalEffect(() => {
-        const v = value2();
-        if (typeof v === "string") {
-          const cache2 = getCache(el);
-          if (cache2["style"] === v) return;
-          cache2["style"] = v;
-          prevKeys = [];
-          el.style.cssText = v;
-        } else if (v && typeof v === "object") {
-          const style = el.style;
-          const nextKeys = Object.keys(v);
-          for (const k of prevKeys) {
-            if (!(k in v)) {
-              style.removeProperty(k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()));
-            }
-          }
-          Object.assign(style, v);
-          prevKeys = nextKeys;
-        }
+        let v = value2();
+        if (typeof v == "string") {
+          let cache2 = getCache(el);
+          if (cache2.style === v) return;
+          cache2.style = v, prevKeys = applyStyleObj(el, parseCssString(v), prevKeys);
+        } else v && typeof v == "object" && (prevKeys = applyStyleObj(el, v, prevKeys));
       });
-    } else if (typeof value2 === "string") {
-      const cache2 = getCache(el);
-      if (cache2["style"] === value2) return;
-      cache2["style"] = value2;
-      el.style.cssText = value2;
-    } else if (value2 && typeof value2 === "object") {
-      Object.assign(el.style, value2);
-    }
+    } else if (typeof value2 == "string") {
+      let cache2 = getCache(el);
+      if (cache2.style === value2) return;
+      cache2.style = value2, applyStyleObj(el, parseCssString(value2), []);
+    } else value2 && typeof value2 == "object" && Object.assign(el.style, value2);
   }
   function handleEvent(el, key, value2) {
-    const controller = getAbortController(el);
+    if (!(typeof value2 == "function" || typeof value2 == "object" && value2 !== null && typeof value2.handleEvent == "function")) {
+      if (value2 == null) return;
+      return;
+    }
+    let controller = getAbortController(el);
     el.addEventListener(
       eventName(key),
       value2,
@@ -2136,122 +1865,90 @@ var FormaJS = (() => {
     );
   }
   function handleInnerHTML(el, _key, value2) {
-    if (typeof value2 === "function") {
+    if (typeof value2 == "function")
       internalEffect(() => {
-        const resolved = value2();
+        let resolved = value2();
         if (resolved == null) {
           el.innerHTML = "";
           return;
         }
-        if (typeof resolved !== "object" || !("__html" in resolved)) {
+        if (typeof resolved != "object" || !("__html" in resolved))
           throw new TypeError(
             "dangerouslySetInnerHTML: expected { __html: string }, got " + typeof resolved
           );
-        }
-        const html = resolved.__html;
-        if (typeof html !== "string") {
+        let html = resolved.__html;
+        if (typeof html != "string")
           throw new TypeError(
             "dangerouslySetInnerHTML: __html must be a string, got " + typeof html
           );
-        }
-        const cache2 = getCache(el);
-        if (cache2["innerHTML"] === html) return;
-        cache2["innerHTML"] = html;
-        el.innerHTML = html;
+        let cache2 = getCache(el);
+        cache2.innerHTML !== html && (cache2.innerHTML = html, el.innerHTML = html);
       });
-    } else {
+    else {
       if (value2 == null) {
         el.innerHTML = "";
         return;
       }
-      if (typeof value2 !== "object" || !("__html" in value2)) {
+      if (typeof value2 != "object" || !("__html" in value2))
         throw new TypeError(
           "dangerouslySetInnerHTML: expected { __html: string }, got " + typeof value2
         );
-      }
-      const html = value2.__html;
-      if (typeof html !== "string") {
+      let html = value2.__html;
+      if (typeof html != "string")
         throw new TypeError(
           "dangerouslySetInnerHTML: __html must be a string, got " + typeof html
         );
-      }
       el.innerHTML = html;
     }
   }
   function handleXLink(el, key, value2) {
-    const localName = key.slice(6);
-    if (typeof value2 === "function") {
-      internalEffect(() => {
-        const v = value2();
-        if (v == null || v === false) {
-          el.removeAttributeNS(XLINK_NS, localName);
-        } else {
-          el.setAttributeNS(XLINK_NS, key, String(v));
-        }
-      });
-    } else {
-      if (value2 == null || value2 === false) {
+    let localName = key.slice(6), write = (v) => {
+      if (v == null || v === false) {
         el.removeAttributeNS(XLINK_NS, localName);
-      } else {
-        el.setAttributeNS(XLINK_NS, key, String(value2));
+        return;
       }
-    }
+      let strVal = String(v);
+      if (isUnsafeAttrWrite(el.localName, key, strVal)) {
+        el.removeAttributeNS(XLINK_NS, localName);
+        return;
+      }
+      el.setAttributeNS(XLINK_NS, key, strVal);
+    };
+    typeof value2 == "function" ? internalEffect(() => {
+      write(value2());
+    }) : write(value2);
   }
   function handleBooleanAttr(el, key, value2) {
-    if (typeof value2 === "function") {
+    if (typeof value2 == "function")
       internalEffect(() => {
-        const v = value2();
-        const cache2 = getCache(el);
-        if (cache2[key] === v) return;
-        cache2[key] = v;
-        if (v) {
-          el.setAttribute(key, "");
-        } else {
-          el.removeAttribute(key);
-        }
+        let v = value2(), cache2 = getCache(el);
+        cache2[key] !== v && (cache2[key] = v, v ? el.setAttribute(key, "") : el.removeAttribute(key));
       });
-    } else {
-      const cache2 = getCache(el);
+    else {
+      let cache2 = getCache(el);
       if (cache2[key] === value2) return;
-      cache2[key] = value2;
-      if (value2) {
-        el.setAttribute(key, "");
-      } else {
-        el.removeAttribute(key);
-      }
+      cache2[key] = value2, value2 ? el.setAttribute(key, "") : el.removeAttribute(key);
     }
   }
   function handleGenericAttr(el, key, value2) {
-    if (typeof value2 === "function") {
-      internalEffect(() => {
-        const v = value2();
-        if (v == null || v === false) {
-          const cache2 = getCache(el);
-          if (cache2[key] === null) return;
-          cache2[key] = null;
-          el.removeAttribute(key);
-        } else {
-          const strVal = String(v);
-          const cache2 = getCache(el);
-          if (cache2[key] === strVal) return;
-          cache2[key] = strVal;
-          el.setAttribute(key, strVal);
-        }
-      });
-    } else {
-      if (value2 == null || value2 === false) {
-        const cache2 = getCache(el);
-        if (cache2[key] === null) return;
-        cache2[key] = null;
-        el.removeAttribute(key);
-      } else {
-        const strVal = String(value2);
-        const cache2 = getCache(el);
-        if (cache2[key] === strVal) return;
-        cache2[key] = strVal;
-        el.setAttribute(key, strVal);
-      }
+    if (isEventHandlerAttr(key)) {
+      return;
     }
+    let urlAttr = isUrlAttr(key), write = (v) => {
+      let cache2 = getCache(el);
+      if (v != null && v !== false) {
+        let strVal = String(v);
+        if (cache2[key] === strVal) return;
+        if (!urlAttr || !isDangerousUrl(strVal, el.localName)) {
+          cache2[key] = strVal, el.setAttribute(key, strVal);
+          return;
+        }
+      }
+      cache2[key] !== null && (cache2[key] = null, el.removeAttribute(key));
+    };
+    typeof value2 == "function" ? internalEffect(() => {
+      write(value2());
+    }) : write(value2);
   }
   var PROP_HANDLERS = /* @__PURE__ */ new Map();
   PROP_HANDLERS.set("class", handleClass);
@@ -2260,9 +1957,8 @@ var FormaJS = (() => {
   PROP_HANDLERS.set("ref", () => {
   });
   PROP_HANDLERS.set("dangerouslySetInnerHTML", handleInnerHTML);
-  for (const attr of BOOLEAN_ATTRS) {
+  for (let attr of BOOLEAN_ATTRS)
     PROP_HANDLERS.set(attr, handleBooleanAttr);
-  }
   function applyProp(el, key, value2) {
     if (key === "class") {
       handleClass(el, key, value2);
@@ -2272,7 +1968,7 @@ var FormaJS = (() => {
       handleEvent(el, key, value2);
       return;
     }
-    const handler = PROP_HANDLERS.get(key);
+    let handler = PROP_HANDLERS.get(key);
     if (handler) {
       handler(el, key, value2);
       return;
@@ -2286,590 +1982,428 @@ var FormaJS = (() => {
   function applyStaticProp(el, key, value2) {
     if (value2 == null || value2 === false) return;
     if (key === "class" || key === "className") {
-      el.className = value2;
+      el instanceof HTMLElement ? el.className = value2 : el.setAttribute("class", value2);
       return;
     }
     if (key === "style") {
-      if (typeof value2 === "string") {
-        el.style.cssText = value2;
-      } else if (value2 && typeof value2 === "object") {
-        Object.assign(el.style, value2);
-      }
+      typeof value2 == "string" ? applyStyleObj(el, parseCssString(value2), []) : value2 && typeof value2 == "object" && Object.assign(el.style, value2);
       return;
     }
     if (key === "dangerouslySetInnerHTML") {
-      if (typeof value2 !== "object" || !("__html" in value2)) {
+      if (typeof value2 != "object" || !("__html" in value2))
         throw new TypeError(
           "dangerouslySetInnerHTML: expected { __html: string }, got " + typeof value2
         );
-      }
-      const html = value2.__html;
-      if (typeof html !== "string") {
+      let html = value2.__html;
+      if (typeof html != "string")
         throw new TypeError(
           "dangerouslySetInnerHTML: __html must be a string, got " + typeof html
         );
-      }
       el.innerHTML = html;
       return;
     }
     if (key.charCodeAt(0) === 120 && key.startsWith("xlink:")) {
-      el.setAttributeNS(XLINK_NS, key, String(value2));
+      let strVal2 = String(value2);
+      if (isUnsafeAttrWrite(el.localName, key, strVal2)) {
+        return;
+      }
+      el.setAttributeNS(XLINK_NS, key, strVal2);
       return;
     }
     if (BOOLEAN_ATTRS.has(key)) {
-      if (value2) el.setAttribute(key, "");
+      value2 && el.setAttribute(key, "");
+      return;
+    }
+    if (isEventHandlerAttr(key)) {
       return;
     }
     if (value2 === true) {
       el.setAttribute(key, "");
-    } else {
-      el.setAttribute(key, String(value2));
+      return;
     }
+    let strVal = String(value2);
+    if (isUrlAttr(key) && isDangerousUrl(strVal, el.localName)) {
+      return;
+    }
+    el.setAttribute(key, strVal);
   }
   function appendChild(parent2, child) {
     if (child instanceof Node) {
       parent2.appendChild(child);
       return;
     }
-    if (typeof child === "string") {
+    if (typeof child == "string") {
       parent2.appendChild(new Text(child));
       return;
     }
-    if (child == null || child === false || child === true) {
-      return;
-    }
-    if (typeof child === "number") {
-      parent2.appendChild(new Text(String(child)));
-      return;
-    }
-    if (typeof child === "function") {
-      if (parent2 instanceof Element) {
-        parent2[DYNAMIC_CHILD_SYM2] = true;
+    if (!(child == null || child === false || child === true)) {
+      if (typeof child == "number") {
+        parent2.appendChild(new Text(String(child)));
+        return;
       }
-      let currentNode = null;
-      internalEffect(() => {
-        const v = child();
-        if (v instanceof Node) {
-          if (currentNode) {
-            parent2.replaceChild(v, currentNode);
-          } else {
-            parent2.appendChild(v);
+      if (typeof child == "function") {
+        parent2 instanceof Element && (parent2[DYNAMIC_CHILD_SYM2] = true);
+        let currentNode = null, currentFragChildren = null, warnedArray = false, DEBUG = typeof globalThis.__FORMA_DEBUG__ < "u", clearCurrent = () => {
+          if (currentFragChildren) {
+            for (let c of currentFragChildren)
+              c.parentNode === parent2 && parent2.removeChild(c);
+            currentFragChildren = null;
           }
-          currentNode = v;
-        } else {
-          const text = typeof v === "symbol" ? String(v) : String(v ?? "");
-          if (!currentNode) {
-            currentNode = new Text(text);
-            parent2.appendChild(currentNode);
-          } else if (currentNode.nodeType === 3) {
-            currentNode.data = text;
-          } else {
-            const tn = new Text(text);
-            parent2.replaceChild(tn, currentNode);
-            currentNode = tn;
+          currentNode && currentNode.parentNode === parent2 && parent2.removeChild(currentNode), currentNode = null;
+        };
+        internalEffect(() => {
+          let v = child(), resolved = v;
+          if (Array.isArray(v)) {
+            let frag = document.createDocumentFragment();
+            for (let item of v)
+              item instanceof Node ? frag.appendChild(item) : Array.isArray(item) ? DEBUG && console.warn("[forma] Nested arrays in function children are not supported. Flatten the array or use createList().") : item != null && item !== false && item !== true && frag.appendChild(new Text(String(item)));
+            resolved = frag.childNodes.length > 0 ? frag : null, DEBUG && !warnedArray && (warnedArray = true, console.warn("[forma] Function child returned an array \u2014 auto-wrapped in DocumentFragment. Consider using createList() or wrapping in a container element for better performance."));
           }
-        }
-      });
-      return;
-    }
-    if (Array.isArray(child)) {
-      for (const item of child) {
-        appendChild(parent2, item);
+          if (resolved instanceof Node) {
+            clearCurrent();
+            let isNewFrag = resolved instanceof DocumentFragment;
+            isNewFrag && (currentFragChildren = Array.from(resolved.childNodes)), parent2.appendChild(resolved), currentNode = isNewFrag ? null : resolved;
+          } else if (resolved == null || resolved === false || resolved === true)
+            clearCurrent();
+          else {
+            if (currentFragChildren) {
+              for (let c of currentFragChildren)
+                c.parentNode === parent2 && parent2.removeChild(c);
+              currentFragChildren = null;
+            }
+            let text = String(typeof resolved == "symbol" ? resolved : resolved ?? "");
+            if (!currentNode)
+              currentNode = new Text(text), parent2.appendChild(currentNode);
+            else if (currentNode.nodeType === 3)
+              currentNode.data = text;
+            else {
+              let tn = new Text(text);
+              parent2.replaceChild(tn, currentNode), currentNode = tn;
+            }
+          }
+        });
+        return;
       }
-      return;
+      if (Array.isArray(child)) {
+        for (let item of child)
+          appendChild(parent2, item);
+        return;
+      }
     }
   }
   function h(tag, props, ...children2) {
-    if (typeof tag === "function" && tag !== Fragment) {
-      const mergedProps = { ...props ?? {}, children: children2 };
+    if (typeof tag == "function" && tag !== Fragment) {
+      let mergedProps = { ...props ?? {}, children: children2 };
       return tag(mergedProps);
     }
     if (tag === Fragment) {
-      const frag = document.createDocumentFragment();
-      for (const child of children2) {
+      let frag = document.createDocumentFragment();
+      for (let child of children2)
         appendChild(frag, child);
-      }
       return frag;
     }
-    const tagName = tag;
-    if (hydrating) {
+    let tagName = tag;
+    if (hydrating)
       return { type: "element", tag: tagName, props: props ?? null, children: children2 };
-    }
-    let el;
-    if (ELEMENT_PROTOS && ELEMENT_PROTOS[tagName]) {
-      el = ELEMENT_PROTOS[tagName].cloneNode(false);
-    } else if (SVG_TAGS.has(tagName)) {
-      el = document.createElementNS(SVG_NS, tagName);
-    } else {
-      el = getProto(tagName).cloneNode(false);
-    }
-    if (props) {
+    let el, svgCtx = currentNamespace === SVG_NS;
+    if (svgCtx && (SVG_TAGS.has(tagName) || DUAL_USE_SVG_TAGS.has(tagName)) ? el = document.createElementNS(SVG_NS, tagName) : !svgCtx && DUAL_USE_SVG_TAGS.has(tagName) ? el = getProto(tagName).cloneNode(false) : ELEMENT_PROTOS && ELEMENT_PROTOS[tagName] ? el = ELEMENT_PROTOS[tagName].cloneNode(false) : SVG_TAGS.has(tagName) ? el = document.createElementNS(SVG_NS, tagName) : el = getProto(tagName).cloneNode(false), props) {
       let hasDynamic = false;
-      for (const key in props) {
+      for (let key in props) {
         if (key === "ref") continue;
-        const value2 = props[key];
+        let value2 = props[key];
         if (key.charCodeAt(0) === 111 && key.charCodeAt(1) === 110 && key.length > 2) {
           handleEvent(el, key, value2);
           continue;
         }
-        if (typeof value2 === "function") {
-          if (!hasDynamic) {
-            el[CACHE_SYM2] = /* @__PURE__ */ Object.create(null);
-            hasDynamic = true;
-          }
-          applyProp(el, key, value2);
+        if (typeof value2 == "function") {
+          hasDynamic || (el[CACHE_SYM2] = /* @__PURE__ */ Object.create(null), hasDynamic = true), applyProp(el, key, value2);
           continue;
         }
         applyStaticProp(el, key, value2);
       }
     }
-    const childLen = children2.length;
+    let childLen = children2.length;
     if (childLen === 1) {
-      const only = children2[0];
-      if (typeof only === "string") {
-        el.textContent = only;
-      } else if (typeof only === "number") {
-        el.textContent = String(only);
-      } else {
-        appendChild(el, only);
-      }
-    } else if (childLen > 1) {
-      for (const child of children2) {
+      let only = children2[0];
+      typeof only == "string" ? el.textContent = only : typeof only == "number" ? el.textContent = String(only) : appendChild(el, only);
+    } else if (childLen > 1)
+      for (let child of children2)
         appendChild(el, child);
-      }
-    }
-    if (props && typeof props["ref"] === "function") {
-      props["ref"](el);
-    }
-    return el;
+    return props && typeof props.ref == "function" && props.ref(el), el;
   }
   function fragment(...children2) {
-    const frag = document.createDocumentFragment();
-    for (const child of children2) {
+    let frag = document.createDocumentFragment();
+    for (let child of children2)
       appendChild(frag, child);
-    }
     return frag;
   }
-
-  // src/dom/text.ts
   function createText(value2) {
-    if (typeof value2 === "function") {
-      const node = new Text("");
-      internalEffect(() => {
+    if (typeof value2 == "function") {
+      let node = new Text("");
+      return internalEffect(() => {
         node.data = value2();
-      });
-      return node;
+      }), node;
     }
     return new Text(value2);
   }
-
-  // src/dom/mount.ts
   function mount(component, container) {
-    const target = typeof container === "string" ? document.querySelector(container) : container;
-    if (!target) {
+    let target = typeof container == "string" ? document.querySelector(container) : container;
+    if (!target)
       throw new Error(`mount: container not found \u2014 "${container}"`);
-    }
-    let disposeRoot;
-    if (target.hasAttribute("data-forma-ssr")) {
-      createRoot((dispose) => {
-        disposeRoot = dispose;
-        hydrateIsland(component, target);
+    let disposeRoot, active = target;
+    if (target.hasAttribute("data-forma-ssr"))
+      createUnownedRoot((dispose) => {
+        disposeRoot = dispose, active = hydrateIsland(component, target);
       });
-    } else {
-      const dom = createRoot((dispose) => {
-        disposeRoot = dispose;
-        return component();
-      });
-      target.innerHTML = "";
-      target.appendChild(dom);
+    else {
+      let dom = createUnownedRoot((dispose) => (disposeRoot = dispose, component()));
+      target.innerHTML = "", target.appendChild(dom);
     }
     let unmounted = false;
     return () => {
-      if (unmounted) return;
-      unmounted = true;
-      disposeRoot();
-      target.innerHTML = "";
+      unmounted || (unmounted = true, disposeRoot(), active === target ? target.innerHTML = "" : active.remove());
     };
   }
-
-  // src/dom/switch.ts
   function createSwitch(value2, cases, fallback) {
-    const startMarker = document.createComment("forma-switch");
-    const endMarker = document.createComment("/forma-switch");
-    const fragment2 = document.createDocumentFragment();
-    fragment2.appendChild(startMarker);
-    fragment2.appendChild(endMarker);
-    const cache2 = /* @__PURE__ */ new Map();
-    let currentNode = null;
-    let currentMatch = UNSET;
-    const switchDispose = internalEffect(() => {
-      const val = value2();
+    let startMarker = document.createComment("forma-switch"), endMarker = document.createComment("/forma-switch"), fragment2 = document.createDocumentFragment();
+    fragment2.appendChild(startMarker), fragment2.appendChild(endMarker);
+    let cache2 = /* @__PURE__ */ new Map(), currentNode = null, currentMatch = UNSET, switchDispose = internalEffect(() => {
+      let val = value2();
       if (val === currentMatch) return;
-      const DEBUG = typeof globalThis.__FORMA_DEBUG__ !== "undefined";
-      if (DEBUG) console.log("[forma:switch] transition", String(currentMatch), "\u2192", String(val));
-      currentMatch = val;
-      const parent2 = startMarker.parentNode;
+      let DEBUG = typeof globalThis.__FORMA_DEBUG__ < "u";
+      DEBUG && console.log("[forma:switch] transition", String(currentMatch), "\u2192", String(val)), currentMatch = val;
+      let parent2 = startMarker.parentNode;
       if (!parent2) {
-        if (DEBUG) console.warn("[forma:switch] markers not in DOM yet, skipping");
+        DEBUG && console.warn("[forma:switch] markers not in DOM yet, skipping");
         return;
       }
-      if (currentNode) {
-        if (currentNode.parentNode === parent2) {
-          if (DEBUG) console.log("[forma:switch] removing single node");
-          parent2.removeChild(currentNode);
-        } else if (currentNode.nodeType === 11) {
-          if (DEBUG) console.log("[forma:switch] scooping nodes back into fragment");
+      if (currentNode)
+        if (currentNode.parentNode === parent2)
+          DEBUG && console.log("[forma:switch] removing single node"), parent2.removeChild(currentNode);
+        else if (currentNode.nodeType === 11) {
+          DEBUG && console.log("[forma:switch] scooping nodes back into fragment");
           let scooped = 0;
-          while (startMarker.nextSibling && startMarker.nextSibling !== endMarker) {
-            currentNode.appendChild(startMarker.nextSibling);
-            scooped++;
-          }
-          if (DEBUG) console.log("[forma:switch] scooped", scooped, "nodes back into fragment");
-        } else {
-          if (DEBUG) console.log("[forma:switch] clearing detached node between markers");
-          while (startMarker.nextSibling && startMarker.nextSibling !== endMarker) {
+          for (; startMarker.nextSibling && startMarker.nextSibling !== endMarker; )
+            currentNode.appendChild(startMarker.nextSibling), scooped++;
+          DEBUG && console.log("[forma:switch] scooped", scooped, "nodes back into fragment");
+        } else
+          for (DEBUG && console.log("[forma:switch] clearing detached node between markers"); startMarker.nextSibling && startMarker.nextSibling !== endMarker; )
             parent2.removeChild(startMarker.nextSibling);
-          }
-        }
-      }
-      const matchedCase = cases.find((c) => c.match === val);
+      let matchedCase = cases.find((c) => c.match === val);
       if (matchedCase) {
         let entry = cache2.get(val);
-        if (!entry) {
-          let branchDispose;
-          const node = createRoot((dispose) => {
-            branchDispose = dispose;
-            return untrack(() => matchedCase.render());
-          });
-          entry = { node, dispose: branchDispose };
-          cache2.set(val, entry);
-          if (DEBUG) console.log("[forma:switch] rendered new branch for", String(val), "\u2192", node.nodeName, "type", node.nodeType);
-        } else {
-          if (DEBUG) console.log("[forma:switch] reusing cached branch for", String(val), "\u2192", entry.node.nodeName, "type", entry.node.nodeType, "childNodes", entry.node.childNodes?.length);
+        if (entry)
+          DEBUG && console.log("[forma:switch] reusing cached branch for", String(val), "\u2192", entry.node.nodeName, "type", entry.node.nodeType, "childNodes", entry.node.childNodes?.length);
+        else {
+          let branchDispose, node = createRoot((dispose) => (branchDispose = dispose, untrack(() => matchedCase.render())));
+          entry = { node, dispose: branchDispose }, cache2.set(val, entry), DEBUG && console.log("[forma:switch] rendered new branch for", String(val), "\u2192", node.nodeName, "type", node.nodeType);
         }
         currentNode = entry.node;
-      } else {
-        currentNode = fallback?.() ?? null;
-        if (DEBUG) console.log("[forma:switch] no match, using fallback");
-      }
-      if (currentNode) {
-        parent2.insertBefore(currentNode, endMarker);
-        if (DEBUG) console.log("[forma:switch] inserted", currentNode.nodeName, "before end marker");
-      }
+      } else
+        currentNode = fallback?.() ?? null, DEBUG && console.log("[forma:switch] no match, using fallback");
+      currentNode && (parent2.insertBefore(currentNode, endMarker), DEBUG && console.log("[forma:switch] inserted", currentNode.nodeName, "before end marker"));
     });
-    fragment2.__switchDispose = () => {
-      switchDispose();
-      for (const entry of cache2.values()) {
+    return registerDisposer(() => {
+      for (let entry of cache2.values())
         entry.dispose();
-      }
+      cache2.clear(), currentNode = null;
+    }), fragment2.__switchDispose = () => {
+      switchDispose();
+      for (let entry of cache2.values())
+        entry.dispose();
       cache2.clear();
-    };
-    return fragment2;
+    }, fragment2;
   }
   var UNSET = /* @__PURE__ */ Symbol("unset");
-
-  // src/dom/portal.ts
   function createPortal(children2, target) {
-    const placeholder = document.createComment("forma-portal");
-    const resolvedTarget = typeof target === "string" ? document.querySelector(target) : target ?? document.body;
-    if (!resolvedTarget) {
+    let placeholder = document.createComment("forma-portal"), resolvedTarget = typeof target == "string" ? document.querySelector(target) : target ?? document.body;
+    if (!resolvedTarget)
       throw new Error(`createPortal: target not found: ${target}`);
-    }
-    let mountedNode = null;
-    const removeMountedNode = () => {
-      if (mountedNode && mountedNode.parentNode === resolvedTarget) {
-        resolvedTarget.removeChild(mountedNode);
-      }
-      mountedNode = null;
+    let mountedNode = null, removeMountedNode = () => {
+      mountedNode && mountedNode.parentNode === resolvedTarget && resolvedTarget.removeChild(mountedNode), mountedNode = null;
     };
-    createEffect(() => {
-      const node = children2();
-      removeMountedNode();
-      mountedNode = node;
-      resolvedTarget.appendChild(node);
-      return () => {
+    return createEffect(() => {
+      let node = children2();
+      return mountedNode = node, resolvedTarget.appendChild(node), () => {
         removeMountedNode();
       };
-    });
-    return placeholder;
+    }), placeholder;
   }
-
-  // src/dom/error-boundary.ts
   function createErrorBoundary(tryFn, catchFn) {
-    const startMarker = document.createComment("forma-error-boundary");
-    const endMarker = document.createComment("/forma-error-boundary");
-    const fragment2 = document.createDocumentFragment();
-    fragment2.appendChild(startMarker);
-    fragment2.appendChild(endMarker);
-    const [retryCount, setRetryCount] = createSignal(0);
-    let currentNode = null;
-    internalEffect(() => {
+    let startMarker = document.createComment("forma-error-boundary"), endMarker = document.createComment("/forma-error-boundary"), fragment2 = document.createDocumentFragment();
+    fragment2.appendChild(startMarker), fragment2.appendChild(endMarker);
+    let [retryCount, setRetryCount] = createSignal(0), currentNode = null;
+    return internalEffect(() => {
       retryCount();
-      const parent2 = startMarker.parentNode;
-      if (!parent2) return;
-      if (currentNode && currentNode.parentNode === parent2) {
-        parent2.removeChild(currentNode);
+      let parent2 = startMarker.parentNode;
+      if (parent2) {
+        currentNode && currentNode.parentNode === parent2 && parent2.removeChild(currentNode);
+        try {
+          currentNode = tryFn();
+        } catch (e) {
+          let error = e instanceof Error ? e : new Error(String(e));
+          currentNode = catchFn(error, () => setRetryCount((c) => c + 1));
+        }
+        currentNode && parent2.insertBefore(currentNode, endMarker);
       }
-      try {
-        currentNode = tryFn();
-      } catch (e) {
-        const error = e instanceof Error ? e : new Error(String(e));
-        const retry = () => setRetryCount((c) => c + 1);
-        currentNode = catchFn(error, retry);
-      }
-      if (currentNode) {
-        parent2.insertBefore(currentNode, endMarker);
-      }
-    });
-    return fragment2;
+    }), fragment2;
   }
-
-  // src/dom/suspense.ts
   function createSuspense(fallback, children2) {
-    const startMarker = document.createComment("forma-suspense");
-    const endMarker = document.createComment("/forma-suspense");
-    const fragment2 = document.createDocumentFragment();
-    fragment2.appendChild(startMarker);
-    fragment2.appendChild(endMarker);
-    const [pending, setPending] = createSignal(0);
-    let currentNode = null;
-    let resolvedNode = null;
-    let fallbackNode = null;
-    const ctx = {
+    let startMarker = document.createComment("forma-suspense"), endMarker = document.createComment("/forma-suspense"), fragment2 = document.createDocumentFragment();
+    fragment2.appendChild(startMarker), fragment2.appendChild(endMarker);
+    let [pending, setPending] = createSignal(0), currentNode = null, resolvedNode = null, fallbackNode = null;
+    pushSuspenseContext({
       increment() {
         setPending((p) => p + 1);
       },
       decrement() {
         setPending((p) => Math.max(0, p - 1));
       }
-    };
-    pushSuspenseContext(ctx);
+    });
     try {
       resolvedNode = children2();
     } finally {
       popSuspenseContext();
     }
-    internalEffect(() => {
-      const parent2 = startMarker.parentNode;
+    return internalEffect(() => {
+      let parent2 = startMarker.parentNode;
       if (!parent2) return;
-      const isPending = pending() > 0;
-      const newNode = isPending ? fallbackNode ??= fallback() : resolvedNode;
-      if (newNode === currentNode) return;
-      if (currentNode && currentNode.parentNode === parent2) {
-        parent2.removeChild(currentNode);
+      let newNode = pending() > 0 ? fallbackNode ??= fallback() : resolvedNode;
+      if (newNode !== currentNode) {
+        if (currentNode) {
+          if (currentNode.parentNode === parent2)
+            parent2.removeChild(currentNode);
+          else if (currentNode.nodeType === 11)
+            for (; startMarker.nextSibling && startMarker.nextSibling !== endMarker; )
+              currentNode.appendChild(startMarker.nextSibling);
+        }
+        newNode && parent2.insertBefore(newNode, endMarker), currentNode = newNode;
       }
-      if (newNode) {
-        parent2.insertBefore(newNode, endMarker);
-      }
-      currentNode = newNode;
-    });
-    return fragment2;
+    }), fragment2;
   }
-
-  // src/dom/template.ts
   var cache = /* @__PURE__ */ new Map();
   function template(html) {
     let node = cache.get(html);
     if (!node) {
-      const tpl = document.createElement("template");
-      tpl.innerHTML = html;
-      node = tpl.content.firstChild;
-      cache.set(html, node);
+      let tpl = document.createElement("template");
+      tpl.innerHTML = html, node = tpl.content.firstChild, cache.set(html, node);
     }
     return node;
   }
   function templateMany(html) {
     let node = cache.get(html);
     if (!node) {
-      const tpl = document.createElement("template");
-      tpl.innerHTML = html;
-      node = tpl.content;
-      cache.set(html, node);
+      let tpl = document.createElement("template");
+      tpl.innerHTML = html, node = tpl.content, cache.set(html, node);
     }
     return node.cloneNode(true);
   }
-
-  // src/dom/activate.ts
-  var FORBIDDEN_PROP_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-  function sanitizeProps(obj) {
-    for (const key of FORBIDDEN_PROP_KEYS) {
-      if (key in obj) delete obj[key];
-    }
-    return obj;
-  }
-  function loadIslandProps(root, id, sharedProps) {
-    const inline = root.getAttribute("data-forma-props");
-    if (inline) {
-      return sanitizeProps(JSON.parse(inline));
-    }
-    if (sharedProps && String(id) in sharedProps) {
-      return sanitizeProps(sharedProps[String(id)]);
-    }
-    return null;
-  }
-  function activateIslands(registry) {
-    const scriptBlock = document.getElementById("__forma_islands");
-    const sharedProps = scriptBlock ? JSON.parse(scriptBlock.textContent) : null;
-    const islands = document.querySelectorAll("[data-forma-island]");
-    for (const root of islands) {
-      const id = parseInt(root.getAttribute("data-forma-island"), 10);
-      const componentName = root.getAttribute("data-forma-component");
-      const hydrateFn = registry[componentName];
-      if (!hydrateFn) {
-        if (__DEV__) console.warn(`[forma] No hydrate function for island "${componentName}" (id=${id})`);
-        root.setAttribute("data-forma-status", "error");
-        continue;
-      }
-      const trigger2 = root.getAttribute("data-forma-hydrate") || "load";
-      if (trigger2 === "visible") {
-        const observer = new IntersectionObserver(
-          (entries) => {
-            for (const entry of entries) {
-              if (!entry.isIntersecting) continue;
-              observer.disconnect();
-              hydrateIslandRoot(root, id, componentName, hydrateFn, sharedProps);
-            }
-          },
-          { rootMargin: "200px" }
-        );
-        observer.observe(root);
-      } else if (trigger2 === "idle") {
-        const hydrate = () => hydrateIslandRoot(root, id, componentName, hydrateFn, sharedProps);
-        if (typeof requestIdleCallback === "function") {
-          requestIdleCallback(hydrate);
-        } else {
-          setTimeout(hydrate, 200);
-        }
-      } else if (trigger2 === "interaction") {
-        const hydrate = () => {
-          root.removeEventListener("pointerdown", hydrate, true);
-          root.removeEventListener("focusin", hydrate, true);
-          hydrateIslandRoot(root, id, componentName, hydrateFn, sharedProps);
-        };
-        root.addEventListener("pointerdown", hydrate, { capture: true, once: true });
-        root.addEventListener("focusin", hydrate, { capture: true, once: true });
-      } else {
-        hydrateIslandRoot(root, id, componentName, hydrateFn, sharedProps);
-      }
-    }
-  }
-  function deactivateIsland(el) {
-    const dispose = el.__formaDispose;
-    if (typeof dispose === "function") {
-      dispose();
-      delete el.__formaDispose;
-      el.setAttribute("data-forma-status", "disposed");
-    }
-  }
-  function deactivateAllIslands(root = document) {
-    const islands = root.querySelectorAll('[data-forma-status="active"]');
-    for (const island of islands) {
-      deactivateIsland(island);
-    }
-  }
-  function hydrateIslandRoot(root, id, componentName, hydrateFn, sharedProps) {
-    try {
-      const props = loadIslandProps(root, id, sharedProps);
-      root.setAttribute("data-forma-status", "hydrating");
-      let activeRoot = root;
-      createRoot((dispose) => {
-        activeRoot = hydrateIsland(() => hydrateFn(root, props), root);
-        activeRoot.__formaDispose = dispose;
-      });
-      activeRoot.setAttribute("data-forma-status", "active");
-    } catch (err) {
-      if (__DEV__) console.error(`[forma] Island "${componentName}" (id=${id}) failed:`, err);
-      root.setAttribute("data-forma-status", "error");
-    }
-  }
-
-  // src/component/define.ts
   var currentLifecycleContext = null;
   var lifecycleStack = [];
   function pushLifecycleContext(ctx) {
-    lifecycleStack.push(currentLifecycleContext);
-    currentLifecycleContext = ctx;
+    lifecycleStack.push(currentLifecycleContext), currentLifecycleContext = ctx;
   }
   function popLifecycleContext() {
     currentLifecycleContext = lifecycleStack.pop() ?? null;
   }
   function onMount(fn) {
-    if (currentLifecycleContext === null) {
+    if (currentLifecycleContext === null)
       throw new Error("onMount() must be called inside a component setup function");
-    }
     currentLifecycleContext.mountCallbacks.push(fn);
   }
   function onUnmount(fn) {
-    if (currentLifecycleContext === null) {
+    if (currentLifecycleContext === null)
       throw new Error("onUnmount() must be called inside a component setup function");
-    }
     currentLifecycleContext.unmountCallbacks.push(fn);
+  }
+  function registerContextDisposer(dispose) {
+    return currentLifecycleContext !== null ? (currentLifecycleContext.contextDisposers.push(dispose), true) : false;
   }
   var DISPOSE_KEY = /* @__PURE__ */ Symbol("forma:component:dispose");
   function defineComponent(setupOrDef) {
-    const setup = typeof setupOrDef === "function" ? setupOrDef : setupOrDef.setup;
-    const name = typeof setupOrDef === "function" ? void 0 : setupOrDef.name;
-    return function componentFactory() {
-      const ctx = {
+    let setup = typeof setupOrDef == "function" ? setupOrDef : setupOrDef.setup, name = typeof setupOrDef == "function" ? void 0 : setupOrDef.name, where = (phase) => name ? `${name}: ${phase}` : phase;
+    return function() {
+      let ctx = {
         disposers: [],
         mountCallbacks: [],
-        unmountCallbacks: []
+        unmountCallbacks: [],
+        contextDisposers: []
       };
       pushLifecycleContext(ctx);
       let dom;
       try {
         dom = setup();
+      } catch (e) {
+        for (let i = ctx.contextDisposers.length - 1; i >= 0; i--)
+          try {
+            ctx.contextDisposers[i]();
+          } catch {
+          }
+        throw ctx.contextDisposers.length = 0, e;
       } finally {
         popLifecycleContext();
       }
-      const dispose = () => {
-        for (const cb of ctx.unmountCallbacks) {
-          try {
-            cb();
-          } catch (e) {
-            reportError(e, "onUnmount");
-          }
+      let disposed = false, dispose = () => {
+        if (!disposed) {
+          disposed = true;
+          for (let cb of ctx.unmountCallbacks)
+            try {
+              cb();
+            } catch (e) {
+              reportError(e, where("onUnmount"));
+            }
+          for (let d of ctx.disposers)
+            try {
+              d();
+            } catch (e) {
+              reportError(e, where("component disposer"));
+            }
+          for (let i = ctx.contextDisposers.length - 1; i >= 0; i--)
+            try {
+              ctx.contextDisposers[i]();
+            } catch (e) {
+              reportError(e, where("context disposer"));
+            }
+          ctx.disposers.length = 0, ctx.mountCallbacks.length = 0, ctx.unmountCallbacks.length = 0, ctx.contextDisposers.length = 0;
         }
-        for (const d of ctx.disposers) {
-          try {
-            d();
-          } catch (e) {
-            reportError(e, "component disposer");
-          }
-        }
-        ctx.disposers.length = 0;
-        ctx.mountCallbacks.length = 0;
-        ctx.unmountCallbacks.length = 0;
       };
-      dom[DISPOSE_KEY] = dispose;
-      for (const cb of ctx.mountCallbacks) {
-        try {
-          const cleanup2 = cb();
-          if (typeof cleanup2 === "function") {
-            ctx.unmountCallbacks.push(cleanup2);
+      if (dom[DISPOSE_KEY] = dispose, dom.nodeType === 11)
+        for (let child of Array.from(dom.childNodes))
+          child[DISPOSE_KEY] = dispose;
+      pushLifecycleContext(ctx);
+      try {
+        for (let cb of ctx.mountCallbacks)
+          try {
+            let cleanup2 = cb();
+            typeof cleanup2 == "function" && ctx.unmountCallbacks.push(cleanup2);
+          } catch (e) {
+            reportError(e, where("onMount"));
           }
-        } catch (e) {
-          reportError(e, "onMount");
-        }
+      } finally {
+        popLifecycleContext();
       }
       return dom;
     };
   }
   function disposeComponent(dom) {
-    const disposable = dom;
-    if (typeof disposable[DISPOSE_KEY] === "function") {
-      disposable[DISPOSE_KEY]();
-      delete disposable[DISPOSE_KEY];
-    }
+    let disposable = dom;
+    typeof disposable[DISPOSE_KEY] == "function" && (disposable[DISPOSE_KEY](), delete disposable[DISPOSE_KEY]);
   }
   function trackDisposer(dispose) {
-    if (currentLifecycleContext !== null) {
-      currentLifecycleContext.disposers.push(dispose);
+    currentLifecycleContext !== null && currentLifecycleContext.disposers.push(dispose);
+  }
+  var contextStacks = /* @__PURE__ */ new Map();
+  function removeFrame(id, token) {
+    let stack = contextStacks.get(id);
+    if (stack) {
+      for (let i = stack.length - 1; i >= 0; i--)
+        if (stack[i].token === token) {
+          stack.splice(i, 1);
+          break;
+        }
+      stack.length === 0 && contextStacks.delete(id);
     }
   }
-
-  // src/component/context.ts
-  var contextStacks = /* @__PURE__ */ new Map();
   function createContext(defaultValue) {
     return {
       id: /* @__PURE__ */ Symbol("forma:context"),
@@ -2878,30 +2412,18 @@ var FormaJS = (() => {
   }
   function provide(ctx, value2) {
     let stack = contextStacks.get(ctx.id);
-    if (stack === void 0) {
-      stack = [];
-      contextStacks.set(ctx.id, stack);
-    }
-    stack.push(value2);
+    stack === void 0 && (stack = [], contextStacks.set(ctx.id, stack));
+    let token = /* @__PURE__ */ Symbol("forma:context-frame");
+    stack.push({ token, value: value2 }), registerContextDisposer(() => removeFrame(ctx.id, token));
   }
   function inject(ctx) {
-    const stack = contextStacks.get(ctx.id);
-    if (stack === void 0 || stack.length === 0) {
-      return ctx.defaultValue;
-    }
-    return stack[stack.length - 1];
+    let stack = contextStacks.get(ctx.id);
+    return stack === void 0 || stack.length === 0 ? ctx.defaultValue : stack[stack.length - 1].value;
   }
   function unprovide(ctx) {
-    const stack = contextStacks.get(ctx.id);
-    if (stack !== void 0 && stack.length > 0) {
-      stack.pop();
-      if (stack.length === 0) {
-        contextStacks.delete(ctx.id);
-      }
-    }
+    let stack = contextStacks.get(ctx.id);
+    stack !== void 0 && stack.length > 0 && (stack.pop(), stack.length === 0 && contextStacks.delete(ctx.id));
   }
-
-  // src/state/store.ts
   var RAW = /* @__PURE__ */ Symbol("forma-raw");
   var PROXY = /* @__PURE__ */ Symbol("forma-proxy");
   var ARRAY_MUTATORS = /* @__PURE__ */ new Set([
@@ -2915,155 +2437,131 @@ var FormaJS = (() => {
     "fill",
     "copyWithin"
   ]);
+  var FORBIDDEN_STORE_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+  function warnForbiddenKey(key) {
+    console.warn(
+      `[forma] Refused to write "${key}" into a store \u2014 this key can replace the object's prototype. Strip it from untrusted payloads before calling setState.`
+    );
+  }
   function shouldWrap(v) {
-    if (v == null || typeof v !== "object") return false;
-    if (v instanceof Date || v instanceof RegExp || v instanceof Map || v instanceof Set || v instanceof WeakMap || v instanceof WeakSet || v instanceof Error || v instanceof Promise) {
-      return false;
-    }
-    if (v[PROXY]) return false;
-    return true;
+    return !(v == null || typeof v != "object" || v instanceof Date || v instanceof RegExp || v instanceof Map || v instanceof Set || v instanceof WeakMap || v instanceof WeakSet || v instanceof Error || v instanceof Promise || v[PROXY]);
   }
   function deepClone(obj, seen) {
-    if (obj === null || typeof obj !== "object") return obj;
-    if (!seen) seen = /* @__PURE__ */ new WeakSet();
-    if (seen.has(obj)) return obj;
-    seen.add(obj);
-    if (Array.isArray(obj)) return obj.map((item) => deepClone(item, seen));
-    const out = {};
-    for (const key of Object.keys(obj)) {
-      out[key] = deepClone(obj[key], seen);
-    }
+    if (obj === null || typeof obj != "object" || (seen || (seen = /* @__PURE__ */ new WeakSet()), seen.has(obj))) return obj;
+    if (seen.add(obj), Array.isArray(obj)) return obj.map((item) => deepClone(item, seen));
+    let out = {};
+    for (let key of Object.keys(obj))
+      key !== "__proto__" && (out[key] = deepClone(obj[key], seen));
     return out;
   }
   function createStore(initial) {
-    const signals = /* @__PURE__ */ new Map();
-    const children2 = /* @__PURE__ */ new Map();
+    let signals = /* @__PURE__ */ new Map(), children2 = /* @__PURE__ */ new Map(), arrayVersions = /* @__PURE__ */ new Map();
+    function getArrayVersion(path) {
+      let p = arrayVersions.get(path);
+      return p || (p = createSignal(0), arrayVersions.set(path, p)), p;
+    }
+    function bumpArrayVersion(path) {
+      let p = arrayVersions.get(path);
+      p && p[1]((n) => n + 1);
+    }
     function registerChild(path) {
-      const lastDot = path.lastIndexOf(".");
+      let lastDot = path.lastIndexOf(".");
       if (lastDot === -1) return;
-      const parentPath = path.substring(0, lastDot);
-      let set = children2.get(parentPath);
-      if (!set) {
-        set = /* @__PURE__ */ new Set();
-        children2.set(parentPath, set);
-      }
-      set.add(path);
+      let parentPath = path.substring(0, lastDot), set = children2.get(parentPath);
+      set || (set = /* @__PURE__ */ new Set(), children2.set(parentPath, set)), set.add(path);
     }
     function getSignal(path, initialValue) {
       let pair = signals.get(path);
-      if (!pair) {
-        pair = createSignal(initialValue);
-        signals.set(path, pair);
-        registerChild(path);
-      }
-      return pair;
+      return pair || (pair = createSignal(initialValue), signals.set(path, pair), registerChild(path)), pair;
     }
-    const proxyCache = /* @__PURE__ */ new WeakMap();
+    let proxyCache = /* @__PURE__ */ new WeakMap();
     function invalidateChildren(parentPath) {
-      const childSet = children2.get(parentPath);
-      if (!childSet) return;
-      for (const childPath of childSet) {
-        invalidateChildren(childPath);
-        signals.delete(childPath);
-        children2.delete(childPath);
+      let childSet = children2.get(parentPath);
+      if (childSet) {
+        for (let childPath of childSet)
+          invalidateChildren(childPath), signals.delete(childPath), children2.delete(childPath);
+        childSet.clear();
       }
-      childSet.clear();
+    }
+    function lastSegment(path) {
+      let d = path.lastIndexOf(".");
+      return d === -1 ? path : path.substring(d + 1);
+    }
+    function setLiteral(pair, v) {
+      pair[1](typeof v == "function" ? value(v) : v);
+    }
+    function reconcileChildren(parentPath, rawParent) {
+      let set = children2.get(parentPath);
+      if (set)
+        for (let childPath of set) {
+          let key = lastSegment(childPath), nv = rawParent[key], pair = signals.get(childPath);
+          pair && setLiteral(pair, nv), nv != null && typeof nv == "object" ? reconcileChildren(childPath, nv) : invalidateChildren(childPath);
+        }
     }
     function wrap(raw, basePath) {
       if (!shouldWrap(raw)) return raw;
-      const cached = proxyCache.get(raw);
-      if (cached) return cached;
-      const isArr = Array.isArray(raw);
-      const basePrefix = basePath ? basePath + "." : "";
-      let lastKey = "";
-      let lastSignal;
-      const proxy = new Proxy(raw, {
+      let byPath = proxyCache.get(raw);
+      if (byPath) {
+        let hit = byPath.get(basePath);
+        if (hit) return hit;
+      }
+      let isArr = Array.isArray(raw), basePrefix = basePath ? basePath + "." : "", proxy = new Proxy(raw, {
         // -------------------------------------------------------------------
         // GET
         // -------------------------------------------------------------------
         get(target, prop, receiver) {
           if (prop === RAW) return target;
           if (prop === PROXY) return true;
-          if (typeof prop === "symbol") {
+          if (typeof prop == "symbol")
             return Reflect.get(target, prop, receiver);
-          }
-          const key = String(prop);
-          const childPath = basePrefix + key;
-          if (isArr && ARRAY_MUTATORS.has(key)) {
+          let key = String(prop), childPath = basePrefix + key;
+          if (isArr && ARRAY_MUTATORS.has(key))
             return (...args) => {
               let result;
-              batch(() => {
-                const rawArgs = args.map(
-                  (a) => a != null && typeof a === "object" && a[RAW] ? a[RAW] : a
+              return batch(() => {
+                let rawArgs = args.map(
+                  (a) => a != null && typeof a == "object" && a[RAW] ? a[RAW] : a
                 );
-                result = target[key].apply(target, rawArgs);
-                invalidateChildren(basePath);
-                const [, setLen] = getSignal(
-                  basePrefix + "length",
-                  target.length
-                );
-                setLen(target.length);
-              });
-              return result;
+                result = target[key].apply(target, rawArgs), reconcileChildren(basePath, target);
+                let lenPair = signals.get(basePrefix + "length");
+                lenPair && lenPair[1](target.length), basePath && bumpArrayVersion(basePath);
+              }), result;
             };
-          }
           if (isArr && key === "length") {
-            const [getter] = getSignal(childPath, target.length);
-            getter();
-            return target.length;
+            let [getter] = getSignal(childPath, target.length);
+            return getter(), target.length;
           }
-          const value2 = Reflect.get(target, prop);
-          let pair;
-          if (key === lastKey && lastSignal) {
-            pair = lastSignal;
-          } else {
-            pair = getSignal(childPath, value2);
-            lastKey = key;
-            lastSignal = pair;
-          }
-          pair[0]();
-          if (shouldWrap(value2)) {
-            return wrap(value2, childPath);
-          }
-          return value2;
+          let value2 = Reflect.get(target, prop);
+          return getSignal(childPath, value2)[0](), Array.isArray(value2) && getArrayVersion(childPath)[0](), shouldWrap(value2) ? wrap(value2, childPath) : value2;
         },
         // -------------------------------------------------------------------
         // SET
         // -------------------------------------------------------------------
         set(target, prop, value2) {
-          if (typeof prop === "symbol") {
+          if (typeof prop == "symbol")
             return Reflect.set(target, prop, value2);
+          let key = String(prop);
+          if (FORBIDDEN_STORE_KEYS.has(key))
+            return true;
+          let childPath = basePrefix + key, rawValue = value2 != null && typeof value2 == "object" && value2[RAW] ? value2[RAW] : value2, oldRaw = Reflect.get(target, prop);
+          if (Reflect.set(target, prop, rawValue), rawValue != null && typeof rawValue == "object" && oldRaw !== rawValue && (invalidateChildren(childPath), evictProxy(oldRaw, childPath)), isArr && key !== "length") {
+            let lengthPath = basePrefix + "length", lenPair = signals.get(lengthPath);
+            lenPair && lenPair[1](target.length);
           }
-          const key = String(prop);
-          const childPath = basePrefix + key;
-          const rawValue = value2 != null && typeof value2 === "object" && value2[RAW] ? value2[RAW] : value2;
-          Reflect.set(target, prop, rawValue);
-          if (rawValue != null && typeof rawValue === "object") {
-            invalidateChildren(childPath);
-          }
-          if (isArr && key !== "length") {
-            const lengthPath = basePrefix + "length";
-            const lenPair = signals.get(lengthPath);
-            if (lenPair) {
-              lenPair[1](target.length);
-            }
-          }
-          const [, setter2] = getSignal(childPath, rawValue);
-          setter2(rawValue);
-          return true;
+          isArr && key === "length" && batch(() => {
+            reconcileChildren(basePath, target), basePath && bumpArrayVersion(basePath);
+          });
+          let [, setter2] = getSignal(childPath, rawValue);
+          return setter2(rawValue), true;
         },
         // -------------------------------------------------------------------
         // HAS — track membership checks
         // -------------------------------------------------------------------
         has(target, prop) {
-          if (typeof prop === "symbol") {
+          if (typeof prop == "symbol")
             return Reflect.has(target, prop);
-          }
-          const key = String(prop);
-          const childPath = basePrefix + key;
-          const [getter] = getSignal(childPath, Reflect.get(target, prop));
-          getter();
-          return Reflect.has(target, prop);
+          let key = String(prop), childPath = basePrefix + key, [getter] = getSignal(childPath, Reflect.get(target, prop));
+          return getter(), Reflect.has(target, prop);
         },
         // -------------------------------------------------------------------
         // OWNKEYS — return keys from the raw target
@@ -3081,217 +2579,208 @@ var FormaJS = (() => {
         // DELETEPROPERTY — clean up signals when a key is removed
         // -------------------------------------------------------------------
         deleteProperty(target, prop) {
-          if (typeof prop === "symbol") {
+          if (typeof prop == "symbol")
             return Reflect.deleteProperty(target, prop);
-          }
-          const key = String(prop);
-          const childPath = basePrefix + key;
-          const result = Reflect.deleteProperty(target, prop);
-          invalidateChildren(childPath);
-          signals.delete(childPath);
-          const parentPath = basePath;
-          if (parentPath !== void 0) {
-            const parentSet = children2.get(parentPath);
-            if (parentSet) {
-              parentSet.delete(childPath);
-              if (parentSet.size === 0) children2.delete(parentPath);
-            }
-          }
-          children2.delete(childPath);
-          return result;
+          let key = String(prop), childPath = basePrefix + key, oldRaw = Reflect.get(target, prop), result = Reflect.deleteProperty(target, prop), delPair = signals.get(childPath);
+          return delPair && delPair[1](void 0), evictProxy(oldRaw, childPath), invalidateChildren(childPath), result;
         }
       });
-      proxyCache.set(raw, proxy);
-      return proxy;
+      return byPath || (byPath = /* @__PURE__ */ new Map(), proxyCache.set(raw, byPath)), byPath.set(basePath, proxy), proxy;
     }
-    const rootProxy = wrap(initial, "");
+    function evictProxy(oldRaw, path) {
+      if (oldRaw == null || typeof oldRaw != "object") return;
+      let om = proxyCache.get(oldRaw);
+      om && (om.delete(path), om.size === 0 && proxyCache.delete(oldRaw));
+    }
+    let rootProxy = wrap(initial, "");
     function getCurrentSnapshot() {
       return untrack(() => deepClone(initial));
     }
-    const setter = (partial) => {
-      const updates = typeof partial === "function" ? partial(getCurrentSnapshot()) : partial;
+    return [rootProxy, (partial) => {
+      let updates = typeof partial == "function" ? partial(getCurrentSnapshot()) : partial;
       batch(() => {
-        for (const key of Object.keys(updates)) {
+        for (let key of Object.keys(updates)) {
+          if (FORBIDDEN_STORE_KEYS.has(key)) {
+            __DEV__ && warnForbiddenKey(key);
+            continue;
+          }
           rootProxy[key] = updates[key];
         }
       });
-    };
-    return [rootProxy, setter];
+    }];
   }
-
-  // src/state/history.ts
+  function cloneEntry(v, seen) {
+    if (v === null || typeof v != "object") return v;
+    let proto = Object.getPrototypeOf(v);
+    if (!Array.isArray(v) && proto !== Object.prototype && proto !== null || (seen || (seen = /* @__PURE__ */ new WeakSet()), seen.has(v))) return v;
+    if (seen.add(v), Array.isArray(v)) return v.map((i) => cloneEntry(i, seen));
+    let out = {};
+    for (let k of Object.keys(v))
+      out[k] = cloneEntry(v[k], seen);
+    return out;
+  }
   function createHistory(source, options) {
-    const [sourceGet, sourceSet] = source;
-    const maxLength = options?.maxLength ?? 100;
-    let _stack = [sourceGet()];
-    let _cursor = 0;
-    const [stackSignal, setStackSignal] = createSignal([..._stack]);
-    const [cursorSignal, setCursorSignal] = createSignal(_cursor);
-    const [stackLenSignal, setStackLenSignal] = createSignal(_stack.length);
+    let [sourceGet, sourceSet] = source, maxLength = Math.max(1, options?.maxLength ?? 100), _stack = [cloneEntry(sourceGet())], _cursor = 0, [stackSignal, setStackSignal] = createSignal([..._stack]), [cursorSignal, setCursorSignal] = createSignal(_cursor), [stackLenSignal, setStackLenSignal] = createSignal(_stack.length);
     function syncSignals() {
       batch(() => {
-        setStackSignal([..._stack]);
-        setCursorSignal(_cursor);
-        setStackLenSignal(_stack.length);
+        setStackSignal([..._stack]), setCursorSignal(_cursor), setStackLenSignal(_stack.length);
       });
     }
-    let ignoreNext = false;
-    let isFirstRun = true;
-    internalEffect(() => {
-      const value2 = sourceGet();
+    let NONE = /* @__PURE__ */ Symbol("none"), _expected = NONE, isFirstRun = true, disposeEffect = internalEffect(() => {
+      let value2 = sourceGet();
       if (isFirstRun) {
         isFirstRun = false;
         return;
       }
-      if (ignoreNext) {
-        ignoreNext = false;
+      if (_expected !== NONE && Object.is(value2, _expected)) {
+        _expected = NONE;
         return;
       }
-      _stack = _stack.slice(0, _cursor + 1);
-      _stack.push(value2);
-      if (_stack.length > maxLength) {
-        _stack.splice(0, _stack.length - maxLength);
-      }
-      _cursor = _stack.length - 1;
-      syncSignals();
+      _expected = NONE, _stack = _stack.slice(0, _cursor + 1), _stack.push(cloneEntry(value2)), _stack.length > maxLength && _stack.splice(0, _stack.length - maxLength), _cursor = _stack.length - 1, syncSignals();
     });
-    const canUndo = () => cursorSignal() > 0;
-    const canRedo = () => cursorSignal() < stackLenSignal() - 1;
-    const undo = () => {
-      if (_cursor <= 0) return;
-      _cursor--;
-      ignoreNext = true;
-      sourceSet(_stack[_cursor]);
-      syncSignals();
-    };
-    const redo = () => {
-      if (_cursor >= _stack.length - 1) return;
-      _cursor++;
-      ignoreNext = true;
-      sourceSet(_stack[_cursor]);
-      syncSignals();
-    };
-    const clear = () => {
-      const currentValue = sourceGet();
-      _stack = [currentValue];
-      _cursor = 0;
-      syncSignals();
-    };
     return {
-      undo,
-      redo,
-      canUndo,
-      canRedo,
+      undo: () => {
+        if (_cursor <= 0) return;
+        _cursor--;
+        let restored = cloneEntry(_stack[_cursor]);
+        _expected = restored, sourceSet(restored), syncSignals();
+      },
+      redo: () => {
+        if (_cursor >= _stack.length - 1) return;
+        _cursor++;
+        let restored = cloneEntry(_stack[_cursor]);
+        _expected = restored, sourceSet(restored), syncSignals();
+      },
+      canUndo: () => cursorSignal() > 0,
+      canRedo: () => cursorSignal() < stackLenSignal() - 1,
       history: () => stackSignal(),
       cursor: () => cursorSignal(),
-      clear
+      clear: () => {
+        let currentValue = sourceGet();
+        _stack = [cloneEntry(currentValue)], _cursor = 0, syncSignals();
+      },
+      destroy: () => {
+        disposeEffect();
+      }
     };
   }
-
-  // src/state/persist.ts
+  var ENVELOPE_TAG = "$forma:v";
   function persist(source, key, options) {
-    const [sourceGet, sourceSet] = source;
-    const storage = options?.storage ?? globalThis.localStorage;
-    const serialize = options?.serialize ?? JSON.stringify;
-    const deserialize = options?.deserialize ?? JSON.parse;
-    const validate = options?.validate;
-    try {
-      const stored = storage.getItem(key);
-      if (stored !== null) {
-        const value2 = deserialize(stored);
-        if (!validate || validate(value2)) {
-          sourceSet(value2);
-        }
+    let [sourceGet, sourceSet] = source, storage = options?.storage ?? globalThis.localStorage, serialize = options?.serialize ?? JSON.stringify, deserialize = options?.deserialize ?? JSON.parse, validate = options?.validate, version = options?.version, migrate = options?.migrate, onError2 = options?.onError, writing = false;
+    function unwrap(stored) {
+      let parsed = deserialize(stored);
+      if (parsed != null && typeof parsed == "object" && Object.prototype.hasOwnProperty.call(parsed, ENVELOPE_TAG)) {
+        let env = parsed;
+        return { value: env.value, version: Number(env[ENVELOPE_TAG]) };
       }
-    } catch {
+      return { value: parsed, version: 0 };
     }
-    internalEffect(() => {
-      const value2 = sourceGet();
+    function hydrate() {
+      let stored;
       try {
-        const serialized = serialize(value2);
-        storage.setItem(key, serialized);
-      } catch {
+        stored = storage.getItem(key);
+      } catch (err) {
+        onError2?.(err, "hydrate");
+        return;
       }
-    });
+      if (stored !== null)
+        try {
+          let { value: raw, version: storedVersion } = unwrap(stored), value2 = raw;
+          if (version !== void 0 && storedVersion < version) {
+            if (!migrate) return;
+            try {
+              value2 = migrate(raw, storedVersion);
+            } catch (err) {
+              onError2?.(err, "migrate");
+              return;
+            }
+          }
+          if (!validate || validate(value2)) {
+            writing = true;
+            try {
+              sourceSet(value2);
+            } finally {
+              writing = false;
+            }
+          }
+        } catch (err) {
+          onError2?.(err, "hydrate");
+        }
+    }
+    hydrate();
+    let stopEffect = internalEffect(() => {
+      let value2 = sourceGet();
+      if (!writing)
+        try {
+          let serialized = serialize(version !== void 0 ? { [ENVELOPE_TAG]: version, value: value2 } : value2);
+          storage.setItem(key, serialized);
+        } catch (err) {
+          onError2?.(err, err?.name === "QuotaExceededError" ? "write" : "serialize");
+        }
+    }), enableSync = options?.syncTabs ?? (typeof window < "u" && storage === globalThis.localStorage), onStorage;
+    return enableSync && typeof window < "u" && (onStorage = (e) => {
+      e.storageArea === storage && (e.key !== null && e.key !== key || hydrate());
+    }, window.addEventListener("storage", onStorage)), () => {
+      stopEffect(), onStorage && typeof window < "u" && window.removeEventListener("storage", onStorage);
+    };
   }
-
-  // src/events/bus.ts
   function createBus() {
-    const listeners = /* @__PURE__ */ new Map();
+    let listeners = /* @__PURE__ */ new Map();
     function getHandlers(event) {
       let set = listeners.get(event);
-      if (!set) {
-        set = /* @__PURE__ */ new Set();
-        listeners.set(event, set);
-      }
-      return set;
+      return set || (set = /* @__PURE__ */ new Set(), listeners.set(event, set)), set;
     }
     function on2(event, handler) {
-      const set = getHandlers(event);
-      set.add(handler);
-      return () => {
+      let set = getHandlers(event);
+      return set.add(handler), () => {
         set.delete(handler);
       };
     }
     function once(event, handler) {
-      const wrapper = (payload) => {
-        off(event, wrapper);
-        handler(payload);
+      let wrapper = (payload) => {
+        off(event, wrapper), handler(payload);
       };
       return on2(event, wrapper);
     }
     function emit(event, payload) {
-      const set = listeners.get(event);
-      if (set) {
-        for (const handler of [...set]) {
+      let set = listeners.get(event);
+      if (set)
+        for (let handler of [...set])
           try {
             handler(payload);
           } catch (e) {
             console.error(`[forma] Bus handler error on "${String(event)}":`, e);
           }
-        }
-      }
     }
     function off(event, handler) {
-      const set = listeners.get(event);
-      if (set) {
-        set.delete(handler);
-      }
+      let set = listeners.get(event);
+      set && set.delete(handler);
     }
     function clear() {
       listeners.clear();
     }
     return { on: on2, once, emit, off, clear };
   }
-
-  // src/events/delegate.ts
   function delegate(container, selector, event, handler, options) {
-    const listener = (e) => {
-      const target = e.target;
+    let listener = (e) => {
+      let target = e.target;
       if (!(target instanceof HTMLElement)) return;
-      const root = container instanceof Document ? container.documentElement : container;
-      const matched = target.closest(selector);
-      if (matched instanceof HTMLElement && root.contains(matched)) {
-        handler(e, matched);
-      }
+      let root = container instanceof Document ? container.documentElement : container, matched = target.closest(selector);
+      matched instanceof HTMLElement && root.contains(matched) && handler(e, matched);
     };
-    container.addEventListener(event, listener, options);
-    return () => {
+    return container.addEventListener(event, listener, options), () => {
       container.removeEventListener(event, listener, options);
     };
   }
-
-  // src/events/keyboard.ts
   function parseCombo(combo) {
-    const parts = combo.toLowerCase().split("+").map((p) => p.trim());
-    const modifiers = {
+    let parts = combo.toLowerCase().split("+").map((p) => p.trim()), modifiers = {
       ctrl: false,
       shift: false,
       alt: false,
       meta: false,
       key: ""
     };
-    for (const part of parts) {
+    for (let part of parts)
       switch (part) {
         case "ctrl":
         case "control":
@@ -3311,44 +2800,25 @@ var FormaJS = (() => {
         default:
           modifiers.key = part;
       }
-    }
     return modifiers;
   }
   function matchesCombo(e, parsed) {
-    if (e.ctrlKey !== parsed.ctrl) return false;
-    if (e.shiftKey !== parsed.shift) return false;
-    if (e.altKey !== parsed.alt) return false;
-    if (e.metaKey !== parsed.meta) return false;
-    return e.key.toLowerCase() === parsed.key;
+    return e.ctrlKey !== parsed.ctrl || e.shiftKey !== parsed.shift || e.altKey !== parsed.alt || e.metaKey !== parsed.meta ? false : e.key.toLowerCase() === parsed.key;
   }
   function onKey(combo, handler, options) {
-    const target = options?.target ?? document;
-    const shouldPreventDefault = options?.preventDefault ?? true;
-    const parsed = parseCombo(combo);
-    const listener = (e) => {
-      if (!(e instanceof KeyboardEvent)) return;
-      if (matchesCombo(e, parsed)) {
-        if (shouldPreventDefault) {
-          e.preventDefault();
-        }
-        handler(e);
-      }
+    let target = options?.target ?? document, shouldPreventDefault = options?.preventDefault ?? true, parsed = parseCombo(combo), listener = (e) => {
+      e instanceof KeyboardEvent && matchesCombo(e, parsed) && (shouldPreventDefault && e.preventDefault(), handler(e));
     };
-    target.addEventListener("keydown", listener);
-    return () => {
+    return target.addEventListener("keydown", listener), () => {
       target.removeEventListener("keydown", listener);
     };
   }
-
-  // src/dom-utils/query.ts
   function $(selector, parent2) {
     return (parent2 ?? document).querySelector(selector);
   }
   function $$(selector, parent2) {
     return Array.from((parent2 ?? document).querySelectorAll(selector));
   }
-
-  // src/dom-utils/mutate.ts
   function addClass(el, ...classes) {
     el.classList.add(...classes);
   }
@@ -3359,22 +2829,12 @@ var FormaJS = (() => {
     return el.classList.toggle(className, force);
   }
   function setStyle(el, styles) {
-    for (const [key, value2] of Object.entries(styles)) {
-      if (value2 !== void 0) {
-        el.style[key] = value2;
-      }
-    }
+    for (let [key, value2] of Object.entries(styles))
+      value2 !== void 0 && (el.style[key] = value2);
   }
   function setAttr(el, attrs) {
-    for (const [name, value2] of Object.entries(attrs)) {
-      if (value2 === false || value2 === null) {
-        el.removeAttribute(name);
-      } else if (value2 === true) {
-        el.setAttribute(name, "");
-      } else {
-        el.setAttribute(name, value2);
-      }
-    }
+    for (let [name, value2] of Object.entries(attrs))
+      value2 === false || value2 === null ? el.removeAttribute(name) : value2 === true ? el.setAttribute(name, "") : el.setAttribute(name, value2);
   }
   function setText(el, text) {
     el.textContent = text;
@@ -3382,84 +2842,65 @@ var FormaJS = (() => {
   function setHTMLUnsafe(el, html) {
     el.innerHTML = html;
   }
-
-  // src/dom-utils/traverse.ts
   function closest(el, selector) {
     return el.closest(selector);
   }
   function children(el, selector) {
-    const all = Array.from(el.children);
-    if (!selector) return all;
-    return all.filter((child) => child.matches(selector));
+    let all = Array.from(el.children);
+    return selector ? all.filter((child) => child.matches(selector)) : all;
   }
   function siblings(el, selector) {
-    const parentEl = el.parentElement;
+    let parentEl = el.parentElement;
     if (!parentEl) return [];
-    const all = Array.from(parentEl.children);
-    const sibs = all.filter((child) => child !== el);
-    if (!selector) return sibs;
-    return sibs.filter((child) => child.matches(selector));
+    let sibs = Array.from(parentEl.children).filter((child) => child !== el);
+    return selector ? sibs.filter((child) => child.matches(selector)) : sibs;
   }
   function parent(el) {
     return el.parentElement;
   }
   function nextSibling(el, selector) {
     let sib = el.nextElementSibling;
-    while (sib) {
-      if (sib instanceof HTMLElement) {
-        if (!selector || sib.matches(selector)) {
-          return sib;
-        }
-      }
+    for (; sib; ) {
+      if (sib instanceof HTMLElement && (!selector || sib.matches(selector)))
+        return sib;
       sib = sib.nextElementSibling;
     }
     return null;
   }
   function prevSibling(el, selector) {
     let sib = el.previousElementSibling;
-    while (sib) {
-      if (sib instanceof HTMLElement) {
-        if (!selector || sib.matches(selector)) {
-          return sib;
-        }
-      }
+    for (; sib; ) {
+      if (sib instanceof HTMLElement && (!selector || sib.matches(selector)))
+        return sib;
       sib = sib.previousElementSibling;
     }
     return null;
   }
-
-  // src/dom-utils/observe.ts
   function onResize(el, handler) {
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
+    let observer = new ResizeObserver((entries) => {
+      for (let entry of entries)
         handler(entry);
-      }
     });
-    observer.observe(el);
-    return () => {
+    return observer.observe(el), () => {
       observer.disconnect();
     };
   }
   function onIntersect(el, handler, options) {
-    const observer = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
+    let observer = new IntersectionObserver((entries) => {
+      for (let entry of entries)
         handler(entry);
-      }
     }, options);
-    observer.observe(el);
-    return () => {
+    return observer.observe(el), () => {
       observer.disconnect();
     };
   }
   function onMutation(el, handler, options) {
-    const observer = new MutationObserver((mutations) => {
+    let observer = new MutationObserver((mutations) => {
       handler(mutations);
     });
-    observer.observe(el, options ?? { childList: true, subtree: true });
-    return () => {
+    return observer.observe(el, options ?? { childList: true, subtree: true }), () => {
       observer.disconnect();
     };
   }
-  return __toCommonJS(src_exports);
+  return __toCommonJS(forma_esm_exports);
 })();
-//# sourceMappingURL=formajs.global.js.map

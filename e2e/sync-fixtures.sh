@@ -18,7 +18,28 @@ echo "Building FormaJS..."
 (cd "$FORMAJS_DIR" && npm run build) > /dev/null 2>&1
 
 echo "Copying fixtures..."
-cp "$FORMAJS_DIR/dist/formajs-runtime.global.js" "$FIXTURES_DIR/"
-cp "$FORMAJS_DIR/dist/formajs.global.js" "$FIXTURES_DIR/"
+RUNTIME_BUNDLE="$FORMAJS_DIR/dist/formajs-runtime.global.js"
+ESM_BUNDLE="$FORMAJS_DIR/dist/forma.esm.js"
+ESBUILD_BIN="$FORMAJS_DIR/node_modules/.bin/esbuild"
+
+for required_file in "$RUNTIME_BUNDLE" "$ESM_BUNDLE" "$ESBUILD_BIN"; do
+  if [ ! -f "$required_file" ]; then
+    echo "Error: required FormaJS build input not found at $required_file"
+    exit 1
+  fi
+done
+
+cp "$RUNTIME_BUNDLE" "$FIXTURES_DIR/formajs-runtime.global.js"
+"$ESBUILD_BIN" "$ESM_BUNDLE" \
+  --bundle --format=iife --global-name=FormaJS --target=es2022 \
+  --outfile="$FIXTURES_DIR/formajs.global.js"
+
+node -e "
+  const source = require('fs').readFileSync('$FIXTURES_DIR/formajs.global.js', 'utf8');
+  if (!/var FormaJS\\s*=/.test(source)) {
+    console.error('Error: rebuilt formajs.global.js does not define the FormaJS global.');
+    process.exit(1);
+  }
+"
 
 echo "✓ E2E fixtures synced from $FORMAJS_DIR/dist/"
