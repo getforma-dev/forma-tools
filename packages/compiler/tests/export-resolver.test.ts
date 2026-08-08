@@ -595,10 +595,28 @@ describe('readImportBindings', () => {
     ) as any;
 
     expect([...readImportBindings(ast)]).toEqual([
-      ['Page', { source: './page', imported: 'default' }],
-      ['Card', { source: './card', imported: 'CardImpl' }],
-      ['Tag', { source: './card', imported: 'Tag' }],
-      ['icons', { source: './icons', imported: '*' }],
+      ['Page', { source: './page', imported: 'default', kind: 'value' }],
+      ['Card', { source: './card', imported: 'CardImpl', kind: 'value' }],
+      ['Tag', { source: './card', imported: 'Tag', kind: 'value' }],
+      ['icons', { source: './icons', imported: '*', kind: 'value' }],
+    ]);
+  });
+
+  it('marks type-only bindings, declaration-level and inline', () => {
+    // Erased at runtime: resolvers must not chase these — a type-only import
+    // of a signal getter's name must never bind a slot.
+    const ast = parse(
+      `
+        import type { Invite } from './store';
+        import { status, type Plane } from './store';
+      `,
+      { sourceType: 'module', plugins: ['typescript', 'jsx'] },
+    ) as any;
+
+    expect([...readImportBindings(ast)]).toEqual([
+      ['Invite', { source: './store', imported: 'Invite', kind: 'type' }],
+      ['status', { source: './store', imported: 'status', kind: 'value' }],
+      ['Plane', { source: './store', imported: 'Plane', kind: 'type' }],
     ]);
   });
 });

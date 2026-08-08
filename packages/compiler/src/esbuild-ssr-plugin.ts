@@ -177,16 +177,19 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
     }
 
     // Follows imports so a signal declared in a store module folds on this
-    // page. One per page — its caches keep resolution to one read + parse per
-    // module however many files import from it. The injected reader judges an
-    // imported signal by exactly the rules a local one gets: same collector,
-    // same module-const folding.
+    // page. One per page — its caches make the expensive work per-module, not
+    // per-importer. The injected reader judges an imported signal by exactly
+    // the rules a local one gets (same collector, same module-const folding)
+    // but QUIETLY: the eager scan reads modules whose signals may never
+    // appear on this page, and a warning about a signal nobody reads is
+    // noise — a read of an unfoldable signal still warns at its use site.
     const signalImports = createSignalImportResolver(fsModuleLoader, (source, filePath) =>
       collectSignalDeclarations(
         (parse(source, PARSE_OPTS) as unknown as t.File).program.body,
         {
           filePath,
           constants: moduleConstantScope(source, filePath, fsModuleLoader).stringConstants,
+          quiet: true,
         },
       ),
     );

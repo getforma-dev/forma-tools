@@ -63,6 +63,9 @@ import {
   type ComponentFunction,
   type SignalExportLookup,
 } from './export-resolver.js';
+import { dirname } from 'node:path';
+
+import { nestedScopeBindings } from './component-analyzer.js';
 import type { ModuleLoader } from './module-loader.js';
 import { uniqueName } from './utils.js';
 
@@ -135,6 +138,11 @@ export interface SignalCollectOptions {
   /** Module-level string constants of `filePath`, so a default declared once as
    *  a `const` (`createSignal(SEL_TOGGLE_OFF)`) still folds to a literal. */
   constants?: Map<string, string>;
+  /** Suppress this collector's warnings. Set by the eager import scan, which
+   *  reads modules whose signals may never appear on the page — a warning
+   *  about a signal nobody reads is noise, and the USE site still gets its
+   *  own degradation diagnostic when an unfoldable signal is actually read. */
+  quiet?: boolean;
 }
 
 /**
@@ -204,6 +212,10 @@ function evaluateSignalDefault(
   // `createSignal(null as string | null)` — the way a store widens a signal's
   // type. Casts are erased at runtime, so the literal underneath is the
   // default; refusing to look through one cost the signal its slot.
+  // (TSTypeAssertion — old-style `<T>expr` — is unreachable through this
+  // compiler's own pipelines: every parse enables Babel's jsx plugin, which
+  // reads `<T>` as JSX and errors before evaluation. Kept for callers that
+  // parse without jsx.)
   if (
     t.isTSAsExpression(node)
     || t.isTSTypeAssertion(node)
@@ -244,7 +256,7 @@ export function collectSignalDeclarations(
       return;
     }
     if (existing.type !== value.type || existing.default !== value.default) {
-      warnSignal(
+      if (!options.quiet) warnSignal(
         options.filePath,
         `signal '${name}' is declared twice in the same scope with different defaults `
         + `(${JSON.stringify(existing.default)} then ${JSON.stringify(value.default)}) — `
@@ -281,7 +293,7 @@ export function collectSignalDeclarations(
       const evaluated = evaluateSignalDefault(initArg as T.Expression, options.constants);
       if (evaluated) {
         record(signalName, evaluated);
-      } else {
+      } else if (!options.quiet) {
         warnSignal(
           options.filePath,
           `signal '${signalName}' is initialized with a ${(initArg as T.Expression).type} the compiler `
@@ -519,9 +531,13 @@ export function enterComponentScope(input: ComponentScopeInput): SignalScope {
  * modules, so `import { tok } from './store'` folds the default that
  * `store.ts` declares.
  *
- * Created once per page and shared by every scope entry on it: the caches are
- * what keep resolution to one read + parse per module however many files
- * import from it.
+ * Created once per page and shared by every scope entry on it. The caches
+ * make the expensive work per-MODULE, not per-importer: one loader call per
+ * (importing directory, specifier), one export-walk parse and one signal
+ * collection per resolved module path, one answer per (resolved path, name)
+ * however many files ask. The signal collection itself still costs its own
+ * parse plus the module-constant extraction the caller's `readSignals`
+ * chooses to do — once per module.
  */
 export interface SignalImportResolver {
   /**
@@ -562,13 +578,42 @@ export function createSignalImportResolver(
     return declarations;
   };
 
-  /** One traversal per (importing file, specifier, imported name). */
+  /** One filesystem probe per (importing directory, specifier). The loader
+   *  resolves relative to the importer's directory, so the directory — not the
+   *  full file path — is the cache identity. */
+  const edges = new Map<string, { path: string; source: string } | null>();
+  const loadEdgeCached: ModuleLoader = (fromFile, importPath) => {
+    const key = `${dirname(fromFile)}>${importPath}`;
+    let mod = edges.get(key);
+    if (mod === undefined) {
+      mod = loadModule(fromFile, importPath);
+      edges.set(key, mod);
+    }
+    return mod;
+  };
+
+  /** One export-walk parse per module, shared across every lookup that
+   *  reaches that module (directly or through a re-export chain). */
+  const parsedByPath = new Map<string, T.File | null>();
+
+  /** One traversal per (RESOLVED module path, imported name) — importers that
+   *  name the same module collapse onto one answer. */
   const lookups = new Map<string, ResolvedSignalImport | null>();
 
   return {
     resolve(ast: T.File, filePath: string): Map<string, ResolvedSignalImport> {
       const resolved = new Map<string, ResolvedSignalImport>();
+      /** Names the importing FILE also declares somewhere — a nested
+       *  `const status = …` shadows the import at its use sites, and the
+       *  scope chain cannot see non-signal locals, so folding the store's
+       *  default there would be silently wrong. Skip the whole name. */
+      let shadowed: Set<string> | null = null;
+
       for (const [localName, binding] of readImportBindings(ast)) {
+        // A type-only binding is erased at runtime — it can never be a signal
+        // read, and following it would drag the module's slot table into
+        // pages that only reference a type.
+        if (binding.kind === 'type') continue;
         // Namespace and default imports carry no declared name to chase —
         // skipping them (rather than half-resolving) is the contract.
         if (binding.imported === '*' || binding.imported === 'default') continue;
@@ -576,25 +621,28 @@ export function createSignalImportResolver(
         // every other package import is skipped without a read.
         if (!binding.source.startsWith('.') && !binding.source.startsWith('/')) continue;
 
-        const key = `${filePath}>${binding.source}>${binding.imported}`;
+        shadowed ??= nestedScopeBindings(ast);
+        if (shadowed.has(localName)) continue;
+
+        const mod = loadEdgeCached(filePath, binding.source);
+        if (!mod) continue;
+
+        const key = `${mod.path}>${binding.imported}`;
         let hit = lookups.get(key);
         if (hit === undefined) {
           hit = null;
-          const mod = loadModule(filePath, binding.source);
-          if (mod) {
-            const lookup: SignalExportLookup<SignalDefault> = resolveExportedSignal(
-              mod.source,
-              mod.path,
-              binding.imported,
-              { loadModule, readSignals: readSignalsCached },
-            );
-            if (lookup.kind === 'found' && lookup.declarations.has(lookup.name)) {
-              hit = {
-                definingPath: lookup.filePath,
-                name: lookup.name,
-                declarations: lookup.declarations,
-              };
-            }
+          const lookup: SignalExportLookup<SignalDefault> = resolveExportedSignal(
+            mod.source,
+            mod.path,
+            binding.imported,
+            { loadModule: loadEdgeCached, readSignals: readSignalsCached, parsed: parsedByPath },
+          );
+          if (lookup.kind === 'found' && lookup.declarations.has(lookup.name)) {
+            hit = {
+              definingPath: lookup.filePath,
+              name: lookup.name,
+              declarations: lookup.declarations,
+            };
           }
           lookups.set(key, hit);
         }

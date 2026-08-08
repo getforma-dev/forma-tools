@@ -23,8 +23,8 @@ describe('parseEntryPoint', () => {
         ['OnboardingPage', './OnboardingPage'],
       ]),
       importBindings: new Map([
-        ['mount', { source: 'formajs', imported: 'mount' }],
-        ['OnboardingPage', { source: './OnboardingPage', imported: 'OnboardingPage' }],
+        ['mount', { source: 'formajs', imported: 'mount', kind: 'value' }],
+        ['OnboardingPage', { source: './OnboardingPage', imported: 'OnboardingPage', kind: 'value' }],
       ]),
     });
   });
@@ -56,8 +56,8 @@ describe('parseEntryPoint', () => {
       // export, not to an export named 'Dashboard' — the resolver has to look
       // for the right one over there.
       importBindings: new Map([
-        ['mount', { source: 'formajs', imported: 'mount' }],
-        ['Dashboard', { source: './Dashboard', imported: 'default' }],
+        ['mount', { source: 'formajs', imported: 'mount', kind: 'value' }],
+        ['Dashboard', { source: './Dashboard', imported: 'default', kind: 'value' }],
       ]),
     });
   });
@@ -77,8 +77,8 @@ describe('parseEntryPoint', () => {
         ['UserProfile', './pages/UserProfile'],
       ]),
       importBindings: new Map([
-        ['mount', { source: 'formajs', imported: 'mount' }],
-        ['UserProfile', { source: './pages/UserProfile', imported: 'UserProfile' }],
+        ['mount', { source: 'formajs', imported: 'mount', kind: 'value' }],
+        ['UserProfile', { source: './pages/UserProfile', imported: 'UserProfile', kind: 'value' }],
       ]),
     });
   });
@@ -98,8 +98,8 @@ describe('parseEntryPoint', () => {
         ['App', './App'],
       ]),
       importBindings: new Map([
-        ['mount', { source: 'formajs', imported: 'mount' }],
-        ['App', { source: './App', imported: 'App' }],
+        ['mount', { source: 'formajs', imported: 'mount', kind: 'value' }],
+        ['App', { source: './App', imported: 'App', kind: 'value' }],
       ]),
     });
   });
@@ -151,8 +151,8 @@ describe('parseEntryPoint', () => {
       // The ALIAS is the whole point: local `Page` is exported as `LoginPage`
       // by ./LoginPage, so looking up 'Page' over there would find nothing.
       importBindings: new Map([
-        ['mount', { source: 'formajs', imported: 'mount' }],
-        ['Page', { source: './LoginPage', imported: 'LoginPage' }],
+        ['mount', { source: 'formajs', imported: 'mount', kind: 'value' }],
+        ['Page', { source: './LoginPage', imported: 'LoginPage', kind: 'value' }],
       ]),
     });
   });

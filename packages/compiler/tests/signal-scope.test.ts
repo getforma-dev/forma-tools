@@ -591,6 +591,76 @@ describe('enterComponentScope — imported signals', () => {
     expect(lookupSignal(scope, 's')).toBeUndefined();
   });
 
+  it('a nested local shadowing the imported name blocks the fold', () => {
+    // page.ts imports `status` AND declares its own `status` inside the
+    // component. lookupSignal cannot see non-signal locals, so installing the
+    // import binding would fold the STORE's default into a read that actually
+    // hits the component's local — a silently wrong SSR value where the
+    // pre-fix behavior was a flagged degradation. The import must be skipped.
+    const { scope } = importScope({
+      './store.ts': STORE,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function Page() {
+          const helper = () => {
+            const ownerInviteToken = () => sessionStorage.getItem('tok');
+            return h('i', null, () => ownerInviteToken());
+          };
+          return h('div', null, helper());
+        }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
+  });
+
+  it('a type-only import is skipped without following the module', () => {
+    // `import type` is erased at runtime — it must not bind a slot, and it
+    // must not drag the store's slot table into the page.
+    const files = {
+      './store.ts': STORE,
+      './page.ts': `
+        import { h } from 'formajs';
+        import type { ownerInviteToken } from './store';
+        export function Page() { return h('a', null); }
+      `,
+    };
+    const { ctx, scope } = importScope(files, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
+    expect(getSlots(ctx.toBinary()).map((s) => s.name)).not.toContain('ownerInviteToken');
+  });
+
+  it('an inline type specifier is skipped while its value siblings resolve', () => {
+    const { ctx, scope } = importScope({
+      './store.ts': `
+        import { createSignal } from 'formajs';
+        export const [ownerInviteToken, setOwnerInviteToken] = createSignal('');
+        export type Invite = { token: string };
+      `,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken, type Invite } from './store';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeDefined();
+    expect(lookupSignal(scope, 'Invite')).toBeUndefined();
+    expect(getSlots(ctx.toBinary()).filter((s) => s.name === 'ownerInviteToken')).toHaveLength(1);
+  });
+
+  it('importing a signal SETTER binds nothing', () => {
+    // Only the getter (elements[0] of the destructuring) is a signal binding.
+    const { scope } = importScope({
+      './store.ts': STORE,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { setOwnerInviteToken } from './store';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'setOwnerInviteToken')).toBeUndefined();
+  });
+
   it('a non-literal initialiser still degrades with the existing diagnostic', () => {
     // The fix must not invent a default it cannot honour: no binding, and the
     // collector's existing warning still names the signal and the cause.
