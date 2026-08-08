@@ -8,8 +8,10 @@ not know about: gatewasm's stores wrap literal defaults in TypeScript casts
 (`createSignal(null as string | null)`), which the evaluator also refused and
 now unwraps. Two corrections to §6/§7 discovered during implementation: the
 module loader does NOT cache reads or parses (the fix threads its own
-page-level memo), and the golden corpus is compared in the `forma` repo's
-`fmir-contract` CI job, not by a local vitest. Kept for the diagnosis record.
+page-level memo), and the golden corpus is compared by THIS repo's
+`fmir-contract` CI job — which checks out `forma` and runs its
+`js_emitter_contract` tests over freshly emitted fixtures — not by a local
+vitest. Kept for the diagnosis record.
 
 You are picking up a single, well-bounded compiler gap. Everything below was
 verified by reading the source and by reproducing the symptom in a real app;

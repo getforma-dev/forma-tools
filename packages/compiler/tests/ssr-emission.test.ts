@@ -907,6 +907,9 @@ describe('generateRealIr — signals imported from a store module', () => {
     // …and the attribute slot carries the folded else-branch, so the
     // server-rendered <a> has its href with JavaScript off.
     expect(slotByName(result.binary, 'attr:href')!.default).toBe('/platform/onboarding');
+    // The opcode must BIND the attribute to that slot — a correct slot table
+    // over a dropped or mis-bound DYN_ATTR still renders no href.
+    expect(parseOpcodeList(result.binary)).toContain('DYN_ATTR href -> attr:href');
     // The whole point: no "cannot evaluate" degradation for this attribute.
     expect(warnings()).not.toContain("attribute 'href'");
   });
@@ -948,6 +951,11 @@ describe('generateRealIr — signals imported from a store module', () => {
     const statusSlots = slotNames(result.binary).filter((n) => n.startsWith('status'));
     expect(statusSlots).toEqual(['status']);
     expect(slotByName(result.binary, 'status')!.default).toBe('idle');
+    // The island must CARRY the shared slot in its slot_ids — that is what a
+    // server uses to inject the island's props, and a mis-bound id would ship
+    // a well-formed table over a stale island.
+    const badge = getIslands(result.binary).find((i) => i.name === 'Badge')!;
+    expect(badge.slotIds).toContain(slotByName(result.binary, 'status')!.id);
     expect(warnings()).toBe('');
   });
 });
