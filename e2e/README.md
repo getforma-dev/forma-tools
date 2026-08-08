@@ -21,7 +21,8 @@ npm run test:e2e
 
 This automatically:
 1. Builds FormaJS from the sibling `../formajs/` directory
-2. Copies `formajs-runtime.global.js` and `formajs.global.js` to `e2e/fixtures/`
+2. Copies `formajs-runtime.global.js` and bundles the shipped `forma.esm.js` as
+   the `formajs.global.js` IIFE fixture
 3. Starts a local static server on port 3457
 4. Runs 15 Playwright tests in headless Chromium
 

@@ -178,63 +178,11 @@ jobs:
           npm ci
           npm run build
 
-      # THIS STEP WAS BROKEN AND FAILED ON EVERY RUN.
-      #
-      # It used to be a blind `cp formajs-checkout/dist/formajs.global.js`.
-      # formajs no longer builds that file: tsup.config.ts emits IIFE bundles
-      # for `formajs-runtime` and `formajs-runtime-hardened` only, and the full
-      # library ships as `forma.esm.js` (ESM). So the copy was `cp: cannot
-      # stat` -> exit 1 -> this job red on every single run, forever. It went
-      # unnoticed because `test:e2e:ci` locally reads a STALE committed copy of
-      # formajs.global.js dated 2026-08-05, which is why the suite passes on a
-      # laptop and cannot pass in CI.
-      #
-      # The fix regenerates the artifact rather than papering over it: bundle
-      # formajs's own built `dist/forma.esm.js` into an IIFE named FormaJS with
-      # formajs's own esbuild. Because the input is the already-built ESM, the
-      # build-time defines (__DEV__ etc.) are already baked in — this is not a
-      # second, divergent build of the source.
-      #
-      # VERIFIED LOCALLY: produces a 112,518-byte bundle whose FormaJS global
-      # exposes 78 exports including every symbol e2e/fixtures/full-stack.html
-      # uses (createSignal, h, mount, createEffect, template, templateMany,
-      # createComputed, batch, Fragment). esbuild ran in 39ms.
-      #
-      # PERMANENT FIX (out of scope for this workflow-only change, tracked in
-      # owner_todo): either restore a `formajs.global` IIFE entry to formajs's
-      # tsup.config.ts, or point e2e/fixtures/full-stack.html at an artifact
-      # formajs actually builds. Until one of those lands, this step is what
-      # makes the job green, and it fails loudly if its inputs move.
+      # Use the same fixture synchronization contract locally and in CI. The
+      # script copies the shipped HTML runtime and bundles the shipped
+      # `forma.esm.js` as the full-library IIFE consumed by the browser fixture.
       - name: Copy fixtures
-        run: |
-          set -euo pipefail
-          RT=formajs-checkout/dist/formajs-runtime.global.js
-          ESM=formajs-checkout/dist/forma.esm.js
-          for f in "$RT" "$ESM"; do
-            if [ ! -f "$f" ]; then
-              echo "::error::formajs no longer builds $f."
-              echo "::error::This job bundles formajs's dist into the two globals"
-              echo "::error::e2e/fixtures/full-stack.html loads. Re-check formajs tsup.config.ts"
-              echo "::error::and update this step to name the artifacts it now emits."
-              exit 1
-            fi
-          done
-          cp "$RT" e2e/fixtures/formajs-runtime.global.js
-          # Rebuild the full-library IIFE that formajs stopped emitting, using
-          # formajs's own esbuild (a tsup dependency, so it is already in the
-          # checkout's node_modules after `npm ci` above). Invoked by path
-          # rather than `npx` so it can never fall through to the registry.
-          ./formajs-checkout/node_modules/.bin/esbuild "$ESM" \
-            --bundle --format=iife --global-name=FormaJS --target=es2022 \
-            --outfile=e2e/fixtures/formajs.global.js
-          node -e "
-            const s = require('fs').readFileSync('e2e/fixtures/formajs.global.js','utf8');
-            if (!/var FormaJS\s*=/.test(s)) {
-              console.error('::error::Rebuilt formajs.global.js does not define the FormaJS global.');
-              process.exit(1);
-            }
-          "
-          ls -l e2e/fixtures/
+        run: FORMAJS_DIR="$PWD/formajs-checkout" bash e2e/sync-fixtures.sh
 
       # Install forma-tools deps and run E2E
       - run: npm install
