@@ -560,7 +560,18 @@ export interface ResolvedSignalImport {
   /** The defining module's COMPLETE top-level signal declarations. The
    *  `#module` frame is memoized on its first entry (`registry.frames`), so
    *  whoever enters it first must enter it whole — entering with a partial
-   *  map would permanently hide the rest of that module's signals. */
+   *  map would permanently hide the rest of that module's signals.
+   *
+   *  ACCEPTED TRADEOFF of whole-frame entry: every evaluable signal the
+   *  store declares gets a slot, including ones no file on the page reads,
+   *  and because import resolution runs when the ROOT scope is built, such
+   *  a signal claims its base slot name before a later-inlined component's
+   *  own same-named signal (which then mints `name#2`). A server injecting
+   *  by name must use the collision warning's suffixed name in that case.
+   *  The alternative — lazy per-name entry — would violate the memo
+   *  contract above; slot-table bloat and the rename hazard are the price
+   *  of one-slot-per-signal identity, and the collision warning names the
+   *  rename whenever it happens. */
   declarations: Map<string, SignalDefault>;
 }
 
