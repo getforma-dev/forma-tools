@@ -923,6 +923,10 @@ function signalLookup<V>(
       continue;
     }
     if (!t.isExportNamedDeclaration(stmt)) continue;
+    // `export type { x } from './y'` is erased at runtime — following it as
+    // a value edge would fold the store's default (and mint its slot table)
+    // for an import that cannot exist once TypeScript compiles.
+    if (stmt.exportKind === 'type') continue;
 
     // export const [name, setName] = createSignal(…)
     if (stmt.declaration) {
@@ -951,6 +955,8 @@ function signalLookup<V>(
         }
         continue;
       }
+      // Inline form of the same erasure: `export { type x } from './y'`.
+      if (spec.exportKind === 'type') continue;
       const exportedName = t.isIdentifier(spec.exported)
         ? spec.exported.name
         : spec.exported.value;

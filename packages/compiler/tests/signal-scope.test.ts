@@ -614,6 +614,75 @@ describe('enterComponentScope — imported signals', () => {
     expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
   });
 
+  it('a nested function DECLARATION shadowing the imported name blocks the fold', () => {
+    // Same hazard as the const shadow, different declaration form: a
+    // `function tok() {}` inside a component binds the name too, and the
+    // scope chain cannot see it — folding the store's default at a tok()
+    // read site would be silently wrong.
+    const { scope } = importScope({
+      './store.ts': STORE,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function Page() {
+          function ownerInviteToken() { return sessionStorage.getItem('tok'); }
+          return h('i', null, () => ownerInviteToken());
+        }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
+  });
+
+  it('a nested class declaration shadowing the imported name blocks the fold', () => {
+    const { scope } = importScope({
+      './store.ts': STORE,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './store';
+        export function Page() {
+          class ownerInviteToken {}
+          return h('i', null, String(ownerInviteToken));
+        }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
+  });
+
+  it('a type-only RE-EXPORT through a barrel binds nothing', () => {
+    // `export type { tok } from './store'` is erased at runtime — following
+    // it as a value edge would fold the store's default (and mint its slot
+    // table) for an import that cannot exist at runtime.
+    const { ctx, scope } = importScope({
+      './store.ts': STORE,
+      './barrel.ts': `export type { ownerInviteToken } from './store';`,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { ownerInviteToken } from './barrel';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
+    expect(getSlots(ctx.toBinary()).map((s) => s.name)).not.toContain('ownerInviteToken');
+  });
+
+  it('an inline type re-export specifier binds nothing while value siblings resolve', () => {
+    const { scope } = importScope({
+      './store.ts': `
+        import { createSignal } from 'formajs';
+        export const [ownerInviteToken, setOwnerInviteToken] = createSignal('');
+        export const [status, setStatus] = createSignal('idle');
+      `,
+      './barrel.ts': `export { status, type ownerInviteToken } from './store';`,
+      './page.ts': `
+        import { h } from 'formajs';
+        import { status, ownerInviteToken } from './barrel';
+        export function Page() { return h('a', null); }
+      `,
+    }, './page.ts', 'Page');
+    expect(lookupSignal(scope, 'status')).toBeDefined();
+    expect(lookupSignal(scope, 'ownerInviteToken')).toBeUndefined();
+  });
+
   it('a type-only import is skipped without following the module', () => {
     // `import type` is erased at runtime — it must not bind a slot, and it
     // must not drag the store's slot table into the page.

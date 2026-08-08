@@ -609,6 +609,34 @@ export function nestedScopeBindings(ast: T.File): Set<string> {
     },
     Function(path) {
       for (const param of path.node.params) addBindings(param);
+      // A nested `function name() {}` binds its own name in the enclosing
+      // scope, same as a const — omitting it let an imported signal (and a
+      // module string constant) fold straight through the shadow.
+      if (
+        t.isFunctionDeclaration(path.node)
+        && path.node.id
+        && !t.isProgram(path.parentPath.node)
+        && !(
+          t.isExportNamedDeclaration(path.parentPath.node)
+          && path.parentPath.parentPath
+          && t.isProgram(path.parentPath.parentPath.node)
+        )
+      ) {
+        names.add(path.node.id.name);
+      }
+    },
+    ClassDeclaration(path) {
+      if (
+        path.node.id
+        && !t.isProgram(path.parentPath.node)
+        && !(
+          t.isExportNamedDeclaration(path.parentPath.node)
+          && path.parentPath.parentPath
+          && t.isProgram(path.parentPath.parentPath.node)
+        )
+      ) {
+        names.add(path.node.id.name);
+      }
     },
     CatchClause(path) {
       if (path.node.param) addBindings(path.node.param);
