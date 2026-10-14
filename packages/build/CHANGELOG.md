@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-14
+
+Release A2, the bridge to 3.0.0: additive, with deprecations. Released with
+`@getforma/compiler` 0.3.7, which strict mode needs (the peer range stays
+`^0.3.0`: without strict mode an older compiler is used as before).
+
+### Upgrading from 0.3.0: what an application may meet
+
+- **The default build behaves as before.** Strict mode is opt-in (`strict:
+  true` or `FORMA_STRICT=1`); without it the only difference in a build's
+  output is the code and position in each `IR:` line (compiler 0.3.7).
+- **A production build replaces `outputDir` whole,** by renaming a staging
+  directory beside it (`.<name>.forma-staging-<pid>-<hex>`) into place, so a
+  failed build leaves the previous output untouched. A process holding the
+  old directory open, or watching it by inode, sees a new directory; an
+  `outputDir` that is a mount point is filled in place, with a warning.
+- **Warnings for the deprecated paths,** once per `build()` call, on the
+  console and in `BuildResult.warnings`: `BUILD-802` for `serviceWorker`
+  without `app`, `BUILD-803` for the `wasm` key, `BUILD-804` when the
+  wasm-pack step runs.
+- **Watch mode is a development build:** it resolves the `development` export
+  condition and defines `process.env.NODE_ENV` as `"development"`, so core
+  2.1.0's development warnings appear in watch builds. Watch builds with
+  `ssr: true` name each page's module in the dev manifest, so forma-server
+  renders the page (Phase 2) as in production, and they replace
+  `manifest.json` and `sw.js` by rename.
+- **`previewFrame: true` is opt-in** (FORMA-175). With it on, the build copies
+  the frame runtime of the `@getforma/core` the bundles import (2.1.0 or
+  later) into the output as `forma-runtime.<hash>.js` for forma-server's
+  preview frame, and fails, strict or not, before writing anything, with
+  `BUILD-805` (that core has no frame runtime, or no core is found),
+  `BUILD-806` (a runtime forma-server could not inline) or `BUILD-807` (the
+  bundles import two cores whose runtimes differ). Off, the output is
+  byte-identical.
+- **A new bin, `forma-raw-lint`,** for an application's CI; `build()` and the
+  package's exports are unchanged.
+
 ### Added
 - **`previewFrame: true` copies the preview-frame runtime of the `@getforma/core` the bundles import into the output as `forma-runtime.js` (FORMA-175; DR-14 tier (c), DR-26, L-27, L-44).** forma-server's preview frame (`PageResponse::frame`, FORMA-125) inlines core's frame runtime (FORMA-128) and allows it by its SHA-256 hash; `PreviewFrame::load` reads it at start from the manifest's `assets["forma-runtime.js"]`, and until a build writes it the frame refuses to start (FRAME-101). Off by default; off (or `false`), nothing is read and the output is byte-identical to a build without the setting.
   - **Which core: the one the bundles import.** Before anything is written, each entry is bundled in memory (nothing written) with the bundles' own esbuild options, and every file it loads is mapped to its package, a core being a directory whose package.json is named `@getforma/core`. So the copied core is the bundles', however they reach it: `formaAlias`, whose target esbuild resolves from the working directory (a build run from a monorepo's root takes the root's core, as its bundles do); tsconfig `paths` to a vendored copy; a linked or pnpm-installed core, by its real path. When the bundles import no core, the one installed where the build runs (the working directory) is copied. The entries must bundle at start, in watch mode too.
@@ -22,40 +59,6 @@
   - **`diagnosticsJson: '<path>'`** writes `{ version, strict, diagnostics }` to that path, also when strict mode fails the build. The path must be outside `outputDir` (the build replaces it whole and serves it); one inside is refused before anything is written, inside as the filesystem sees it: through real paths (a symlink or junction into `outputDir` is inside), case-insensitively where the filesystem ignores case, and with `..` only as a whole segment (`dist/..diag.json` is inside). `version` is 1; a field may be added without changing it, and renaming or removing one, or changing what one means, increments it.
   - **SSR without the compiler is `BUILD-801`:** its warning carries the code (`Warning: BUILD-801 @getforma/compiler not available for SSR. Skipping IR emission.`) and strict mode fails on it. **`serviceWorker` without `app` (`BUILD-802`, FORMA-130), `wasm` in the config (`BUILD-803`) and the wasm-pack step (`BUILD-804`, FORMA-131)** join the report as notes strict mode does not fail on: the old paths keep working in A2, so a build that still sets `wasm` passes in strict mode. The WASM step now runs before the report is written, so the report names `BUILD-804` when it ran.
   - Tests: `tests/strict.test.ts` > "S6: an unrepresentable construct fails the strict build with its code, file and line", "without --strict the same build succeeds, prints its lines as before, and returns the diagnostics", "reports BUILD-802 (serviceWorker without app) as a note --strict does not fail on", "passes a clean build, and never fails on a note", "pins its keys: the report, and each diagnostic", "refuses a JSON report path inside outputDir, before anything is written", "is written on request, also when --strict fails the build", "takes strict from the config, else from FORMA_STRICT, and reads no command-line flag", "applies FORMA_STRICT=1 to a build whose config does not set it", "ignores a --strict on the command line of the process that calls build()", "keeps a page with an error unpublished, says why, and publishes it once fixed"; `tests/strict-compiler.test.ts` > "reports SSR without @getforma/compiler with its code, and fails it under --strict", "is refused under --strict, and used as before without it".
-
-### Deprecated
-- **`serviceWorker` without `app`** (BUILD-802; FORMA-130). The worker it
-  writes is 0.3.0's: cache names every Forma application on the origin
-  shares, and an immediate takeover of open tabs. The build now says so once
-  per `build()` call, in watch mode and in production alike, on the console
-  (`Warning: BUILD-802 ...`) and as an entry in `BuildResult.warnings`; set
-  `app` to the name the server passes to forma-server's
-  `sw::ServiceWorker::for_app`. From 3.0.0 a worker is written only for a
-  named `app`. Nothing changes without `serviceWorker`, or with `app`. Test:
-  `tests/build.test.ts` > "warns when serviceWorker is set without app, naming
-  the 3.0.0 change, and is silent with app". The code joins FORMA-119's
-  diagnostic catalogue (`docs/DIAGNOSTICS.md`, BUILD-8xx) when that lands.
-  The build's `app` and the server's `for_app` meet by convention: FORMA-168
-  records `app` in the manifest so the server can check it.
-- **The `wasm` key and the wasm-pack step** (BUILD-803, BUILD-804;
-  FORMA-131, DR-23). Both go in 3.0.0 with the WASM walker: forma-ir's `wasm`
-  feature and `@getforma/core/wasm` are deprecated in the same release, and
-  islands re-render in the browser with `h()`. A config that sets `wasm` gets
-  `Warning: BUILD-803 the wasm key is deprecated ...` once per `build()` call,
-  in watch mode and in production alike, on the console and in
-  `BuildResult.warnings`, as BUILD-802 is. When the wasm-pack step runs (a
-  production build with `wasm-pack` on `PATH`), it says
-  `Warning: BUILD-804 the wasm-pack step is deprecated ...` as it starts, and
-  that build's `BuildResult.warnings` lists it. Nothing else changes: the
-  step still runs, and the manifest's `wasm` entry and the worker still name
-  its outputs. `BuildConfig.wasm` and `AssetManifest.wasm` are `@deprecated`
-  in the types. Tests: `tests/wasm-deprecation.test.ts` > "a config that sets
-  wasm warns BUILD-803 once per build, naming 3.0.0", "the wasm-pack step
-  warns BUILD-804 when it runs, and still ships the walker" and "a config
-  without wasm warns neither". Both codes join FORMA-119's catalogue
-  (`docs/DIAGNOSTICS.md`, BUILD-8xx) with BUILD-802 when that lands.
-
-### Added
 - **Per-application, per-build service-worker caches with a waiting upgrade:
   `BuildConfig.app`** (FORMA-130, the build half; DR-25, SR28). Set it to the
   string the server passes to forma-server 0.2.2's
@@ -87,6 +90,47 @@
   cache emptied and no request reaching the server, also while two instances
   alternate `/sw.js` over six update checks, an unrelated cache and a second
   application's cache surviving, v1's name retired).
+
+### Deprecated
+
+Each keeps working through 0.3.x, warns once per `build()` call, and goes in
+3.0.0:
+
+| Deprecated in 0.3.1 | Use instead (3.0.0's form) |
+|---|---|
+| `serviceWorker` without `app` (`BUILD-802`) | set `app` to the name the server passes to forma-server's `sw::ServiceWorker::for_app` |
+| the `wasm` key (`BUILD-803`) and the wasm-pack step (`BUILD-804`) | none: islands re-render in the browser with `@getforma/core`'s `h()` |
+
+- **`serviceWorker` without `app`** (BUILD-802; FORMA-130). The worker it
+  writes is 0.3.0's: cache names every Forma application on the origin
+  shares, and an immediate takeover of open tabs. The build now says so once
+  per `build()` call, in watch mode and in production alike, on the console
+  (`Warning: BUILD-802 ...`) and as an entry in `BuildResult.warnings`; set
+  `app` to the name the server passes to forma-server's
+  `sw::ServiceWorker::for_app`. From 3.0.0 a worker is written only for a
+  named `app`. Nothing changes without `serviceWorker`, or with `app`. Test:
+  `tests/build.test.ts` > "warns when serviceWorker is set without app, naming
+  the 3.0.0 change, and is silent with app". The code joins FORMA-119's
+  diagnostic catalogue (`docs/DIAGNOSTICS.md`, BUILD-8xx) when that lands.
+  The build's `app` and the server's `for_app` meet by convention: FORMA-168
+  records `app` in the manifest so the server can check it.
+- **The `wasm` key and the wasm-pack step** (BUILD-803, BUILD-804;
+  FORMA-131, DR-23). Both go in 3.0.0 with the WASM walker: forma-ir's `wasm`
+  feature and `@getforma/core/wasm` are deprecated in the same release, and
+  islands re-render in the browser with `h()`. A config that sets `wasm` gets
+  `Warning: BUILD-803 the wasm key is deprecated ...` once per `build()` call,
+  in watch mode and in production alike, on the console and in
+  `BuildResult.warnings`, as BUILD-802 is. When the wasm-pack step runs (a
+  production build with `wasm-pack` on `PATH`), it says
+  `Warning: BUILD-804 the wasm-pack step is deprecated ...` as it starts, and
+  that build's `BuildResult.warnings` lists it. Nothing else changes: the
+  step still runs, and the manifest's `wasm` entry and the worker still name
+  its outputs. `BuildConfig.wasm` and `AssetManifest.wasm` are `@deprecated`
+  in the types. Tests: `tests/wasm-deprecation.test.ts` > "a config that sets
+  wasm warns BUILD-803 once per build, naming 3.0.0", "the wasm-pack step
+  warns BUILD-804 when it runs, and still ships the walker" and "a config
+  without wasm warns neither". Both codes join FORMA-119's catalogue
+  (`docs/DIAGNOSTICS.md`, BUILD-8xx) with BUILD-802 when that lands.
 
 ### Changed
 - **Watch mode is a development build: it resolves each package's `development` export condition (FORMA-169; L-18's A2 bridge).** `@getforma/core` points that condition at a build of every entry that keeps its development warnings (hydration mismatches, dropped props, raw-HTML sinks, the `FORMA_W_DEPRECATED_` codes), which an application built from npm never saw before: every published file of core folds them away, and the build passed esbuild no conditions. Watch mode now passes `conditions: ['development', 'module']`: `module` because esbuild adds it by itself only while no custom conditions are set, so the list is what esbuild would have used plus `development` (it still adds `browser`, `import` or `require`, and `default` itself). It also defines `process.env.NODE_ENV` as `"development"`, which esbuild already did for watch mode's unminified browser build; stating it keeps it so whatever the minify setting. A production build passes neither and its options are unchanged, so it resolves the same files and writes the same bytes: an application built from the packed core and this build is byte-identical to the same application built from core and build `main`. A core without the condition (2.0.x) resolves as before in both modes. Tests: `tests/development-condition.test.ts` > "watch mode resolves the development condition and keeps module and browser, with and without code splitting" (fails with `conditions: ['development']` alone: the module package resolves to its `default`), "a production build resolves the production files, with module and browser, as it did".

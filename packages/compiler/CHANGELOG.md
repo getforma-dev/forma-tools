@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-10-14
+
+Release A2, the bridge to 3.0.0: additive, with deprecations. Released with
+`@getforma/build` 0.3.1, whose `--strict` needs this version.
+
+### Upgrading from 0.3.6: what an application may meet
+
+- **Each `IR:` warning carries a code and a position** (`IR: BUILD-101 ...
+  in /app/src/home/app.tsx:12:11 — ...`). The text around them is 0.3.6's,
+  with a few deliberate exceptions (`docs/DIAGNOSTICS.md`, "What a diagnostic
+  looks like"): three page-level lines now name the entry, a literal past
+  65,535 bytes is reported where it is written, BUILD-701 to BUILD-707 word
+  their constructs anew, and **BUILD-303 adds a line** for a `createList`
+  over a plain read of a signal initialised with literal rows. A gate that
+  counts or matches these lines should be checked against the new text.
+- **The same modules.** A page that does not use `browserOnly()` compiles to
+  the same bytes; `npm run emit:corpus` emits the same 14 modules.
+- **Deprecation lines, once per process:** creating `formaCompiler` or
+  `formaServer`, and the first call of `transformServerFunctions`
+  (`BUILD-901`).
+- **`formaCompiler`'s output routes URL attributes through core's guard**
+  (Security): a `javascript:` URL it used to write is dropped, as runtime
+  `h()` drops it.
+
 ### Added
 - **`DIAGNOSTIC_CATALOGUE` carries the preview frame's codes, `BUILD-805` to `BUILD-807` (FORMA-175).** `@getforma/build`'s `previewFrame` reports them when the `@getforma/core` the bundles import has no `dist/formajs-frame.global.js` (`BUILD-805`), when that runtime cannot be inlined as forma-server's `PreviewFrame::load` inlines it (`BUILD-806`: empty, not UTF-8, `</script`, `<!--`, a carriage return or a NUL), and when the bundles import more than one core whose frame runtimes differ (`BUILD-807`). Each is an error that fails the build with or without strict mode; none is a note. `docs/DIAGNOSTICS.md` documents them (`tests/diagnostics-conformance.test.ts` keeps the catalogue and the page equal; no code can be written as a page, so each is tested in `packages/build/tests/preview-frame.test.ts`).
 - **`DIAGNOSTIC_CATALOGUE` carries the raw-entry lint's codes, `BUILD-810` to `BUILD-814` (FORMA-126, SR8).** `@getforma/build`'s `forma-raw-lint` reports them (a raw entry not on the allowlist, an entry past its end date, an allowlist it cannot use, an entry that lists nothing, a source it cannot parse); they are never in a build's report. `BUILD-813` is a note, as the deprecations are. The compiler's behaviour is unchanged. Tests: `tests/diagnostics-conformance.test.ts` (the catalogue and `docs/DIAGNOSTICS.md` checked against each other, as for every code) and the build package's `tests/raw-lint.test.ts` > "the compiler catalogue and docs/DIAGNOSTICS.md carry BUILD-810 to BUILD-814 as the lint reports them".
@@ -22,6 +46,15 @@
 - **Only the release's publish job can mint the publish credential (SR43, L-34, L-42, FORMA-134; the package is unchanged).** `release.yml` splits into `test`, `pack` and `publish`. Tests and builds run in jobs without `id-token: write`; `pack` restores no cache, packs the tagged package with `npm pack --ignore-scripts` and records its SHA-256; `publish`, the only job holding `id-token: write`, restores no cache and installs nothing, checks the downloaded tarball against that record (whose own hash travels as a job output) and runs `npm publish <tarball> --provenance --access public --ignore-scripts`. A `build-v*` release now also runs the compiler's suite, as CI does. The tags stay the only trigger. CI's new `release-workflow` job runs actionlint (binary checked against a pinned SHA-256), `scripts/check-release-workflow.rb --self-test` and `scripts/test-release-artifacts.sh`. The lint also refuses a publish job that could go on after a failed check (`continue-on-error`, an `if:` on a step up to the publish, `always()`, `failure()` or `cancelled()` in the job's `if`, a check line that can swallow its failure, a shell without errexit), `container:` or `services:` on the publish or pack job, and a checkout of another repository or ref; every rule has a seed in `--self-test`, which fails if one does not. The artefact test flips a byte instead of writing one that may already be there. `pack`'s setup-node sets `package-manager-cache: false`, so a move to setup-node v5 keeps its cache off.
 
 ### Deprecated
+
+Each keeps working through 0.3.x, logs its deprecation, and goes in 3.0.0:
+
+| Deprecated in 0.3.7 | Use instead (3.0.0's form) |
+|---|---|
+| the Vite plugin `formaCompiler` (compiled output) | `@getforma/build`, which keeps runtime `h()` |
+| the Vite plugin `formaServer` | a route in the application's Rust server (server functions go in 3.0.0) |
+| `transformServerFunctions`, the `"use server"` transform (`BUILD-901`) | a route in the application's Rust server |
+
 - **The Vite plugins `formaCompiler` and `formaServer` are deprecated, and are removed in 3.0.0 (L-23).** Each logs a deprecation naming 3.0.0, once per process, when it is created.
   - `formaCompiler`'s compiled output does not behave like runtime `h()`. Probes against core 2.0.1 in FORMA-007's review found that an island hydrated over server markup gets no handlers or updates, a signal getter as a child renders as source text, style objects are dropped, and more. The README now says the path is unsupported and why.
   - `formaServer` goes with server functions (DR-22).
