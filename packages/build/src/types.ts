@@ -83,20 +83,21 @@ export interface BuildConfig {
   /** Files that should keep unhashed copies (e.g. for server-inlined assets) */
   serverInlined?: string[];
   /**
-   * Fail the build on every coded SSR diagnostic (FORMA-119, DR-1): each
-   * construct the compiler cannot represent, with its code, file, line and
-   * column, all reported at once. Off by default, where they stay warnings.
-   * When unset, `--strict` on the command line of the script that calls
-   * `build()` turns it on (`npm run build -- --strict`); `false` ignores the
-   * flag. Needs `@getforma/compiler` 0.3.7 or later. In watch mode a page with
-   * an error keeps its last good module.
+   * Fail the build on every coded SSR diagnostic but a note (FORMA-119,
+   * DR-1): each construct the compiler cannot represent, with its code, file,
+   * line and column, all reported at once. Off by default, where they stay
+   * warnings. When unset, `FORMA_STRICT=1` in the environment turns it on; the
+   * build reads no command-line flag, so a build script that takes `--strict`
+   * maps it here, as it does `--ssr` and `--watch`. Needs
+   * `@getforma/compiler` 0.3.7 or later. In watch mode a page with an error
+   * keeps its last good module.
    */
   strict?: boolean;
   /**
    * Also write every SSR diagnostic as JSON to this path (relative to the
    * working directory), whether or not the build fails: the machine-readable
-   * report an agent can act on (N12). When unset,
-   * `--diagnostics-json=<path>` on the command line sets it.
+   * report an agent can act on (N12). It must be outside `outputDir`, which
+   * the build replaces whole and serves.
    */
   diagnosticsJson?: string;
 }

@@ -117,6 +117,13 @@ describe('--strict', () => {
     );
   }, 30_000);
 
+  it('reports BUILD-802 (serviceWorker without app) as a note --strict does not fail on', async () => {
+    const entries = { home: page('home', [`mount(() => h('main', null, 'clean'), '#app');`]) };
+    const result = await build(config(entries, { strict: true, serviceWorker: 'precache' }));
+    expect(result.diagnostics.map((d) => [d.code, d.severity, d.page])).toEqual([['BUILD-802', 'note', '']]);
+    expect(result.warnings.some((w) => w.startsWith('BUILD-802 '))).toBe(true);
+  }, 30_000);
+
   it('passes a clean build, and never fails on a note', async () => {
     const entries = {
       home: page('home', [
@@ -130,6 +137,46 @@ describe('--strict', () => {
 });
 
 describe('the JSON report', () => {
+  it('pins its keys: the report, and each diagnostic', async () => {
+    // A field may be added without a version change; renaming or removing one,
+    // or changing what one means, increments `version` (DIAGNOSTICS.md).
+    const entries = {
+      home: page('home', [
+        `function A() { return h('section', null, B()); }`,
+        `function B() { return h('article', null, C()); }`,
+        `function C() { return h('div', null, D()); }`,
+        `function D() { return h('span', null, 'leaf'); }`,
+        `mount(() => h('main', null, A()), '#app');`,
+      ]),
+    };
+    const report = join(tmpRoot, 'diagnostics.json');
+    await build(config(entries, { diagnosticsJson: report }));
+    const json = JSON.parse(readFileSync(report, 'utf8'));
+    expect(Object.keys(json)).toEqual(['version', 'strict', 'diagnostics']);
+    expect(json.version).toBe(1);
+    expect(json.diagnostics.map((d: BuildDiagnostic) => d.code)).toEqual(['BUILD-403']);
+    expect(Object.keys(json.diagnostics[0])).toEqual(
+      ['code', 'severity', 'page', 'file', 'line', 'column', 'message', 'why', 'fix', 'chain'],
+    );
+    expect(Object.keys(json.diagnostics[0].chain[0])).toEqual(['component', 'file', 'line', 'column']);
+    expect(json.diagnostics[0].chain.map((l: { component: string }) => l.component)).toEqual(['mount()', 'A', 'B', 'C', 'D']);
+  }, 30_000);
+
+  it('refuses a JSON report path inside outputDir, before anything is written', async () => {
+    // Inside outputDir the report would be swapped away on success, written
+    // into the previous build on failure, and served with the assets.
+    const entries = twoBrokenPages();
+    for (const path of [join(outDir, 'ssr-diagnostics.json'), join(outDir, 'reports', 'd.json'), outDir]) {
+      await expect(build(config(entries, { diagnosticsJson: path }))).rejects.toThrow(
+        /diagnosticsJson '.*' is inside outputDir '.*': the build replaces outputDir whole/,
+      );
+    }
+    expect(existsSync(outDir)).toBe(false);
+    // Beside it is fine.
+    await build(config(entries, { diagnosticsJson: join(tmpRoot, 'dist-diagnostics.json') }));
+    expect(existsSync(join(tmpRoot, 'dist-diagnostics.json'))).toBe(true);
+  }, 30_000);
+
   it('is written on request, also when --strict fails the build', async () => {
     const entries = twoBrokenPages();
     const report = join(tmpRoot, 'reports', 'ssr-diagnostics.json');
@@ -148,28 +195,43 @@ describe('the JSON report', () => {
   }, 30_000);
 });
 
-describe('the command line', () => {
-  it('reads --strict and --diagnostics-json from the command line unless the config sets them', () => {
+describe('where strict comes from', () => {
+  it('takes strict from the config, else from FORMA_STRICT, and reads no command-line flag', () => {
     const base = config({});
-    expect(resolveDiagnosticOptions(base, ['node', 'build.ts'])).toEqual({ strict: false });
-    expect(resolveDiagnosticOptions(base, ['node', 'build.ts', '--ssr', '--strict'])).toEqual({ strict: true });
-    expect(resolveDiagnosticOptions(base, ['node', 'build.ts', '--diagnostics-json=out/d.json']))
-      .toEqual({ strict: false, diagnosticsJson: 'out/d.json' });
-    expect(resolveDiagnosticOptions(base, ['node', 'build.ts', '--diagnostics-json', 'd.json', '--strict']))
-      .toEqual({ strict: true, diagnosticsJson: 'd.json' });
-    // The config wins over the flag, both ways.
-    expect(resolveDiagnosticOptions({ ...base, strict: false }, ['node', 'build.ts', '--strict'])).toEqual({ strict: false });
-    expect(resolveDiagnosticOptions({ ...base, strict: true }, ['node', 'build.ts'])).toEqual({ strict: true });
-    expect(resolveDiagnosticOptions({ ...base, diagnosticsJson: 'a.json' }, ['node', 'b', '--diagnostics-json=b.json']))
+    expect(resolveDiagnosticOptions(base, {})).toEqual({ strict: false });
+    expect(resolveDiagnosticOptions(base, { FORMA_STRICT: '1' })).toEqual({ strict: true });
+    expect(resolveDiagnosticOptions(base, { FORMA_STRICT: 'true' })).toEqual({ strict: true });
+    expect(resolveDiagnosticOptions(base, { FORMA_STRICT: '0' })).toEqual({ strict: false });
+    expect(resolveDiagnosticOptions(base, { FORMA_STRICT: '' })).toEqual({ strict: false });
+    // A switch that fails open passes the pages it was set to check: refused.
+    expect(() => resolveDiagnosticOptions(base, { FORMA_STRICT: 'yes' })).toThrow(/FORMA_STRICT is 'yes'/);
+    // The config wins over the environment, both ways.
+    expect(resolveDiagnosticOptions({ ...base, strict: false }, { FORMA_STRICT: '1' })).toEqual({ strict: false });
+    expect(resolveDiagnosticOptions({ ...base, strict: true }, {})).toEqual({ strict: true });
+    expect(resolveDiagnosticOptions({ ...base, diagnosticsJson: 'a.json' }, {}))
       .toEqual({ strict: false, diagnosticsJson: 'a.json' });
   });
 
-  it('applies --strict from process.argv to a build whose config does not set it', async () => {
+  it('applies FORMA_STRICT=1 to a build whose config does not set it', async () => {
     const entries = twoBrokenPages();
-    const argv = process.argv;
-    process.argv = [...argv, '--strict'];
+    vi.stubEnv('FORMA_STRICT', '1');
     try {
       await expect(build(config(entries))).rejects.toThrow(/--strict: 2 SSR diagnostics are errors/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  }, 30_000);
+
+  it('ignores a --strict on the command line of the process that calls build()', async () => {
+    // Another tool's flag (a wrapper, a dev server, a worker inheriting argv)
+    // must not change Forma's build (FORMA-119's review).
+    const entries = twoBrokenPages();
+    const argv = process.argv;
+    process.argv = [...argv, '--strict', '--diagnostics-json=never.json'];
+    try {
+      const result = await build(config(entries));
+      expect(result.diagnostics.map((d) => d.severity)).toEqual(['warning', 'warning']);
+      expect(existsSync('never.json')).toBe(false);
     } finally {
       process.argv = argv;
     }

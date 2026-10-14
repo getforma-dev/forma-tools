@@ -33,28 +33,32 @@ export interface CompilerDiagnostic {
 export const CATALOGUE_URL = 'https://github.com/getforma-dev/forma-tools/blob/main/docs/DIAGNOSTICS.md';
 
 /**
- * `strict` and `diagnosticsJson` from the config, else from the command line
- * of the script that calls `build()`: `--strict`, and
- * `--diagnostics-json=<path>` or `--diagnostics-json <path>`. The build has no
- * binary of its own, so its flags are read where an application's build
- * script already reads `--ssr` and `--watch`. A config value always wins.
- * Verified by: packages/build/tests/strict.test.ts > "reads --strict and --diagnostics-json from the command line unless the config sets them"
+ * `strict` from the config, else from the environment: `FORMA_STRICT=1` (or
+ * `true`) turns it on, unset or `0` (or `false`) leaves it off, and any other
+ * value is refused rather than read as off, since a strict switch that fails
+ * open passes the pages it was set to check. The build reads no command-line
+ * flag of its own, as for `ssr` and `watch`: a script that calls `build()`
+ * maps its own flags to the config (the templates map `--strict`). The
+ * variable is namespaced so it cannot be a flag meant for another tool.
+ * `diagnosticsJson` is config only.
+ * Verified by: packages/build/tests/strict.test.ts > "takes strict from the config, else from FORMA_STRICT, and reads no command-line flag"
  */
 export function resolveDiagnosticOptions(
   config: BuildConfig,
-  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
 ): { strict: boolean; diagnosticsJson?: string } {
-  let jsonFromArgv: string | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg.startsWith('--diagnostics-json=')) jsonFromArgv = arg.slice('--diagnostics-json='.length);
-    else if (arg === '--diagnostics-json' && argv[i + 1] && !argv[i + 1]!.startsWith('--')) jsonFromArgv = argv[i + 1];
+  let strict = config.strict;
+  if (strict === undefined) {
+    const value = env.FORMA_STRICT;
+    if (value === undefined || value === '' || value === '0' || value === 'false') strict = false;
+    else if (value === '1' || value === 'true') strict = true;
+    else {
+      throw new Error(
+        `@getforma/build: FORMA_STRICT is '${value}': set it to 1 to fail the build on SSR diagnostics, or unset it`,
+      );
+    }
   }
-  const diagnosticsJson = config.diagnosticsJson ?? (jsonFromArgv || undefined);
-  return {
-    strict: config.strict ?? argv.includes('--strict'),
-    ...(diagnosticsJson ? { diagnosticsJson } : {}),
-  };
+  return { strict, ...(config.diagnosticsJson ? { diagnosticsJson: config.diagnosticsJson } : {}) };
 }
 
 /**
@@ -74,7 +78,7 @@ export class DiagnosticsCollector {
     this.byPage.set(page, diagnostics.map((d) => this.toBuildDiagnostic(d, page)));
   };
 
-  /** A diagnostic the build itself reports (BUILD-801), not a page's. */
+  /** A diagnostic the build itself reports (BUILD-801, BUILD-802), not a page's. */
   addBuildLevel(diagnostic: CompilerDiagnostic): void {
     this.buildLevel.push(this.toBuildDiagnostic(diagnostic, ''));
   }
@@ -128,14 +132,37 @@ export function compilerMissing(): CompilerDiagnostic {
 }
 
 /**
+ * BUILD-802: `serviceWorker` without `app` (FORMA-130's deprecation), in the
+ * report beside the line the build prints. A note: --strict does not fail on
+ * a deprecation, which is not a construct the server cannot render.
+ */
+export function workerWithoutAppDiagnostic(message: string): CompilerDiagnostic {
+  return {
+    code: 'BUILD-802',
+    file: '',
+    line: 0,
+    column: 0,
+    message: message.replace(/^BUILD-802 /, ''),
+    why: "The worker is 0.3.0's: its caches are shared by every Forma application on the origin, and it takes over open tabs at once. From 3.0.0 a worker is written only for a named app.",
+    fix: "Set `app` to the name the server passes to forma-server's `sw::ServiceWorker::for_app`.",
+    strict: false,
+  };
+}
+
+/** The report's format version. A field may be added without a change;
+ *  renaming or removing a field, or changing what one means, increments it. */
+export const DIAGNOSTICS_JSON_VERSION = 1;
+
+/**
  * Write the JSON report: `{ version, strict, diagnostics }`, one object per
  * diagnostic with its code, severity, page, file, line, column, message, why,
- * fix and (BUILD-403) chain.
+ * fix and (BUILD-403) chain. The path is outside `outputDir` (validation
+ * refuses one inside), so the staging swap never touches it.
  */
 export function writeDiagnosticsJson(path: string, strict: boolean, diagnostics: BuildDiagnostic[]): string {
   const target = resolve(path);
   mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, JSON.stringify({ version: 1, strict, diagnostics }, null, 2) + '\n');
+  writeFileSync(target, JSON.stringify({ version: DIAGNOSTICS_JSON_VERSION, strict, diagnostics }, null, 2) + '\n');
   return target;
 }
 

@@ -152,8 +152,8 @@ const config: BuildConfig = {
     home: "src/home/app.tsx",         // the file with mount()/activateIslands()
     dashboard: "src/dashboard/app.tsx",
   },
-  strict: false,                      // Fail on every coded SSR diagnostic (or --strict); see below
-  diagnosticsJson: "ssr-diagnostics.json", // Also write them as JSON (or --diagnostics-json=<path>)
+  // strict: true,                   // Fail on every coded SSR diagnostic (or FORMA_STRICT=1); see below
+  // diagnosticsJson: "ssr-diagnostics.json", // Also write them as JSON, outside outputDir
   wasm: { crateDir: "../crates/forma-ir" },  // Build WASM walker
   watch: false,                       // Rebuild on change; writes a dev manifest and, with ssr, each page's .ir
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
@@ -233,7 +233,7 @@ when the application starts (`load_ir_modules`), so restart it on a change
 under `outputDir`, for example with `cargo watch`, until it rereads them in
 development builds.
 
-### SSR diagnostics and `--strict`
+### SSR diagnostics and strict mode
 
 Every construct the compiler cannot represent in a page's module is reported
 with a stable code, file, line and column, one line of why and one of fix
@@ -243,10 +243,9 @@ build succeeds as before. `build()` returns them as `result.diagnostics`, each
 with its `code`, `severity`, `page`, `file`, `line`, `column`, `message`, `why`
 and `fix`.
 
-- **`--strict`** (`strict: true`, or `--strict` on the command line of the
-  script that calls `build()`, such as `npm run build -- --strict`) fails the
-  build on every diagnostic but a note, after every page is compiled, with all
-  of them at once:
+- **Strict mode** (`strict: true`, or `FORMA_STRICT=1` in the environment
+  when the config leaves `strict` unset) fails the build on every diagnostic
+  but a note, after every page is compiled, with all of them at once:
 
   ```
   Error: @getforma/build --strict: 2 SSR diagnostics are errors (without --strict they are warnings):
@@ -255,14 +254,25 @@ and `fix`.
       fix: Write the subtree as h() calls, a component in a relative file, …
   ```
 
-  A failed build leaves the previous output as it was. `strict: false` ignores
-  the flag. It needs `@getforma/compiler` 0.3.7 or later; with an older one the
-  build refuses `--strict` rather than pass pages it never checked. In watch
-  mode a page with an error keeps its last good module and logs its first
-  error. 3.0.0 makes strict the only mode.
-- **JSON** (`diagnosticsJson: "<path>"`, or `--diagnostics-json=<path>`): the
-  build writes `{ version, strict, diagnostics }` to that path, also when
-  `--strict` fails it.
+  `build()` reads no command-line flag, as for `ssr` and `watch`: a build
+  script that takes `--strict` maps it to the config.
+
+  ```ts
+  await build({ /* … */ ssr: isSsr, strict: process.argv.includes("--strict") });
+  ```
+
+  `strict: false` ignores `FORMA_STRICT`; a value of it other than `1`,
+  `true`, `0`, `false` or empty is refused. A failed build leaves the previous
+  output as it was. It needs `@getforma/compiler` 0.3.7 or later; with an older
+  one the build refuses strict mode rather than pass pages it never checked. In
+  watch mode a page with an error keeps its last good module and logs its
+  first error. 3.0.0 makes strict the only mode.
+- **JSON** (`diagnosticsJson: "<path>"`): the build writes
+  `{ version, strict, diagnostics }` to that path, also when strict mode fails
+  it. The path must be outside `outputDir`, which the build replaces whole and
+  serves; one inside is refused before anything is written. A field may be
+  added to the report without a change of `version`; renaming or removing one,
+  or changing what one means, increments it.
 
 A browser-only subtree is declared with `browserOnly()` from `@getforma/core`
 (see the compiler's README); a route the server never renders, with

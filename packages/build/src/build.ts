@@ -21,7 +21,7 @@ import {
   statSync,
   existsSync,
 } from 'node:fs';
-import { join, extname, basename, dirname } from 'node:path';
+import { join, extname, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
@@ -33,6 +33,7 @@ import {
   DiagnosticsCollector,
   compilerMissing,
   resolveDiagnosticOptions,
+  workerWithoutAppDiagnostic,
   strictFailure,
   writeDiagnosticsJson,
   type CompilerDiagnostic,
@@ -416,6 +417,20 @@ function validateConfig(config: BuildConfig): void {
     }
   }
 
+  // The JSON report is a build-time record, not an asset: inside outputDir it
+  // would be swapped away with the staging directory on success, written into
+  // the previous build on failure (which must stay untouched, L-21), and
+  // served or embedded with the assets (FORMA-119).
+  // Verified by: packages/build/tests/strict.test.ts > "refuses a JSON report path inside outputDir, before anything is written"
+  if (config.diagnosticsJson !== undefined) {
+    const inside = relative(resolve(config.outputDir), resolve(config.diagnosticsJson));
+    if (inside === '' || (!inside.startsWith('..') && !isAbsolute(inside))) {
+      problems.push(
+        `diagnosticsJson '${config.diagnosticsJson}' is inside outputDir '${config.outputDir}': the build replaces outputDir whole, and its files are served; write the report outside it`,
+      );
+    }
+  }
+
   if (problems.length > 0) {
     throw new Error(
       `@getforma/build: invalid config\n  - ${problems.join('\n  - ')}`,
@@ -712,8 +727,7 @@ export async function build(userConfig: BuildConfig): Promise<BuildResult> {
   // Validate before anything is written: a config error must not touch the
   // previous build's output on its way to failing.
   validateConfig(userConfig);
-  // `--strict` and `--diagnostics-json` come from the command line unless the
-  // config sets them (FORMA-119).
+  // `strict` from the config, else FORMA_STRICT (FORMA-119).
   const config: BuildConfig = { ...userConfig, ...resolveDiagnosticOptions(userConfig) };
   const deprecation = workerWithoutApp(config);
   if (deprecation) console.warn(`Warning: ${deprecation}`);
@@ -777,6 +791,9 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
     // of them; watch mode hands it to each page's plugin.
     const strict = config.strict === true;
     const collector = new DiagnosticsCollector(strict, config.entryPoints.map((entry) => basename(entry.outfile, '.js')));
+    // BUILD-802, which build() has already printed, joins the report.
+    const deprecation = workerWithoutApp(config);
+    if (deprecation) collector.addBuildLevel(workerWithoutAppDiagnostic(deprecation));
     const pluginShared: SsrPluginShared = {
       onDiagnostics: collector.onDiagnostics,
       ...(config.watch && strict ? { strict: true } : {}),
