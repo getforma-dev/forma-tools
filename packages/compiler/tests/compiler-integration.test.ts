@@ -1,10 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   compileFormaJSX,
   formaCompiler,
   formaServer,
   transformServerFunctions,
 } from '../src/index';
+
+// These tests create the Vite plugins, which log their deprecation once
+// (pinned in vite-plugin-deprecation.test.ts). Keep that line out of this
+// file's output; every other warning still prints.
+const consoleWarn = console.warn;
+vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+  if (!String(args[0]).startsWith('[@getforma/compiler]')) consoleWarn(...args);
+});
 
 describe('compiler integration', () => {
   it('compiles h() calls into template-based output', () => {

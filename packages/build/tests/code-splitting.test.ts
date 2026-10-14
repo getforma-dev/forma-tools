@@ -1,16 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { build as bundle } from 'esbuild';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { build } from '../src/build';
+import { watching } from './helpers/watch';
 
 const temporary: string[] = [];
-afterEach(() => temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
+// A watched build's esbuild service can still be writing for a moment after
+// its process is killed, so removal retries ENOTEMPTY.
+afterEach(() => temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'forma-split-')); temporary.push(root);
   const src = join(root, 'src'); const dist = join(root, 'dist'); mkdirSync(src);
@@ -22,6 +21,9 @@ function fixture() {
   const config = { entryPoints: [{ entry: join(src, 'phone.ts'), outfile: 'phone.js' }, { entry: join(src, 'desktop.ts'), outfile: 'desktop.js' }], outputDir: dist, routes: { '/phone': { js: ['phone'], css: [] }, '/desktop': { js: ['desktop'], css: [] } }, codeSplitting: true };
   return { src, dist, config };
 }
+
+const chunks = (dist: string) => readdirSync(dist).filter(file => /^chunk\..*\.js$/.test(file));
+const listedChunks = (manifest: { assets: Record<string, string> }) => [...new Set(Object.values(manifest.assets))].filter(file => /^chunk\..*\.js$/.test(file));
 
 describe('Opt-in ESM code splitting', () => {
   it('generates opt-in on-demand workers from the real immutable output graph without install-time downloads', async () => {
@@ -79,22 +81,42 @@ describe('Opt-in ESM code splitting', () => {
     expect(readdirSync(dist).filter(file => file.endsWith('.ir'))).toHaveLength(1);
   });
   it('updates the watched graph and removes obsolete chunks instead of accumulating them', async () => {
-    const { src, dist, config } = fixture(); const runner = join(src, 'watch-runner.mjs');
-    const require = createRequire(import.meta.url);
-    await bundle({ entryPoints: [fileURLToPath(new URL('../src/build.ts', import.meta.url))], outfile: runner, bundle: true, platform: 'node', format: 'esm', plugins: [{ name: 'external-build-tools', setup(builder) { builder.onResolve({ filter: /^(esbuild|@getforma\/compiler)$/ }, args => ({ path: args.path === 'esbuild' ? pathToFileURL(require.resolve(args.path)).href : args.path, external: true })); } }] });
-    const child = spawn(process.execPath, ['--input-type=module', '-e', `import {build} from ${JSON.stringify(pathToFileURL(runner).href)}; await build(${JSON.stringify({ ...config, watch: true })});`], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let diagnostics = ''; child.stderr.on('data', chunk => { diagnostics += chunk; }); child.stdout.resume();
-    const manifest = () => JSON.parse(readFileSync(join(dist, 'manifest.json'), 'utf8'));
-    try {
-      await vi.waitFor(() => { expect(child.exitCode, diagnostics).toBeNull(); expect(manifest().build_hash).toBe('dev'); }, { timeout: 5000 });
-      const before = manifest(); const oldChunks = readdirSync(dist).filter(file => /^chunk\..*\.js$/.test(file));
-      expect(before.routes['/phone'].js).toEqual(['phone.js']); expect(before.routes['/phone'].modulepreload).toHaveLength(1);
+    const { src, dist, config } = fixture();
+    await watching(config, async ({ manifest }) => {
+      // Each read waits for the state it asserts: the watcher rewrites the
+      // manifest after esbuild has written the chunks, so a chunk on disk does
+      // not yet mean a manifest that lists it.
+      const before = await vi.waitFor(() => { const current = manifest(); expect(current.routes['/phone'].modulepreload).toHaveLength(1); return current; }, { timeout: 5000 });
+      const oldChunks = chunks(dist);
+      expect(before.routes['/phone'].js).toEqual(['phone.js']);
       writeFileSync(join(src, 'later.ts'), 'import { singleton } from "./shared"; export const later = singleton; export const label = "WATCHED_CHANGE";');
-      await vi.waitFor(() => expect(readdirSync(dist).filter(file => /^chunk\..*\.js$/.test(file)).some(file => !oldChunks.includes(file))).toBe(true), { timeout: 5000 });
-      const current = manifest();
-      await vi.waitFor(() => expect(readdirSync(dist).filter(file => /^chunk\..*\.js$/.test(file))).toHaveLength(oldChunks.length), { timeout: 5000 });
-      expect(current.routes['/phone'].js).toEqual(['phone.js']);
+      const after = await vi.waitFor(() => { const current = manifest(); expect(listedChunks(current).some(file => !oldChunks.includes(file))).toBe(true); return current; }, { timeout: 5000 });
+      expect(after.routes['/phone'].js).toEqual(['phone.js']);
+      // The obsolete chunk is removed before the manifest that drops it is
+      // written, so the disk and the manifest now agree.
+      expect(chunks(dist).sort()).toEqual(listedChunks(after).sort());
+      expect(chunks(dist)).toHaveLength(oldChunks.length);
       expect(readFileSync(join(dist, 'sw.js'), 'utf8')).toContain('network-only');
-    } finally { if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; } }
+    });
+  }, 15_000);
+  it('replaces the watched manifest by rename, so a reader never sees half of it', async () => {
+    // The previous version of the test above failed intermittently reading
+    // manifest.json while a rebuild rewrote it in place (truncate, then
+    // write): a reader between the two saw an empty or partial file. A file
+    // replaced by rename is a new file, so its inode changes; one rewritten in
+    // place keeps it.
+    const { src, dist, config } = fixture();
+    await watching(config, async ({ manifest }) => {
+      await vi.waitFor(() => expect(manifest().build_hash).toBe('dev'), { timeout: 5000 });
+      const oldChunks = chunks(dist);
+      const inode = () => statSync(join(dist, 'manifest.json'), { bigint: true }).ino;
+      const first = inode();
+      writeFileSync(join(src, 'later.ts'), 'import { singleton } from "./shared"; export const later = singleton; export const label = "RENAMED_MANIFEST";');
+      await vi.waitFor(() => expect(listedChunks(manifest()).some(file => !oldChunks.includes(file))).toBe(true), { timeout: 5000 });
+      expect(inode()).not.toBe(first);
+      // No temporary file is left behind; one may be in flight while a
+      // further rebuild rewrites the manifest, so this waits rather than reads.
+      await vi.waitFor(() => expect(readdirSync(dist).filter(file => file.endsWith('.tmp'))).toEqual([]), { timeout: 5000 });
+    });
   }, 15_000);
 });

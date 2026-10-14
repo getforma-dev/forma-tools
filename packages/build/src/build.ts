@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import {
   cpSync,
   mkdirSync,
+  mkdtempSync,
   rmSync,
   readdirSync,
   readFileSync,
@@ -21,11 +22,13 @@ import {
   existsSync,
 } from 'node:fs';
 import { join, extname, basename, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { serviceWorkerSource } from './service-worker.js';
 import { splitGraph, type SplitGraph } from './split-graph.js';
+import { createStagingDirectory, replaceDirectory, writeFileAtomic } from './output.js';
 
 import type {
   BuildConfig,
@@ -512,8 +515,109 @@ function generateServiceWorker(
     .sort().map(file => `/_assets/${file}`) : undefined;
   const swContent = serviceWorkerSource(swCacheName, precacheUrls, config.watch === true, immutableUrls);
 
-  writeFileSync(join(distDir, 'sw.js'), swContent);
+  writeFileAtomic(join(distDir, 'sw.js'), swContent);
   console.log(`   SW generated: dist/sw.js (${config.watch ? 'network-only development' : `cache: ${swCacheName}`})`);
+}
+
+// ---------------------------------------------------------------------------
+// Watch Mode: Server-Rendered Pages
+// ---------------------------------------------------------------------------
+
+/** `formaSsrPlugin` from `@getforma/compiler`, loaded only for SSR builds. */
+type SsrPluginFactory = (opts: { page: string; outDir: string; entryPoint?: string }) => esbuild.Plugin;
+
+/**
+ * Keep each server-rendered page's FMIR module current in watch mode (N7,
+ * L-31). v1 found watch mode rebuilt the bundles but wrote no module, so a
+ * page the server renders never changed on an incremental rebuild.
+ *
+ * Each page gets its own esbuild watcher over its SSR entry (`ssrEntryPoints`,
+ * else the browser entry) that writes nothing: it exists to know the page's
+ * module graph and to rebuild when a file in it changes, so an edit re-runs
+ * the compiler for exactly the pages it touches, including an SSR entry the
+ * browser bundle never imports. Packages are left external, as the compiler
+ * follows relative imports only. The compiler writes the module into a
+ * private directory; it is published into the output by rename, and only when
+ * its bytes changed, then `onPublished` updates the manifest. The time from
+ * the rebuild's start to the published module is logged per page, for the
+ * per-build report (DR-34, FORMA-118).
+ *
+ * Resolves once every page's first module is published, or has failed:
+ * - An esbuild error (a syntax error, an import that does not resolve) keeps
+ *   the page's last good module and logs the first error.
+ * - A compiler emission failure writes the compiler's placeholder module, as
+ *   a production build does; the compiler logs why.
+ * - A module that cannot be published is logged, naming the page.
+ *
+ * Verified by: packages/build/tests/watch-ir.test.ts > "logs a page's module it could not publish, naming the page, and recovers"
+ * Verified by: packages/build/tests/watch-ir.test.ts > "rewrites a page's .ir when a component it renders changes, and no other page's"
+ * Verified by: packages/build/tests/watch-ir.test.ts > "rewrites a page's .ir when only its SSR entry changes, in a code-splitting build"
+ */
+async function watchServerRenderedPages(
+  config: BuildConfig,
+  shared: esbuild.BuildOptions,
+  ssrPlugin: SsrPluginFactory,
+  onPublished: (page: string) => void,
+): Promise<void> {
+  const scratch = mkdtempSync(join(tmpdir(), 'forma-ir-'));
+  process.once('exit', () => rmSync(scratch, { recursive: true, force: true }));
+
+  const firstBuilds: Promise<void>[] = [];
+  for (const entry of config.entryPoints) {
+    if (entry.ssr === false) continue;
+    const page = basename(entry.outfile, '.js');
+    const source = config.ssrEntryPoints?.[page] ?? entry.entry;
+    const emitted = join(scratch, `${page}.ir`);
+    const target = join(config.outputDir, `${page}.ir`);
+    let started = 0;
+    let firstBuilt!: () => void;
+    firstBuilds.push(new Promise<void>((resolve) => { firstBuilt = resolve; }));
+
+    const ctx = await esbuild.context({
+      ...shared,
+      entryPoints: [source],
+      outdir: scratch,
+      write: false,
+      packages: 'external',
+      sourcemap: false,
+      logLevel: 'silent',
+      plugins: [
+        { name: 'forma-ir-clock', setup(builder) { builder.onStart(() => { started = performance.now(); }); } },
+        ssrPlugin({ page, outDir: scratch, entryPoint: source }),
+        {
+          name: 'forma-ir-publish',
+          setup(builder) {
+            builder.onEnd((result) => {
+              try {
+                if (result.errors.length) {
+                  console.warn(`   IR not rewritten for ${page}: ${result.errors[0]!.text} (the last good ${page}.ir stays)`);
+                  return;
+                }
+                if (!existsSync(emitted)) return;
+                const bytes = readFileSync(emitted);
+                rmSync(emitted, { force: true });
+                if (!existsSync(target) || !readFileSync(target).equals(bytes)) {
+                  writeFileAtomic(target, bytes);
+                  console.log(`   IR rewritten: ${page}.ir in ${Math.round(performance.now() - started)} ms`);
+                }
+                onPublished(page);
+              } catch (error) {
+                // This watcher's esbuild logging is off, so an exception left
+                // to esbuild would never be printed: say it here.
+                console.error(`   IR not written for ${page}: ${(error as Error).message}`);
+              } finally {
+                firstBuilt();
+              }
+            });
+          },
+        },
+      ],
+    });
+    // watch() runs the first build itself; waiting for its end (rather than
+    // calling rebuild() first) emits each page once at startup, not twice.
+    await ctx.watch();
+  }
+  await Promise.all(firstBuilds);
 }
 
 // ---------------------------------------------------------------------------
@@ -527,16 +631,44 @@ function generateServiceWorker(
  * (with optional SSR IR emission), island registry generation, WASM build,
  * content hashing, compression, manifest generation, service worker
  * generation, and budget warnings.
+ *
+ * A production build writes into a staging directory beside `outputDir` and
+ * swaps it in only when every step has succeeded, so a build that fails part
+ * way leaves the previous output exactly as it was, and nothing beside it
+ * (L-21). The application embeds `outputDir` in its binary, and used to embed
+ * half a build after a failure. Watch mode writes in place, as before.
+ * Verified by: packages/build/tests/build.test.ts > "leaves the previous build byte-identical when a build fails after writing files"
+ * Verified by: packages/build/tests/build.test.ts > "a failed first build leaves no output directory and nothing beside it"
  */
 export async function build(config: BuildConfig): Promise<BuildResult> {
-  // Validate before the clean: a config error must not destroy the previous
-  // build's output on its way to failing.
+  // Validate before anything is written: a config error must not touch the
+  // previous build's output on its way to failing.
   validateConfig(config);
+  if (config.watch) return buildInto(config, config.outputDir);
 
+  const staging = createStagingDirectory(config.outputDir);
+  let result: BuildResult;
+  try {
+    result = await buildInto({ ...config, outputDir: staging }, config.outputDir);
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw err;
+  }
+  // Throws with the previous output restored if the swap itself fails.
+  replaceDirectory(staging, config.outputDir);
+  return result;
+}
+
+/**
+ * The pipeline, writing into `config.outputDir`: the staging directory for a
+ * production build, the output itself in watch mode. `shownDir` is the
+ * directory named in log lines, the one the application reads.
+ */
+async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildResult> {
   const distDir = config.outputDir;
   const createdDir = !existsSync(distDir);
 
-  // ── Clean output directory ────────────────────────────────────────
+  // ── Clean output directory (watch mode; a staging directory is new) ──
   rmSync(distDir, { recursive: true, force: true });
   mkdirSync(distDir, { recursive: true });
 
@@ -564,13 +696,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
     };
 
     // ── Lazy-load SSR plugin only when needed ─────────────────────────
-    let formaSsrPlugin:
-      | ((opts: {
-          page: string;
-          outDir: string;
-          entryPoint?: string;
-        }) => esbuild.Plugin)
-      | undefined;
+    let formaSsrPlugin: SsrPluginFactory | undefined;
 
     if (config.ssr) {
       console.log('SSR mode enabled — emitting IR files');
@@ -603,28 +729,49 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
 
     // ── Build entries ─────────────────────────────────────────────────
     if (config.watch) {
-      // Watch mode
+      // Watch mode. The dev manifest maps each name to itself: the split
+      // graph's files (with code splitting) and each server-rendered page's
+      // `.ir`. Whoever changes either rewrites it.
+      const irAssets: Record<string, string> = {};
+      let lastManifest = '';
+      const writeDevManifest = () => {
+        const { manifest, warnings } = generateManifest(config, { ...graph?.assets, ...irAssets }, false, graph?.staticDependencies);
+        manifest.build_hash = 'dev';
+        const text = JSON.stringify(manifest, null, 2) + '\n';
+        // Replaced by rename: the application's server reads this file while
+        // the watcher rewrites it. Unchanged content is not rewritten, so a
+        // server restarted on a change to the output is not restarted for
+        // nothing.
+        if (text !== lastManifest) writeFileAtomic(join(distDir, 'manifest.json'), text);
+        lastManifest = text;
+        return { manifest, warnings };
+      };
+
+      // Server-rendered pages: each page's module is watched over its SSR
+      // entry's own module graph, apart from the browser bundles (L-31).
+      if (formaSsrPlugin) {
+        await watchServerRenderedPages(config, shared, formaSsrPlugin, (page) => {
+          irAssets[`${page}.ir`] = `${page}.ir`;
+          writeDevManifest();
+        });
+      }
+
       if (config.codeSplitting && config.entryPoints.length) {
         let previousFiles = new Set<string>();
         const ctx = await esbuild.context({
           ...splitOptions,
-          plugins: [...(splitOptions.plugins ?? []), {
+          // Not the SSR plugins: the pages' modules are watched above.
+          plugins: [{
             name: 'forma-split-manifest',
             setup(builder) {
               builder.onEnd(result => {
                 if (result.errors.length || !result.metafile) return;
                 graph = splitGraph(result.metafile, config.entryPoints, distDir);
-                if (config.ssr) for (const entry of config.entryPoints) {
-                  const ir = `${basename(entry.outfile, '.js')}.ir`;
-                  if (entry.ssr !== false && existsSync(join(distDir, ir))) graph.assets[ir] = ir;
-                }
                 // Only remove outputs belonging to the previous successful
                 // graph. CSS/fonts/IR and failed-build diagnostics stay intact.
                 for (const file of previousFiles) if (!graph.files.has(file)) rmSync(join(distDir, file), { force: true });
                 previousFiles = graph.files;
-                const { manifest } = generateManifest(config, graph.assets, false, graph.staticDependencies);
-                manifest.build_hash = 'dev';
-                writeFileSync(join(distDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+                writeDevManifest();
               });
             },
           }],
@@ -641,16 +788,10 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
         await ctx.watch();
       }
 
-      // Generate a dev manifest with identity mappings (unhashed filenames)
-      // so the server can boot without a production build
-      const { manifest, warnings } = generateManifest(config, graph?.assets ?? {}, false, graph?.staticDependencies);
-      manifest.build_hash = 'dev';
-
-      writeFileSync(
-        join(distDir, 'manifest.json'),
-        JSON.stringify(manifest, null, 2) + '\n',
-      );
-      console.log(`\nDev manifest written: ${distDir}/manifest.json`);
+      // The dev manifest, with identity mappings (unhashed filenames), so the
+      // server can boot without a production build.
+      const { manifest, warnings } = writeDevManifest();
+      console.log(`\nDev manifest written: ${shownDir}/manifest.json`);
 
       // Generate a dev service worker so /sw.js doesn't 404
       generateServiceWorker(config, {}, 'dev', false);
@@ -714,7 +855,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
       JSON.stringify(manifest, null, 2) + '\n',
     );
     console.log(
-      `\nManifest written: ${distDir}/manifest.json (build_hash: ${manifest.build_hash.slice(0, 12)}...)`,
+      `\nManifest written: ${shownDir}/manifest.json (build_hash: ${manifest.build_hash.slice(0, 12)}...)`,
     );
 
     // ── Service worker generation ─────────────────────────────────────
@@ -726,7 +867,8 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
       warnings,
     };
   } catch (err) {
-    // Clean up output directory if we created it, to prevent stale partial output
+    // Watch mode: remove the output directory if this build created it. A
+    // production build's caller removes the staging directory.
     if (createdDir && existsSync(distDir)) {
       rmSync(distDir, { recursive: true, force: true });
     }

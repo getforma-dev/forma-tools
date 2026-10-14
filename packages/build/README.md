@@ -86,6 +86,7 @@ Any other `serviceWorker` value is a config error.
 | **SSR** | (Optional) Emits one `<page>.ir` FMIR binary per entry for Rust server-side rendering |
 | **WASM** | (Optional) Runs `wasm-pack build` for the Rust IR walker |
 | **Budget** | Warns if route brotli size exceeds threshold (default 200KB) |
+| **Swap in** | A production build writes all of the above into a staging directory beside `outputDir` (`.<name>.forma-staging-…`) and swaps it in only when every step has succeeded: a build that fails part way leaves `outputDir` exactly as the last good build left it, so the application never embeds half a build. Watch mode writes in place and replaces `manifest.json` and `sw.js` by rename, so a server reading them mid-rebuild never sees half a file |
 
 ## Configuration
 
@@ -118,7 +119,7 @@ const config: BuildConfig = {
     dashboard: "src/dashboard/app.tsx",
   },
   wasm: { crateDir: "../crates/forma-ir" },  // Build WASM walker
-  watch: false,                       // Rebuild on change; writes a dev manifest
+  watch: false,                       // Rebuild on change; writes a dev manifest and, with ssr, each page's .ir
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
   formaAlias: "@getforma/core",       // What bare 'formajs' imports resolve to
   serverInlined: ["app.js"],          // Also keep the unhashed name on disk
@@ -175,6 +176,26 @@ The manifest maps source filenames to content-hashed filenames:
 ```
 
 The Rust server (`forma-server`) reads this manifest to serve assets with correct cache headers and resolve hashed filenames.
+
+### Watch mode and server-rendered pages
+
+With `ssr: true`, watch mode keeps each page's FMIR module current, so a page
+the server renders changes on an incremental rebuild (N7). Each page is watched
+over its own SSR entry's module graph (`ssrEntryPoints`, else its browser
+entry), apart from the browser bundles: an edit re-runs the compiler for the
+pages it touches and no others, including an SSR entry the browser bundle never
+imports. A module is written as `<page>.ir`, replaced by rename and only when
+its bytes change, and the dev manifest names it in the route's `ir`. A page
+with an esbuild error (a syntax error, an import that does not resolve) keeps
+its last good module and logs the error; when the compiler cannot emit a page's
+module, it writes its placeholder, as a production build does. A module that
+cannot be written is logged with its page. Each rewrite logs its time, for
+example `IR rewritten: home.ir in 36 ms`.
+
+The server must read the new module. `forma-server` loads the `.ir` modules
+when the application starts (`load_ir_modules`), so restart it on a change
+under `outputDir`, for example with `cargo watch`, until it rereads them in
+development builds.
 
 ### Development service worker
 
