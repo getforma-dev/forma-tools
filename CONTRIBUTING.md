@@ -28,7 +28,7 @@ npm test
 |---|---|
 | `npm test` | The unit suites in both packages |
 | `npm run emit:corpus` | Re-emits the FMIR corpus with the current compiler |
-| `npm run test:e2e` | Playwright, against a FormaJS build from the sibling repo — see [`e2e/README.md`](e2e/README.md) |
+| `npm run test:e2e` | Playwright, against a FormaJS build from the sibling repo, plus the SSR lane (this compiler, the sibling `forma`'s walker, FormaJS; needs cargo) — see [`e2e/README.md`](e2e/README.md) |
 | `npm run build --workspaces` | Both packages build |
 
 CI adds two jobs that are easy to forget locally:

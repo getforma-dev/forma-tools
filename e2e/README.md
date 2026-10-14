@@ -11,6 +11,52 @@ Browser-level verification of the entire Forma pipeline. Tests run in a real Chr
 | **Compiled template path** | 3 | template() + cloneNode() (compiler output) creates working DOM with reactive effects |
 | **Cross-cutting** | 2 | No console errors on page load, all three approaches coexist |
 
+## The SSR lane: compiler, forma walker, FormaJS (`e2e/ssr/`)
+
+`e2e/full-stack.spec.ts` exercises FormaJS alone. `e2e/ssr/regressions.spec.ts`
+exercises the whole Phase 2 chain, one page per case in `e2e/ssr/cases/`:
+
+1. `e2e/ssr/build-cases.mjs` builds each case with `@getforma/build` (`ssr: true`)
+   from this working tree, and fails unless the served `.ir` is byte-identical to
+   what `generateRealIr` emits (no silent placeholder) and the islands are the
+   ones the case declares.
+2. `e2e/ssr/render/` (Rust) renders each page with forma's real walker and page
+   template, `forma_server::render_page`, from a forma checkout: `index.html`
+   (Phase 2, slots from the case's `slots.json`) and `csr.html` (the same build,
+   client-rendered), each with the response headers `render_page` produced.
+3. `e2e/ssr/serve.mjs` serves them on port 3458 with those headers (the page's
+   own CSP nonce), and Playwright reads the parsed DOM, live control values and
+   `FormData` before JavaScript, after activation and after interaction.
+
+The cases are the Forma Stack audit's verified failures (FORMA-001). Each one
+that fails today is written as the behaviour v2 requires: the test asserts its
+case's preconditions normally, then calls `test.fail()`, with a comment naming
+the ticket whose fix flips it, just before the defect assertion. A broken
+precondition is therefore a real failure; only the named defect is expected.
+When the fix lands, Playwright reports an unexpected pass and the job goes red
+until that line is removed. `ledger-arrival` is the positive fixture: Ledger's
+pattern of seeding an island's signals from its props before the component runs.
+
+| Case | What it pins | Today |
+|------|--------------|-------|
+| `generic-state` | server value 7 survives activation of a `mount()` root | expected-fail, FORMA-103 / FORMA-104 |
+| `root-fragment` | a root JSX Fragment's button works after Phase 2 activation | expected-fail, FORMA-003 |
+| `textarea-child`, `title` | no marker text before JavaScript | expected-fail, FORMA-002 |
+| `textarea-value` | value before JavaScript (FORMA-002); live value after activation and client-rendered (FORMA-003) | expected-fail |
+| `select` | `b` selected and submitted before JavaScript (FORMA-002), after activation and client-rendered (FORMA-003) | expected-fail |
+| `edited-controls` | text, checkbox and option edited before activation survive it | passes (fails with formajs `042e353`) |
+| `ledger-arrival` | seeded values survive activation; Retry runs | passes |
+
+The table "every case is server-rendered and activates" adds the shared
+controls for every case: the walker's HTML, activation, the Phase 1 mount, and
+no console error.
+
+The SSR server listens on port 3458, or on `FORMA_SSR_E2E_PORT` when set.
+Playwright reuses a server already on that port, which may be another clone's,
+so the spec first asks `/__site` which site it serves and refuses to run
+unless it is this clone's `e2e/ssr/out/site`, built. The FormaJS-only spec,
+`e2e/full-stack.spec.ts`, runs without the SSR site.
+
 ## How to Run
 
 ### Locally (auto-syncs FormaJS build)
@@ -23,18 +69,21 @@ This automatically:
 1. Builds FormaJS from the sibling `../formajs/` directory
 2. Copies `formajs-runtime.global.js` and bundles the shipped `forma.esm.js` as
    the `formajs.global.js` IIFE fixture
-3. Starts a local static server on port 3457
-4. Runs 15 Playwright tests in headless Chromium
+3. Builds the SSR site (`e2e/ssr/build.sh`: this repo's packages, the cases, and
+   the Rust renderer against the sibling `../forma/`; needs cargo)
+4. Starts the static server on port 3457 and the SSR server on port 3458
+5. Runs the Playwright tests in headless Chromium
 
-### Custom FormaJS path
+### Custom FormaJS or forma path, or another SSR port
 
 ```bash
-FORMAJS_DIR=/path/to/formajs npm run test:e2e
+FORMAJS_DIR=/path/to/formajs FORMA_DIR=/path/to/forma npm run test:e2e
+FORMA_SSR_E2E_PORT=3468 npm run test:e2e    # e.g. a second clone on the same machine
 ```
 
 ### In CI
 
-The GitHub Actions CI workflow runs E2E automatically on every push to main — clones formajs from GitHub, builds it, copies fixtures, runs Playwright. On failure, the report is uploaded as an artifact.
+The GitHub Actions CI workflow runs E2E automatically on every push to main and every pull request — clones formajs and forma from GitHub at their default branches, builds FormaJS, copies fixtures, builds the SSR site, runs Playwright. On failure, the report is uploaded as an artifact.
 
 ## When to Run
 
@@ -55,6 +104,14 @@ e2e/
 │   └── compiled-counter.js          ← Compiler output example (reference)
 ├── full-stack.spec.ts               ← 15 Playwright tests
 ├── sync-fixtures.sh                 ← Builds FormaJS and copies dist files
+├── ssr/
+│   ├── cases/<case>/app.tsx         ← One page per case (+ slots.json)
+│   ├── build.sh                     ← Builds the SSR site (FORMAJS_DIR, FORMA_DIR)
+│   ├── build-cases.mjs              ← @getforma/build per case, real-IR check
+│   ├── render/                      ← Rust: forma_server::render_page per case
+│   ├── serve.mjs                    ← Serves out/site with each page's headers
+│   ├── origin.ts                    ← The SSR port (FORMA_SSR_E2E_PORT, default 3458)
+│   └── regressions.spec.ts          ← The SSR regression fixtures
 └── README.md                        ← This file
 ```
 
@@ -71,3 +128,7 @@ e2e/
 | "FormaJS directory not found" | `FORMAJS_DIR=~/path/to/formajs npm run test:e2e` |
 | "Cannot find module serve" | `npm install` |
 | "Browser not found" | `npx playwright install chromium` |
+| "FORMA_DIR not found" | `FORMA_DIR=~/path/to/forma npm run test:e2e` (a getforma-dev/forma checkout) |
+| "the SSR site is not built" | `bash e2e/ssr/build.sh` (or `npm run test:e2e`, which runs it) |
+| "serves another clone's site" | stop that clone's server, or `FORMA_SSR_E2E_PORT=<free port>` |
+| "the lock file needs to be updated" (cargo) | forma's crates changed dependencies: `cargo build --manifest-path e2e/ssr/render/Cargo.toml` once, commit `e2e/ssr/render/Cargo.lock` |

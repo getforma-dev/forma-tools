@@ -1,0 +1,6 @@
+{
+  "arrivalTitle": "Fixture Household",
+  "arrivalCash": "$123.45",
+  "arrivalStatus": "pending",
+  "show:arrivalSummary": true
+}
