@@ -118,7 +118,7 @@ is written only for a named `app`. The development worker ignores `app`.
 | **Compress** | Brotli (level 11) + gzip (level 9) for `.js` and `.css` |
 | **Manifest** | Writes `manifest.json` mapping source filenames → hashed filenames |
 | **SSR** | (Optional) Emits one `<page>.ir` FMIR binary per entry for Rust server-side rendering |
-| **WASM** | (Optional) Runs `wasm-pack build` for the Rust IR walker |
+| **WASM** | (Optional, deprecated: removed in 3.0.0) Runs `wasm-pack build` for the Rust IR walker. A config that sets `wasm` warns `BUILD-803` once per build, and the step warns `BUILD-804` when it runs |
 | **Budget** | Warns if route brotli size exceeds threshold (default 200KB) |
 | **Swap in** | A production build writes all of the above into a staging directory beside `outputDir` (`.<name>.forma-staging-…`) and swaps it in only when every step has succeeded: a build that fails part way leaves `outputDir` exactly as the last good build left it, so the application never embeds half a build. Watch mode writes in place and replaces `manifest.json` and `sw.js` by rename, so a server reading them mid-rebuild never sees half a file |
 
@@ -152,7 +152,7 @@ const config: BuildConfig = {
     home: "src/home/app.tsx",         // the file with mount()/activateIslands()
     dashboard: "src/dashboard/app.tsx",
   },
-  wasm: { crateDir: "../crates/forma-ir" },  // Build WASM walker
+  wasm: { crateDir: "../crates/forma-ir" },  // Deprecated (removed in 3.0.0): build the WASM walker
   watch: false,                       // Rebuild on change; writes a dev manifest and, with ssr, each page's .ir
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
   formaAlias: "@getforma/core",       // What bare 'formajs' imports resolve to
@@ -173,7 +173,7 @@ dist/
 ├── home.e5f6g7h8.css.br
 ├── dashboard.i9j0k1l2.js
 ├── home.m3n4o5p6.ir          # FMIR binary (if ssr: true)
-├── forma_ir.q7r8s9t0.js      # WASM loader (if wasm configured)
+├── forma_ir.q7r8s9t0.js      # WASM loader (if the deprecated wasm key is set)
 ├── forma_ir_bg.u1v2w3x4.wasm # WASM binary
 ├── inter.woff2                # Copied fonts (never hashed)
 ├── sw.js                      # Service worker (generated last, never hashed)
