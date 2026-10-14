@@ -186,8 +186,11 @@ entry), apart from the browser bundles: an edit re-runs the compiler for the
 pages it touches and no others, including an SSR entry the browser bundle never
 imports. A module is written as `<page>.ir`, replaced by rename and only when
 its bytes change, and the dev manifest names it in the route's `ir`. A page
-that stops compiling keeps its last good module and logs why. Each rewrite logs
-its time, for example `IR rewritten: home.ir in 36 ms`.
+with an esbuild error (a syntax error, an import that does not resolve) keeps
+its last good module and logs the error; when the compiler cannot emit a page's
+module, it writes its placeholder, as a production build does. A module that
+cannot be written is logged with its page. Each rewrite logs its time, for
+example `IR rewritten: home.ir in 36 ms`.
 
 The server must read the new module. `forma-server` loads the `.ir` modules
 when the application starts (`load_ir_modules`), so restart it on a change

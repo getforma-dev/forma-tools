@@ -542,9 +542,14 @@ type SsrPluginFactory = (opts: { page: string; outDir: string; entryPoint?: stri
  * the rebuild's start to the published module is logged per page, for the
  * per-build report (DR-34, FORMA-118).
  *
- * Resolves once every page's first module is published (or has failed: a page
- * that does not compile keeps its last good module, and logs why).
+ * Resolves once every page's first module is published, or has failed:
+ * - An esbuild error (a syntax error, an import that does not resolve) keeps
+ *   the page's last good module and logs the first error.
+ * - A compiler emission failure writes the compiler's placeholder module, as
+ *   a production build does; the compiler logs why.
+ * - A module that cannot be published is logged, naming the page.
  *
+ * Verified by: packages/build/tests/watch-ir.test.ts > "logs a page's module it could not publish, naming the page, and recovers"
  * Verified by: packages/build/tests/watch-ir.test.ts > "rewrites a page's .ir when a component it renders changes, and no other page's"
  * Verified by: packages/build/tests/watch-ir.test.ts > "rewrites a page's .ir when only its SSR entry changes, in a code-splitting build"
  */
@@ -596,6 +601,10 @@ async function watchServerRenderedPages(
                   console.log(`   IR rewritten: ${page}.ir in ${Math.round(performance.now() - started)} ms`);
                 }
                 onPublished(page);
+              } catch (error) {
+                // This watcher's esbuild logging is off, so an exception left
+                // to esbuild would never be printed: say it here.
+                console.error(`   IR not written for ${page}: ${(error as Error).message}`);
               } finally {
                 firstBuilt();
               }

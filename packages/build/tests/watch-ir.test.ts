@@ -66,8 +66,12 @@ describe('watch mode rewrites the FMIR modules of the pages a change touches (N7
         expect(current.routes['/about'].ir).toBe('about.ir');
       }, { timeout: 10_000 });
       expect(ir(dist, 'home')).toContain('Hello from the first build');
-      expect(emissions(output(), 'home')).toBe(1);
-      expect(emissions(output(), 'about')).toBe(1);
+      // The child's log reaches this process after the files it wrote do, so
+      // the counts are waited for, not read once.
+      await vi.waitFor(() => {
+        expect(emissions(output(), 'home')).toBe(1);
+        expect(emissions(output(), 'about')).toBe(1);
+      }, { timeout: 10_000 });
       const home = inode(dist, 'home.ir');
       const about = inode(dist, 'about.ir');
 
@@ -77,13 +81,39 @@ describe('watch mode rewrites the FMIR modules of the pages a change touches (N7
       expect(ir(dist, 'home')).not.toContain('Hello from the first build');
       // Replaced by rename, so the server never reads half a module.
       expect(inode(dist, 'home.ir')).not.toBe(home);
+      await vi.waitFor(() => {
+        expect(emissions(output(), 'home')).toBe(2);
+        expect(output()).toMatch(/IR rewritten: home\.ir in \d+ ms/);
+      }, { timeout: 10_000 });
       // `about` does not render Greeting: its module is neither re-emitted
       // nor rewritten.
       expect(emissions(output(), 'about')).toBe(1);
       expect(inode(dist, 'about.ir')).toBe(about);
       expect(manifest().routes['/'].ir).toBe('home.ir');
-      expect(output()).toMatch(/IR rewritten: home\.ir in \d+ ms/);
-      expect(readdirSync(dist).filter(file => file.endsWith('.tmp'))).toEqual([]);
+      // No temporary file is left behind. One may be in flight: the browser
+      // rebuild changes the route's size, so the manifest is rewritten too.
+      await vi.waitFor(() => expect(readdirSync(dist).filter(file => file.endsWith('.tmp'))).toEqual([]), { timeout: 5000 });
+    });
+  }, 30_000);
+
+  it("logs a page's module it could not publish, naming the page, and recovers", async () => {
+    // The page watchers run with esbuild's logging off, so an exception while
+    // publishing (a module Windows will not let go of, a full disk) became an
+    // esbuild result error nobody printed: a stale page with no message.
+    const { src, dist, config } = site();
+    await watching(config, async ({ manifest, output }) => {
+      await vi.waitFor(() => expect(manifest().routes['/'].ir).toBe('home.ir'), { timeout: 10_000 });
+      // A directory where the module goes: publishing cannot read or replace it.
+      rmSync(join(dist, 'home.ir'));
+      mkdirSync(join(dist, 'home.ir'));
+      writeFileSync(join(src, 'Greeting.ts'), greeting('Hello while home.ir is blocked'));
+      // The page is named; the cause is the filesystem's (EISDIR here).
+      await vi.waitFor(() => expect(output()).toMatch(/IR not written for home: \S/), { timeout: 10_000 });
+
+      // The watcher survives: once the path is free, the next edit publishes.
+      rmSync(join(dist, 'home.ir'), { recursive: true });
+      writeFileSync(join(src, 'Greeting.ts'), greeting('Hello once home.ir is free'));
+      await vi.waitFor(() => expect(ir(dist, 'home')).toContain('Hello once home.ir is free'), { timeout: 10_000 });
     });
   }, 30_000);
 
