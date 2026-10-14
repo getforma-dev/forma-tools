@@ -15,7 +15,8 @@
  * so "reports exactly its markers" holds for both halves.
  *
  * Some codes cannot be written as a page: BUILD-606 (the compiler failing, or
- * its module not being written), BUILD-801 to BUILD-804 (the build's own),
+ * its module not being written), BUILD-801 to BUILD-806 (the build's own;
+ * 805 and 806, the preview frame's runtime, in packages/build/tests/preview-frame.test.ts),
  * BUILD-810 to BUILD-814 (the raw-entry lint, forma-raw-lint, whose corpus is
  * packages/build/tests/fixtures/raw-lint) and BUILD-901. Each has its own
  * test, here or in the build package.
@@ -40,7 +41,7 @@ const CATALOGUE_DOC = resolve(__dirname, '../../../docs/DIAGNOSTICS.md');
 
 /** Codes with no page that can trigger them; each is tested on its own. */
 const NOT_A_PAGE = new Set([
-  'BUILD-606', 'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804',
+  'BUILD-606', 'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-805', 'BUILD-806',
   'BUILD-810', 'BUILD-811', 'BUILD-812', 'BUILD-813', 'BUILD-814', 'BUILD-901',
 ]);
 
@@ -168,7 +169,7 @@ describe('the code catalogue', () => {
       }
     }
     expect([...used]).toEqual(expect.arrayContaining([
-      'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804',
+      'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-805', 'BUILD-806',
       'BUILD-810', 'BUILD-811', 'BUILD-812', 'BUILD-813', 'BUILD-814', 'BUILD-901',
     ]));
     for (const code of used) expect(catalogued.has(code), code).toBe(true);

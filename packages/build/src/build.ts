@@ -3,8 +3,9 @@
  *
  * Parameterized build pipeline extracted from the GateWASM admin build.ts.
  * Handles: esbuild bundling, CSS generation, font copying, SSR IR emission,
- * island registry generation, WASM builds, content hashing, compression,
- * manifest generation, service worker generation, and budget warnings.
+ * island registry generation, WASM builds, the preview frame's runtime
+ * (previewFrame), content hashing, compression, manifest generation, service
+ * worker generation, and budget warnings.
  */
 
 import * as esbuild from 'esbuild';
@@ -29,6 +30,7 @@ import { createRequire } from 'node:module';
 import { APP_NAME, appCacheName, serviceWorkerSource } from './service-worker.js';
 import { splitGraph, type SplitGraph } from './split-graph.js';
 import { createStagingDirectory, replaceDirectory, writeFileAtomic } from './output.js';
+import { FRAME_RUNTIME_ASSET, readFrameRuntime, type FrameRuntime } from './preview-frame.js';
 import {
   DiagnosticsCollector,
   compilerMissing,
@@ -407,9 +409,25 @@ function validateConfig(config: BuildConfig): void {
     );
   }
 
+  // A JavaScript config is not type checked: a string here would read as on.
+  // Verified by: packages/build/tests/preview-frame.test.ts > "refuses a previewFrame that is not a boolean, and an entry that takes forma-runtime.js, before anything is written"
+  const previewFrame: unknown = config.previewFrame;
+  if (previewFrame !== undefined && typeof previewFrame !== 'boolean') {
+    problems.push(
+      `previewFrame is ${shown(previewFrame)}: use true to copy @getforma/core's preview-frame runtime, or false (the default)`,
+    );
+  }
+
   for (const entry of config.entryPoints) {
     if (entryNames.has(entry.outfile)) problems.push(`entryPoints: duplicate outfile '${entry.outfile}'`);
     entryNames.add(entry.outfile);
+    // The manifest would name the application's bundle where forma-server
+    // reads the frame's runtime, and the two files would be one.
+    if (previewFrame === true && entry.outfile === FRAME_RUNTIME_ASSET) {
+      problems.push(
+        `entryPoints: outfile '${entry.outfile}' is the preview frame runtime's name in the manifest (previewFrame): name the entry something else`,
+      );
+    }
     if (/[\\/]/.test(entry.outfile)) {
       problems.push(
         `entryPoints: outfile '${entry.outfile}' contains a path separator — outfile is a bare filename inside outputDir`,
@@ -803,12 +821,17 @@ export async function build(userConfig: BuildConfig): Promise<BuildResult> {
   for (const line of deprecations) console.warn(`Warning: ${line}`);
   const withDeprecations = (result: BuildResult): BuildResult =>
     deprecations.length > 0 ? { ...result, warnings: [...result.warnings, ...deprecations] } : result;
-  if (config.watch) return withDeprecations(await buildInto(config, config.outputDir));
+  // The preview frame's runtime (FORMA-175), read and checked before anything
+  // is written: a core without it (BUILD-805) or a runtime forma-server would
+  // refuse (BUILD-806) leaves the previous output as it was, in watch mode too.
+  // Off, nothing is read.
+  const frame = config.previewFrame === true ? readFrameRuntime(config, config.strict === true) : undefined;
+  if (config.watch) return withDeprecations(await buildInto(config, config.outputDir, frame));
 
   const staging = createStagingDirectory(config.outputDir);
   let result: BuildResult;
   try {
-    result = await buildInto({ ...config, outputDir: staging }, config.outputDir);
+    result = await buildInto({ ...config, outputDir: staging }, config.outputDir, frame);
   } catch (err) {
     rmSync(staging, { recursive: true, force: true });
     throw err;
@@ -821,9 +844,11 @@ export async function build(userConfig: BuildConfig): Promise<BuildResult> {
 /**
  * The pipeline, writing into `config.outputDir`: the staging directory for a
  * production build, the output itself in watch mode. `shownDir` is the
- * directory named in log lines, the one the application reads.
+ * directory named in log lines, the one the application reads. `frame` is
+ * the preview frame's runtime, already read and checked, when `previewFrame`
+ * is on.
  */
-async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildResult> {
+async function buildInto(config: BuildConfig, shownDir: string, frame?: FrameRuntime): Promise<BuildResult> {
   const distDir = config.outputDir;
   const createdDir = !existsSync(distDir);
 
@@ -837,6 +862,20 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
 
     // ── Font copying ──────────────────────────────────────────────────
     copyFonts(config);
+
+    // ── The preview frame's runtime (previewFrame, FORMA-175) ─────────
+    // Core's bytes as they are, under the name forma-server reads from the
+    // manifest: the hashing pass below makes it forma-runtime.<hash>.js like
+    // any asset; watch mode keeps the name, as it does every asset's.
+    // Verified by: packages/build/tests/preview-frame.test.ts > "copies core's dist/formajs-frame.global.js unchanged as a hashed forma-runtime.<hash>.js and names it in the manifest's assets"
+    if (frame) {
+      const target = join(distDir, FRAME_RUNTIME_ASSET);
+      if (config.watch) writeFileAtomic(target, frame.bytes);
+      else writeFileSync(target, frame.bytes);
+      console.log(`   Preview frame runtime: ${FRAME_RUNTIME_ASSET} from @getforma/core ${frame.version} (${frame.source})`);
+    }
+    // The dev manifest names it as itself, as it names every watched asset.
+    const frameAssets: Record<string, string> = frame ? { [FRAME_RUNTIME_ASSET]: FRAME_RUNTIME_ASSET } : {};
 
     // ── esbuild shared config ─────────────────────────────────────────
     const shared: Partial<esbuild.BuildOptions> = {
@@ -916,12 +955,13 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
     // ── Build entries ─────────────────────────────────────────────────
     if (config.watch) {
       // Watch mode. The dev manifest maps each name to itself: the split
-      // graph's files (with code splitting) and each server-rendered page's
-      // `.ir`. Whoever changes either rewrites it.
+      // graph's files (with code splitting), each server-rendered page's
+      // `.ir`, and with previewFrame the frame's runtime. Whoever changes the
+      // first two rewrites it.
       const irAssets: Record<string, string> = {};
       let lastManifest = '';
       const writeDevManifest = () => {
-        const { manifest, warnings } = generateManifest(config, { ...graph?.assets, ...irAssets }, false, graph?.staticDependencies);
+        const { manifest, warnings } = generateManifest(config, { ...graph?.assets, ...irAssets, ...frameAssets }, false, graph?.staticDependencies);
         manifest.build_hash = 'dev';
         const text = JSON.stringify(manifest, null, 2) + '\n';
         // Replaced by rename: the application's server reads this file while

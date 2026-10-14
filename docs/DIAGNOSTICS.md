@@ -757,6 +757,39 @@ Printed by the build itself (FORMA-131), on the console and in `BuildResult.warn
 
 Printed by the build itself (FORMA-131), on the console and in `BuildResult.warnings`; in the report as a note (`packages/build/tests/wasm-deprecation.test.ts` > "a strict build that still sets wasm passes, with BUILD-803 and BUILD-804 as notes in its report (FORMA-119)").
 
+### The preview frame's runtime: BUILD-805 and BUILD-806
+
+`previewFrame: true` (FORMA-175) copies core's `dist/formajs-frame.global.js`
+into the output, byte for byte, as `forma-runtime.<hash>.js`, named in the
+manifest under `assets["forma-runtime.js"]`, where forma-server's
+`PreviewFrame::load` reads it at start, inlines it into the preview frame and
+allows it by its SHA-256 hash (FORMA-125, FORMA-128). The build checks it as
+forma-server does (FRAME-101 to FRAME-103) and refuses before it writes
+anything, in watch mode too, so the previous output stays as it was. Both
+codes fail the build with or without strict mode; the error carries the
+diagnostic (`error.diagnostics`), and a `diagnosticsJson` report, when asked
+for, holds it alone, as no page was compiled.
+
+### BUILD-805 Preview frame runtime missing from @getforma/core
+
+**Why.** `previewFrame` is on, and the @getforma/core the entries import has no dist/formajs-frame.global.js (it ships from core 2.1.0), or none is installed: there is no runtime to copy, and forma-server would refuse to start the frame (FRAME-101).
+
+**Fix.** Install @getforma/core 2.1.0 or later where the entries import it, or turn `previewFrame` off.
+
+**In strict mode.** An error, and without strict mode too: the build fails before it writes anything.
+
+Printed as `@getforma/build: BUILD-805 @getforma/core 2.0.3 at <dir> has no dist/formajs-frame.global.js: …`, naming the version and where core was found (from the first entry's directory, as Node finds a package). The build never falls back to core's `dist/forma-runtime.js`, the CDN alias of the auto-mounting runtime (`packages/build/tests/preview-frame.test.ts` > "BUILD-805: a core without the frame runtime (older than 2.1.0) fails the build, naming its version, and leaves the previous output as it was").
+
+### BUILD-806 Preview frame runtime that cannot be inlined
+
+**Why.** Core's dist/formajs-frame.global.js is empty, not UTF-8, or contains `</script`, `<!--`, a carriage return or a NUL: it is inlined as it is into the frame's `<script>` and allowed by its hash, so it would end early or not match its hash, and forma-server would refuse it (FRAME-103).
+
+**Fix.** Reinstall @getforma/core and leave the file as published: no editor, formatter, patch or CRLF checkout may rewrite it.
+
+**In strict mode.** An error, and without strict mode too: the build fails before it writes anything.
+
+Printed with the file, line and column of what it refuses, as `@getforma/build: BUILD-806 <core>/dist/formajs-frame.global.js:2:11: @getforma/core 2.1.0's dist/formajs-frame.global.js contains "</script", …`; `</script` and `<!--` are matched in any ASCII case, as the HTML tokenizer and forma-server match them (`packages/build/tests/preview-frame.test.ts` > "BUILD-806: a runtime with %s fails the build with its code, before anything is written").
+
 ### The raw-entry lint: BUILD-810 to BUILD-814
 
 `forma-raw-lint`, the build package's command for an application's CI

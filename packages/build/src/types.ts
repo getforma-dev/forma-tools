@@ -68,6 +68,23 @@ export interface BuildConfig {
    * (watch) worker ignores it.
    */
   app?: string;
+  /**
+   * Copy `@getforma/core`'s preview-frame runtime into the output, for
+   * forma-server's preview frame (`PageResponse::frame`, FORMA-125; FORMA-175).
+   * Off by default, where the output is what it was.
+   *
+   * On, the build copies core's `dist/formajs-frame.global.js` (core 2.1.0 and
+   * later; never its `dist/forma-runtime.js`, the CDN alias of the
+   * auto-mounting runtime) from the core the entries import, byte for byte,
+   * as `forma-runtime.<hash>.js`, and names it in the manifest under
+   * `assets["forma-runtime.js"]`, where `PreviewFrame::load` reads it at start
+   * and allows it by its SHA-256 hash. Watch mode writes it unhashed as
+   * `forma-runtime.js`, named the same way in the dev manifest. A core without
+   * it fails the build with BUILD-805, and a runtime forma-server would refuse
+   * to inline (empty, not UTF-8, `</script`, `<!--`, a carriage return or a
+   * NUL) with BUILD-806, before anything is written.
+   */
+  previewFrame?: boolean;
   /** Directory containing .woff2 font files to copy */
   fontDir?: string;
   /** Enable SSR IR emission */

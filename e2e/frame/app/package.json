@@ -1,0 +1,6 @@
+{
+  "name": "forma-e2e-frame-app",
+  "private": true,
+  "type": "module",
+  "description": "The application the preview-frame e2e lane builds (e2e/frame/build.sh installs @getforma/core into it from a packed tarball, without saving it here)."
+}

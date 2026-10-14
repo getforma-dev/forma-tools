@@ -233,6 +233,16 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
     "The wasm-pack step goes in 3.0.0: forma_ir.js, forma_ir_bg.wasm and the manifest's wasm entry go with the WASM walker. It still runs and ships the walker in A2, so strict mode does not fail on it.",
     'Remove `wasm` from the config.',
     false),
+  // The preview frame's runtime (FORMA-175): `previewFrame: true` copies
+  // core's dist/formajs-frame.global.js as the manifest's forma-runtime.js,
+  // which forma-server's PreviewFrame::load inlines by its hash (FRAME-101 to
+  // FRAME-103). The build fails on either, strict mode or not.
+  entry('BUILD-805', 'Preview frame runtime missing from @getforma/core',
+    "`previewFrame` is on, and the @getforma/core the entries import has no dist/formajs-frame.global.js (it ships from core 2.1.0), or none is installed: there is no runtime to copy, and forma-server would refuse to start the frame (FRAME-101).",
+    'Install @getforma/core 2.1.0 or later where the entries import it, or turn `previewFrame` off.'),
+  entry('BUILD-806', 'Preview frame runtime that cannot be inlined',
+    "Core's dist/formajs-frame.global.js is empty, not UTF-8, or contains `</script`, `<!--`, a carriage return or a NUL: it is inlined as it is into the frame's `<script>` and allowed by its hash, so it would end early or not match its hash, and forma-server would refuse it (FRAME-103).",
+    'Reinstall @getforma/core and leave the file as published: no editor, formatter, patch or CRLF checkout may rewrite it.'),
   // The raw-entry lint, forma-raw-lint (FORMA-126, SR8): reported by @getforma/build's
   // bin, never in a build's report. RAW_LINT_CATALOGUE in packages/build/src/raw-lint.ts
   // holds the same entries (packages/build/tests/raw-lint.test.ts keeps them equal).

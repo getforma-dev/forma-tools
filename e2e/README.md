@@ -58,6 +58,37 @@ so the spec first asks `/__site` which site it serves and refuses to run
 unless it is this clone's `e2e/ssr/out/site`, built. The FormaJS-only spec,
 `e2e/full-stack.spec.ts`, runs without the SSR site.
 
+## The preview-frame lane: packed core, this build, forma-server (`e2e/frame/`)
+
+`e2e/frame/frame.spec.ts` checks the chain `previewFrame` exists for
+(FORMA-175, with FORMA-125's `PageResponse::frame` and FORMA-128's frame
+runtime):
+
+1. `e2e/frame/build.sh` packs `@getforma/core` from the FormaJS checkout
+   (`npm pack`, so the package's `files` decide what an application gets),
+   installs the tarball into the fixture application `e2e/frame/app` as an
+   application installs it, and builds it with THIS repo's `@getforma/build`
+   (`e2e/frame/build-app.mjs`): `out/dist-on` with `previewFrame: true`,
+   `out/dist-off` without it, and `out/dist-tampered`, dist-on with a
+   `</script>` appended to its runtime. The script fails unless the build's
+   `forma-runtime.<hash>.js` is core's `dist/formajs-frame.global.js` byte for
+   byte, and never core's `dist/forma-runtime.js`.
+2. `e2e/frame/server/` (Rust) is a small forma-server application from a
+   forma checkout that embeds the three outputs at compile time and, at start,
+   calls `PreviewFrame::load` on each as an application does; it serves the
+   frame (`PageResponse::frame` from dist-on) and a host page that frames it
+   as forma-server's `frame` module docs prescribe.
+3. The spec starts the server on a free port (so clones never meet) and checks
+   that forma-server accepts dist-on's runtime and hashes core's bytes; that in
+   Chromium, under the frame's hash-only policy, the runtime answers `ready`
+   and mounts a module sent over the port, in tier (c), with an opaque origin
+   and no CSP violation; that dist-off is refused with FRAME-101 and
+   dist-tampered with FRAME-103; and that a core whose runtime holds the same
+   tampered bytes fails the build with BUILD-806.
+
+The spec fails, naming `build.sh`, when the lane is not built; running
+`e2e/full-stack.spec.ts` alone does not need it.
+
 ## How to Run
 
 ### Locally (auto-syncs FormaJS build)
@@ -72,8 +103,12 @@ This automatically:
    the `formajs.global.js` IIFE fixture
 3. Builds the SSR site (`e2e/ssr/build.sh`: this repo's packages, the cases, and
    the Rust renderer against the sibling `../forma/`; needs cargo)
-4. Starts the static server on port 3457 and the SSR server on port 3458
-5. Runs the Playwright tests in headless Chromium
+4. Builds the preview-frame lane (`e2e/frame/build.sh`: core packed from
+   `../formajs/`, the fixture application, and the frame server against the
+   sibling `../forma/`; needs cargo)
+5. Starts the static server on port 3457 and the SSR server on port 3458 (the
+   frame spec starts its own server on a free port)
+6. Runs the Playwright tests in headless Chromium
 
 ### Custom FormaJS or forma path, or another SSR port
 
@@ -113,6 +148,12 @@ e2e/
 │   ├── serve.mjs                    ← Serves out/site with each page's headers
 │   ├── origin.ts                    ← The SSR port (FORMA_SSR_E2E_PORT, default 3458)
 │   └── regressions.spec.ts          ← The SSR regression fixtures
+├── frame/
+│   ├── app/                         ← The fixture application (core installed from the packed tarball)
+│   ├── build.sh                     ← Builds the lane (FORMAJS_DIR, FORMA_DIR)
+│   ├── build-app.mjs                ← @getforma/build with and without previewFrame
+│   ├── server/                      ← Rust: forma-server's PreviewFrame::load and PageResponse::frame
+│   └── frame.spec.ts                ← The preview frame in Chromium
 └── README.md                        ← This file
 ```
 
@@ -133,3 +174,6 @@ e2e/
 | "the SSR site is not built" | `bash e2e/ssr/build.sh` (or `npm run test:e2e`, which runs it) |
 | "serves another clone's site" | stop that clone's server, or `FORMA_SSR_E2E_PORT=<free port>` |
 | "the lock file needs to be updated" (cargo) | forma's crates changed dependencies: `cargo build --manifest-path e2e/ssr/render/Cargo.toml` once, commit `e2e/ssr/render/Cargo.lock` |
+| "the preview-frame lane is not built" | `bash e2e/frame/build.sh` (or `npm run test:e2e`, which runs it) |
+| "formajs-frame.global.js not found" | FORMAJS_DIR must be a FormaJS checkout with FORMA-128's frame runtime, built |
+| "the lock file needs to be updated" (cargo, frame lane) | `cargo build --manifest-path e2e/frame/server/Cargo.toml` once, commit `e2e/frame/server/Cargo.lock` |

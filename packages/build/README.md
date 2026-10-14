@@ -107,11 +107,55 @@ server not yet on forma-server 0.2.2; setting `serviceWorker` without `app` is
 deprecated and warns once per build (`BUILD-802`), because from 3.0.0 a worker
 is written only for a named `app`. The development worker ignores `app`.
 
+### The preview frame's runtime (`previewFrame`)
+
+forma-server's preview frame (`PageResponse::frame`, FORMA-125) renders content
+nobody reviewed in an opaque-origin document whose one script is core's frame
+runtime, written inline and allowed by its SHA-256 hash. It finds that runtime
+the way it finds every asset: `PreviewFrame::load` reads the manifest's
+`assets["forma-runtime.js"]` from the embedded output at start, and refuses to
+start the frame without it (FRAME-101). An application that serves the frame
+turns the setting on:
+
+```ts
+await build({ ...config, previewFrame: true });
+```
+
+The build then copies `dist/formajs-frame.global.js` from the
+`@getforma/core` the entries import (found as Node finds a package, from the
+first entry's directory; core 2.1.0 and later), byte for byte, as
+`forma-runtime.<hash>.js`, and names it in the manifest:
+
+```json
+"assets": { "app.js": "app.1797a84b.js", "forma-runtime.js": "forma-runtime.e7a8cc12.js" }
+```
+
+- **Never core's `dist/forma-runtime.js`.** That file shares the target's
+  name, but it is the CDN alias of the auto-mounting runtime, which would bind
+  the whole frame document instead of rendering the host's module in tier (c).
+- **The bytes are core's, unchanged**: no minify, no transform, no line
+  endings rewritten, so the hash forma-server computes is the hash of core's
+  file, and the script the browser runs is the one hashed. No route loads it;
+  it is compressed and listed like any asset.
+- **It refuses what forma-server would refuse** (FRAME-103), before anything is
+  written, so the previous output stays as it was: `BUILD-805` when the core
+  the entries import has no frame runtime (older than 2.1.0) or none is
+  installed, `BUILD-806` when the runtime is empty, not UTF-8, or contains
+  `</script` or `<!--` (in any case), a carriage return or a NUL. Both fail the
+  build with or without strict mode (`docs/DIAGNOSTICS.md`).
+- **Watch mode** writes it unhashed as `forma-runtime.js`, and the dev manifest
+  names it as itself, as it does every watched asset.
+- **Off** (the default, or `false`), nothing is read and the output is
+  byte-identical to a build without the setting. An entry may not take the
+  name `forma-runtime.js` while it is on; any value but `true` or `false` is a
+  config error.
+
 ## What It Does
 
 | Step | What happens |
 |------|-------------|
-| **Validate** | Rejects an unknown `serviceWorker` value, an `app` name forma-server cannot take, two entries sharing an `outfile`, an `outfile` that is a path, a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir` |
+| **Validate** | Rejects an unknown `serviceWorker` value, an `app` name forma-server cannot take, a `previewFrame` that is not a boolean, two entries sharing an `outfile`, an `outfile` that is a path (or `forma-runtime.js` with `previewFrame`), a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir`; with `previewFrame`, reads and checks core's frame runtime (`BUILD-805`, `BUILD-806`) |
+| **Frame runtime** | (Optional, `previewFrame: true`) Copies `@getforma/core`'s `dist/formajs-frame.global.js` unchanged as `forma-runtime.js`, hashed with the other assets |
 | **Bundle** | esbuild bundles each entry point with JSX transform (`jsxFactory: "h"`) |
 | **CSS** | Runs Tailwind CLI or concatenates CSS files |
 | **Hash** | SHA-256 content hash appended to filenames (`app.a1b2c3d4.js`) |
@@ -154,6 +198,7 @@ const config: BuildConfig = {
   },
   // strict: true,                   // Fail on every coded SSR diagnostic (or FORMA_STRICT=1); see below
   // diagnosticsJson: "ssr-diagnostics.json", // Also write them as JSON, outside outputDir
+  previewFrame: false,                // true: copy core's frame runtime as forma-runtime.js (forma-server's PageResponse::frame)
   wasm: { crateDir: "../crates/forma-ir" },  // Deprecated (removed in 3.0.0): build the WASM walker
   watch: false,                       // Rebuild on change; writes a dev manifest and, with ssr, each page's .ir
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
@@ -175,6 +220,7 @@ dist/
 ├── home.e5f6g7h8.css.br
 ├── dashboard.i9j0k1l2.js
 ├── home.m3n4o5p6.ir          # FMIR binary (if ssr: true)
+├── forma-runtime.y5z6a7b8.js # Core's preview-frame runtime, unchanged (if previewFrame: true)
 ├── forma_ir.q7r8s9t0.js      # WASM loader (if the deprecated wasm key is set)
 ├── forma_ir_bg.u1v2w3x4.wasm # WASM binary
 ├── inter.woff2                # Copied fonts (never hashed)
