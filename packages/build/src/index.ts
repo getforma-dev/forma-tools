@@ -16,4 +16,6 @@ export type {
   RouteMapping,
   AssetManifest,
   RouteManifest,
+  BuildDiagnostic,
+  BuildDiagnosticChainLink,
 } from './types.js';

@@ -14,6 +14,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
+import { registerSourceMap } from './diagnostics.js';
 
 // ESM-compatible require for loading esbuild (which is CJS) from sync functions
 const _require = createRequire(import.meta.url);
@@ -77,19 +78,41 @@ function isDirectory(filePath: string): boolean {
  */
 export function loadComponentSource(filePath: string): string | null {
   try {
-    let source = readFileSync(filePath, 'utf8');
-    if (filePath.endsWith('.tsx') || filePath.endsWith('.jsx')) {
-      try {
-        const esbuild = _require('esbuild');
-        source = esbuild.transformSync(source, {
-          loader: filePath.endsWith('.tsx') ? 'tsx' : 'jsx',
-          jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
-        }).code;
-      } catch { /* use raw source */ }
-    }
-    return source;
+    return transformJsxSource(readFileSync(filePath, 'utf8'), filePath);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Turn a .tsx or .jsx file's JSX into h() calls (the IR walker reads only h()
+ * trees); any other file is returned as it is.
+ *
+ * The transform's source map is kept for the file (`registerSourceMap`), so a
+ * diagnostic on the compiled text names the line the author wrote: esbuild
+ * reprints the file, and its lines are not the source's. An external map leaves
+ * the code byte-identical to a transform without one.
+ * Verified by: packages/compiler/tests/diagnostics-conformance.test.ts > "maps a position in a .tsx file back to the line the author wrote"
+ */
+export function transformJsxSource(source: string, filePath: string): string {
+  if (!filePath.endsWith('.tsx') && !filePath.endsWith('.jsx')) {
+    registerSourceMap(filePath, null);
+    return source;
+  }
+  try {
+    const esbuild = _require('esbuild');
+    const transformed = esbuild.transformSync(source, {
+      loader: filePath.endsWith('.tsx') ? 'tsx' : 'jsx',
+      jsxFactory: 'h', jsxFragment: 'Fragment', format: 'esm',
+      sourcemap: 'external', sourcefile: filePath,
+    });
+    registerSourceMap(filePath, transformed.map);
+    return transformed.code;
+  } catch {
+    // esbuild not available, or the file does not parse: use the raw source,
+    // whose positions are the author's.
+    registerSourceMap(filePath, null);
+    return source;
   }
 }
 

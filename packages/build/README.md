@@ -152,6 +152,8 @@ const config: BuildConfig = {
     home: "src/home/app.tsx",         // the file with mount()/activateIslands()
     dashboard: "src/dashboard/app.tsx",
   },
+  // strict: true,                   // Fail on every coded SSR diagnostic (or FORMA_STRICT=1); see below
+  // diagnosticsJson: "ssr-diagnostics.json", // Also write them as JSON, outside outputDir
   wasm: { crateDir: "../crates/forma-ir" },  // Deprecated (removed in 3.0.0): build the WASM walker
   watch: false,                       // Rebuild on change; writes a dev manifest and, with ssr, each page's .ir
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
@@ -230,6 +232,55 @@ The server must read the new module. `forma-server` loads the `.ir` modules
 when the application starts (`load_ir_modules`), so restart it on a change
 under `outputDir`, for example with `cargo watch`, until it rereads them in
 development builds.
+
+### SSR diagnostics and strict mode
+
+Every construct the compiler cannot represent in a page's module is reported
+with a stable code, file, line and column, one line of why and one of fix
+([the catalogue](https://github.com/getforma-dev/forma-tools/blob/main/docs/DIAGNOSTICS.md),
+one entry per code). By default they are warnings, printed as before, and the
+build succeeds as before. `build()` returns them as `result.diagnostics`, each
+with its `code`, `severity`, `page`, `file`, `line`, `column`, `message`, `why`
+and `fix`.
+
+- **Strict mode** (`strict: true`, or `FORMA_STRICT=1` in the environment
+  when the config leaves `strict` unset) fails the build on every diagnostic
+  but a note, after every page is compiled, with all of them at once:
+
+  ```
+  Error: @getforma/build strict mode (strict: true or FORMA_STRICT=1): 2 SSR diagnostics are errors; without it they are warnings:
+  /app/src/home/app.tsx:12:11  BUILD-101  call expression helpers.extra(...) in /app/src/home/app.tsx:12:11 — emitted as an empty island shell, …
+      why: The call becomes an anonymous island (`island_<n>`) that no registry names: …
+      fix: Write the subtree as h() calls, a component in a relative file, …
+  ```
+
+  `build()` reads no command-line flag, as for `ssr` and `watch`: a build
+  script that takes `--strict` maps it to the config.
+
+  ```ts
+  // `|| undefined` leaves `strict` unset without the flag, so FORMA_STRICT=1
+  // still applies; `false` would turn strict mode off whatever the variable says.
+  await build({ /* … */ ssr: isSsr, strict: process.argv.includes("--strict") || undefined });
+  ```
+
+  `strict: false` ignores `FORMA_STRICT`; a value of it other than `1`,
+  `true`, `0`, `false` or empty is refused. A failed build leaves the previous
+  output as it was. It needs `@getforma/compiler` 0.3.7 or later; with an older
+  one the build refuses strict mode rather than pass pages it never checked. In
+  watch mode a page with an error keeps its last good module and logs its
+  first error. 3.0.0 makes strict the only mode.
+- **JSON** (`diagnosticsJson: "<path>"`): the build writes
+  `{ version, strict, diagnostics }` to that path, also when strict mode fails
+  it. The path must be outside `outputDir`, which the build replaces whole and
+  serves; one inside is refused before anything is written, inside as the
+  filesystem sees it (through real paths, so a symlink into `outputDir`
+  counts; case-insensitively where the filesystem ignores case). A field may be
+  added to the report without a change of `version`; renaming or removing one,
+  or changing what one means, increments it.
+
+A browser-only subtree is declared with `browserOnly()` from `@getforma/core`
+(see the compiler's README); a route the server never renders, with
+`ssr: false` on its entry.
 
 ### Development service worker
 

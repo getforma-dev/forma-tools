@@ -46,6 +46,7 @@ pattern of seeding an island's signals from its props before the component runs.
 | `select` | `b` selected and submitted before JavaScript (FORMA-002), after activation and client-rendered (FORMA-003) | passes (flipped by both) |
 | `edited-controls` | text, checkbox and option edited before activation survive it | passes (fails with formajs `042e353`) |
 | `ledger-arrival` | seeded values survive activation; Retry runs | passes |
+| `browser-only` | a `browserOnly()` component: the server sends its empty host with its declared props, the browser renders it there and it works; client-rendered it renders as any component (FORMA-119) | passes |
 
 The table "every case is server-rendered and activates" adds the shared
 controls for every case: the walker's HTML, activation, the Phase 1 mount, and
