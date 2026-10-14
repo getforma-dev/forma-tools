@@ -1,6 +1,6 @@
 import { h } from '@getforma/core';
 
-const inner = { __html: '<b>bold</b>' };
+const inner = { __html: '<b>bold</b>' }; // expect: dangerouslySetInnerHTML
 export const held = h('div', { dangerouslySetInnerHTML: inner }); // expect: dangerouslySetInnerHTML
 export const reactive = h('div', {
   dangerouslySetInnerHTML: () => ({ __html: String(Date.now()) }), // expect: dangerouslySetInnerHTML

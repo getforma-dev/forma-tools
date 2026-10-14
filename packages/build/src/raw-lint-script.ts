@@ -88,8 +88,11 @@ function tokenize(code: string): Tok[] {
     return t.value !== ']';
   };
 
-  /** A template's text from `from` to its closing backtick or next `${`. */
-  const templateChunk = (from: number): number => {
+  /**
+   * A template's text from `from` to its closing backtick or next `${`. A
+   * whole template with no substitution is a string (``setAttribute(`srcdoc`, s)``).
+   */
+  const templateChunk = (from: number, opening: boolean): number => {
     let j = from;
     while (j < n) {
       const c = code[j];
@@ -98,7 +101,7 @@ function tokenize(code: string): Tok[] {
         continue;
       }
       if (c === '`') {
-        toks.push({ type: 'tpl', value: code.slice(from, j), start: from - 1 });
+        toks.push({ type: opening ? 'str' : 'tpl', value: code.slice(from, j), start: from - 1 });
         return j + 1;
       }
       if (c === '$' && code[j + 1] === '{') {
@@ -140,7 +143,7 @@ function tokenize(code: string): Tok[] {
       continue;
     }
     if (c === '`') {
-      i = templateChunk(i + 1);
+      i = templateChunk(i + 1, true);
       continue;
     }
     if (c === '/' && regexAllowed()) {
@@ -187,7 +190,7 @@ function tokenize(code: string): Tok[] {
     if (c === '}') {
       if (braces.pop() === '${') {
         toks.push({ type: 'p', value: '}', start: i });
-        i = templateChunk(i + 1);
+        i = templateChunk(i + 1, false);
         continue;
       }
       toks.push({ type: 'p', value: '}', start: i });
@@ -367,6 +370,14 @@ const ASSIGNMENT_OPS = new Set(['=', '+=', '-=', '||=', '&&=', '??=']);
 
 type BindingKind = 'trustedVar' | 'trustedCallee' | 'other';
 
+/** A name that writes raw markup when it names a prop or an attribute. */
+type KeyKind = 'dangerouslySetInnerHTML' | '__html' | 'srcdoc';
+
+function keyKind(name: string): KeyKind | null {
+  if (name === 'dangerouslySetInnerHTML' || name === '__html') return name;
+  return /^srcdoc$/i.test(name) ? 'srcdoc' : null;
+}
+
 interface Binding {
   region: number;
   kind: BindingKind;
@@ -452,6 +463,8 @@ class ScriptScan {
   private readonly bindings = new Map<string, Binding[]>();
   /** `const` declarations whose initialiser may make them trusted. */
   private readonly constCandidates: Array<{ binding: Binding; start: number; end: number }> = [];
+  /** Consts holding a prop's name (`const K = 'srcdoc'`), file-wide (over-approximated). */
+  private readonly keyConsts = new Map<string, KeyKind>();
   /** Assignments (`x = …`), by name and token; each untrusts the binding it writes. */
   private readonly assignments: Array<{ name: string; at: number }> = [];
   /** `name@region` for each binding an assignment writes. */
@@ -806,6 +819,8 @@ class ScriptScan {
             if (this.isP(k + 1, '=')) {
               const end = this.expressionEnd(k + 2);
               const binding = this.bind(name, region, 'other');
+              const keyName = end === k + 3 && toks[k + 2]!.type === 'str' ? keyKind(toks[k + 2]!.value) : null;
+              if (t.value === 'const' && keyName) this.keyConsts.set(name, keyName);
               if (t.value === 'const') this.constCandidates.push({ binding, start: k + 2, end });
               if (!this.isP(end, ',')) break;
               k = end + 1;
@@ -937,7 +952,6 @@ class ScriptScan {
       if (this.isId(b, 'async')) b--;
       return this.nameBeforeValue(b);
     }
-    if (this.isP(k - 1, '=')) return this.nameBeforeValue(k - 1);
     return null;
   }
 
@@ -1002,22 +1016,29 @@ class ScriptScan {
   }
 
   private visitString(i: number, tok: Tok): void {
-    const isSrcdoc = /^srcdoc$/i.test(tok.value);
-    if (tok.value === 'dangerouslySetInnerHTML' || isSrcdoc) {
-      if (this.isKey(i)) {
-        this.checkKeyValue(i, i + 2, isSrcdoc ? 'srcdoc' : 'dangerouslySetInnerHTML');
-        return;
-      }
-      // A computed key: `["srcdoc"]: value`.
-      if (this.isP(i - 1, '[') && this.isP(i + 1, ']') && this.isP(i + 2, ':')) {
-        this.checkKeyValue(i, i + 3, isSrcdoc ? 'srcdoc' : 'dangerouslySetInnerHTML');
-        return;
-      }
+    const kind = keyKind(tok.value);
+    if (kind) this.visitKeyName(i, kind);
+  }
+
+  /**
+   * A prop or attribute name written as a string, or as a const holding one:
+   * an object key (`{ "srcdoc": v }`, `{ [K]: v }`), a computed member write
+   * (`el['srcdoc'] = v`), or a name passed beside its value
+   * (`setAttribute('srcdoc', v)`, `Reflect.set(o, 'dangerouslySetInnerHTML', v)`).
+   * Verified by: packages/build/tests/raw-lint.test.ts > "TypeScript exits: each fails unlisted, passes listed, fails expired"
+   */
+  private visitKeyName(i: number, kind: KeyKind): void {
+    if (this.isKey(i)) {
+      this.checkKeyValue(i, i + 2, kind);
+      return;
     }
-    // An attribute name argument: setAttr(el, 'srcdoc', value), el.setAttribute('srcdoc', value).
-    if (isSrcdoc && (this.isP(i - 1, '(') || this.isP(i - 1, ',')) && this.isP(i + 1, ',') && this.enclosingOpener(i) === '(') {
-      const end = this.expressionEnd(i + 2);
-      if (!this.isTrusted(i + 2, end)) this.report(i, 'srcdoc', "the srcdoc attribute set to a value not traced to trustedHtml()");
+    if (this.isP(i - 1, '[') && this.isP(i + 1, ']')) {
+      // `{ ["srcdoc"]: v }` or `el["srcdoc"] = v`.
+      if (this.isP(i + 2, ':') || this.isP(i + 2, '=')) this.checkKeyValue(i, i + 3, kind);
+      return;
+    }
+    if (kind !== '__html' && (this.isP(i - 1, '(') || this.isP(i - 1, ',')) && this.isP(i + 1, ',') && this.enclosingOpener(i) === '(') {
+      this.checkKeyValue(i, i + 2, kind);
     }
   }
 
@@ -1053,41 +1074,48 @@ class ScriptScan {
       return;
     }
 
-    // Props and attributes: dangerouslySetInnerHTML and srcdoc.
-    const isSrcdoc = /^srcdoc$/i.test(name);
-    if (name !== 'dangerouslySetInnerHTML' && !isSrcdoc) return;
-    const exit = isSrcdoc ? 'srcdoc' : 'dangerouslySetInnerHTML';
+    // A const holding a prop's name, used as one: `{ [K]: v }`, `el[K] = v`, `setAttribute(K, v)`.
+    const constKey = !afterDot ? this.keyConsts.get(name) : undefined;
+    if (constKey && !this.isKey(i) && !(this.isP(i + 1, '=') && (this.isId(i - 1, 'const') || this.isId(i - 1, 'let') || this.isId(i - 1, 'var')))) {
+      this.visitKeyName(i, constKey);
+      return;
+    }
+
+    // Props and attributes: dangerouslySetInnerHTML, its __html, and srcdoc.
+    const kind = keyKind(name);
+    if (!kind) return;
     if (this.isKey(i)) {
-      this.checkKeyValue(i, i + 2, exit);
+      this.checkKeyValue(i, i + 2, kind);
     } else if (!afterDot && this.isShorthand(i)) {
-      this.report(i, exit, `${name} passed by shorthand: the lint cannot see what it holds`);
+      this.report(i, kind === 'srcdoc' ? 'srcdoc' : 'dangerouslySetInnerHTML', `${name} passed by shorthand: the lint cannot see what it holds`);
     } else if (afterDot && this.isP(i + 1, '=')) {
-      this.checkKeyValue(i, i + 2, exit);
+      this.checkKeyValue(i, i + 2, kind);
     }
   }
 
-  /** `dangerouslySetInnerHTML: { __html: trustedHtml(…) }` or `srcdoc: trustedHtml(…)` passes; anything else is a use. */
-  private checkKeyValue(i: number, start: number, exit: string): void {
+  /**
+   * `srcdoc: trustedHtml(…)` and `__html: trustedHtml(…)` pass; anything else
+   * is a use. Every `__html` key is checked where it is written, whatever
+   * holds it (FORMA-126 review, should-fix 2), so a dangerouslySetInnerHTML
+   * whose value has `__html` keys leaves them to report themselves, and one
+   * without (a variable, a call) is reported at its own name.
+   */
+  private checkKeyValue(i: number, start: number, kind: KeyKind): void {
     const end = this.expressionEnd(start);
-    if (exit === 'srcdoc') {
-      if (!this.isTrusted(start, end)) this.report(i, 'srcdoc', 'srcdoc set to a value not traced to trustedHtml()');
+    if (this.isTrusted(start, end)) return;
+    if (kind === 'srcdoc') {
+      this.report(i, 'srcdoc', 'srcdoc set to a value not traced to trustedHtml()');
       return;
     }
-    if (this.isTrusted(start, end)) return;
-    let seen = 0;
-    let trusted = 0;
+    if (kind === '__html') {
+      this.report(i, 'dangerouslySetInnerHTML', 'an __html not traced to trustedHtml()');
+      return;
+    }
     for (let k = start; k < end; k++) {
       const t = this.toks[k]!;
-      if ((t.type === 'id' || t.type === 'str') && t.value === '__html' && this.isKey(k)) {
-        seen++;
-        if (this.isTrusted(k + 2, this.expressionEnd(k + 2))) trusted++;
-      }
+      if ((t.type === 'id' || t.type === 'str') && t.value === '__html' && (this.isKey(k) || (this.isP(k - 1, '[') && this.isP(k + 1, ']')))) return;
     }
-    if (seen === 0 || trusted < seen) {
-      this.report(i, 'dangerouslySetInnerHTML', seen === 0
-        ? 'dangerouslySetInnerHTML set to a value the lint cannot read as { __html: trustedHtml(…) }'
-        : 'dangerouslySetInnerHTML with an __html not traced to trustedHtml()');
-    }
+    this.report(i, 'dangerouslySetInnerHTML', 'dangerouslySetInnerHTML set to a value the lint cannot read as { __html: trustedHtml(…) }');
   }
 }
 

@@ -424,12 +424,12 @@ TypeScript and JavaScript, inline scripts in HTML included:
 | Exit | What the lint finds |
 |---|---|
 | `trustedHtml` | Each call of `trustedHtml()`, under any name it is imported or destructured as (`@getforma/core`, `./runtime`, the CDN's `FormaRuntime`), and each reference to it that is not a call, or that exports it under another name. |
-| `dangerouslySetInnerHTML` | The prop with an `__html` that is not a `trustedHtml(…)` call or a `const` in scope bound to one (a string still works in 2.x and warns in development); by JSX, `h()`, a quoted key, shorthand or assignment. |
+| `dangerouslySetInnerHTML` | Any `__html` key, wherever it is written, whose value is not a `trustedHtml(…)` call or a `const` in scope bound to one (a string still works in 2.x and warns in development); and the prop itself set to a value the lint cannot read as `{ __html: … }`: by JSX, `h()`, a quoted or computed key (a `const` holding the name included), shorthand, `obj.prop =`, `obj['prop'] =` or `Reflect.set(obj, 'prop', …)`. |
 | `setHTMLUnsafe` | Core's `setHTMLUnsafe(el, markup)` given markup not traced to `trustedHtml()`. |
 | `template` | Core's `template(markup)`, likewise. |
 | `templateMany` | Core's `templateMany(markup)`, likewise. |
 | `reconcile` | The runtime's `reconcile(el, markup)`, likewise. |
-| `srcdoc` | A `srcdoc` prop, attribute or property (any case) set to a value not traced to `trustedHtml()`: JSX, `h()`, `setAttr`/`setAttribute(…, 'srcdoc', …)`, `.srcdoc =`. |
+| `srcdoc` | A `srcdoc` prop, attribute or property (any case) set to a value not traced to `trustedHtml()`: JSX, `h()`, a quoted or computed key, `setAttr`/`setAttribute(…, 'srcdoc', …)` (a template literal or a `const` holding the name included), `.srcdoc =`, `['srcdoc'] =`, `Reflect.set` and `Object.defineProperty`. |
 
 Markup, in HTML files and in string literals in either language:
 
@@ -491,6 +491,9 @@ What it cannot see, and review must:
   or found with `Object.getOwnPropertySymbols`.
 - A Rust name assembled by a macro (`paste!`), and `body_prefix` carried in by
   struct update (`PageConfig { ..base }`).
+- Props built from data at run time (`JSON.parse('{"dangerouslySetInnerHTML": …}')`,
+  a key assembled from variables): the lint reads the names written in the
+  source.
 - The browser's own sinks (`innerHTML`, `insertAdjacentHTML`, `document.write`,
   `Element.setHTMLUnsafe`): not Forma's exits, and what Trusted Types refuses
   in the browser (DR-20).
