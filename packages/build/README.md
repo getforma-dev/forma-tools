@@ -320,6 +320,219 @@ from the workspace root: the development worker's takeover, and a
 per-application worker through upgrade, rollback and upgrade with two tabs open. It uses installed Chrome when bundled Chromium is
 unavailable, or the explicit `FORMA_BROWSER_CHANNEL` override.
 
+## Raw-entry lint (`forma-raw-lint`)
+
+Raw HTML and the other ways out of escaping and Forma's policy are named, so
+review and CI can find every one (DR-19, L-37). `forma-raw-lint` is the check
+an application runs in CI (SR8): it fails on any use of those exits that its
+allowlist does not list with an owner and an end date, and on any listed entry
+past its end date. The allowlist becomes the inventory of the application's
+raw entries.
+
+```bash
+npx forma-raw-lint src crates
+```
+
+```yaml
+# .github/workflows/ci.yml
+- run: npx forma-raw-lint --report raw-entries.json src crates
+```
+
+It reads TypeScript, JavaScript (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`,
+`.mjs`, `.cjs`; not `.d.ts`), Rust (`.rs`) and HTML (`.html`, `.htm`) under
+the files and directories it is given, skipping `node_modules`, `target` and
+any file or directory whose name starts with `.`. Skips and `--exclude` are
+applied before anything is read. A symbolic link is followed; one that leads
+nowhere or loops is a `BUILD-814` (exclude it if it is not source), and a
+file reached by two paths is read once. It needs nothing beyond this package:
+an application that does not build with `@getforma/build` (a Rust-only one,
+or one that uses `@getforma/core` alone) runs it with
+`npx -p @getforma/build forma-raw-lint …`.
+
+**Point it at source, not build output.** A bundle that includes core carries
+core's own raw entries: the registry key survives minification, and a
+development build carries `data-bind:srcdoc` in a warning. Name the source
+directories, or leave committed bundles out with `--exclude` (for example
+`--exclude 'crates/*/assets/**' --exclude 'dist/**'`).
+
+```
+--allowlist <file>  The allowlist (default: ./forma-raw-allowlist.json, if it exists)
+--root <dir>        What paths are relative to (default: the allowlist's directory, else .)
+--exclude <glob>    Do not scan matching files or directories (**, *, ?); repeatable
+--today <date>      Check end dates against this day, YYYY-MM-DD (default: today, UTC)
+--json              Print the report as JSON instead of text
+--report <file>     Also write the JSON report to this file
+--exits             List the exits an entry's "exit" can name
+```
+
+**Exit codes.** 0, it passes; 1, a raw entry not on the allowlist
+(`BUILD-810`), an entry past its end date (`BUILD-811`) or a source file it
+cannot parse (`BUILD-814`); 2, a usage error or an allowlist it cannot use
+(`BUILD-812`). An entry that lists fewer uses than its count, or none
+(`BUILD-813`), is a note. The codes
+are in the build diagnostics catalogue, [`docs/DIAGNOSTICS.md`](https://github.com/getforma-dev/forma-tools/blob/main/docs/DIAGNOSTICS.md).
+
+```text
+BUILD-810 error body_prefix in src/server/mod.rs:772:9 (in index_handler): body_prefix: body_prefix set to a value not traced to RawHtml::trusted (a string still works in 0.2.x); not on the allowlist
+forma-raw-lint: 6 raw entries in 123 files: 5 listed, 1 not on the allowlist; 0 allowlist entries past the end date; 0 allowlist entries listing fewer uses than they say. Fail.
+```
+
+### The allowlist
+
+`forma-raw-allowlist.json`, version 1:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "path": "src/server/mod.rs",
+      "symbol": "index_handler",
+      "exit": "body_prefix",
+      "owner": "studio",
+      "until": "2027-01-31",
+      "reason": "the hand-written app shell; moves to RawHtml::trusted (appendix E)"
+    },
+    {
+      "path": "client/pages/DocsPage.ts",
+      "line": 751,
+      "exit": "dangerouslySetInnerHTML",
+      "owner": "docs",
+      "until": "2027-01-31",
+      "reason": "sanitised search snippets; wrap in trustedHtml under kmd's policy"
+    }
+  ]
+}
+```
+
+Each entry has:
+
+- `path`: the file, relative to the allowlist's directory, with `/`.
+- `line` or `symbol`, exactly one: the line, or the innermost named function,
+  method, class, `impl` or module, as the lint prints it after `in`
+  (`FormaStage.update`, `RawHtml::from_static`). A symbol survives edits
+  around it; a line pins one use.
+- `exit`: one of the names below.
+- `owner`: who answers for it.
+- `until`: `YYYY-MM-DD`, the last day the entry is valid, in UTC (the run's
+  date is UTC's, as on a CI runner, so west of UTC an entry ends some hours
+  before the local day does). The day after, the run fails until the owner
+  removes the raw entry or renews the date. It may be at most a year after
+  the run's date (an entry further out is refused, `BUILD-812`), so every
+  entry is revisited at least yearly.
+- `reason`: why it is raw, and where it is going.
+- `count` (optional, default 1): how many uses of that exit the entry lists.
+  A second use in the same function is not on the allowlist until the count
+  says so, and an entry that lists fewer uses than its count is a `BUILD-813`
+  note, so a count never leaves room for an unreviewed use.
+
+An unknown field, a missing one, an exit the lint does not know or a date
+that is not a real day stops the run with `BUILD-812`, naming the entry and
+the field. The `--json` report's `rawEntries` lists every raw entry found,
+listed or not, with its file, line, column, symbol and exit: the list an
+allowlist starts from.
+
+### The exits
+
+TypeScript and JavaScript, inline scripts in HTML included:
+
+| Exit | What the lint finds |
+|---|---|
+| `trustedHtml` | Each call of `trustedHtml()`, under any name it is imported or destructured as (`@getforma/core`, `./runtime`, the CDN's `FormaRuntime`), and each reference to it that is not a call, or that exports it under another name. |
+| `dangerouslySetInnerHTML` | Any `__html` key, wherever it is written, whose value is not a `trustedHtml(…)` call or a `const` in scope bound to one (a string still works in 2.x and warns in development); and the prop itself set to a value the lint cannot read as `{ __html: … }`: by JSX, `h()`, a quoted or computed key (a `const` holding the name included), shorthand, `obj.prop =`, `obj['prop'] =` or `Reflect.set(obj, 'prop', …)`. |
+| `setHTMLUnsafe` | Core's `setHTMLUnsafe(el, markup)` given markup not traced to `trustedHtml()`. |
+| `template` | Core's `template(markup)`, likewise. |
+| `templateMany` | Core's `templateMany(markup)`, likewise. |
+| `reconcile` | The runtime's `reconcile(el, markup)`, likewise. |
+| `srcdoc` | A `srcdoc` prop, attribute or property (any case) set to a value not traced to `trustedHtml()`: JSX, `h()`, a quoted or computed key, `setAttr`/`setAttribute(…, 'srcdoc', …)` (a template literal or a `const` holding the name included), `.srcdoc =`, `['srcdoc'] =`, `Reflect.set` and `Object.defineProperty`. |
+| `core-reexport` | `export * from '@getforma/core'` (or a subpath, or `export * as x from …`): every raw sink of core's behind the application's own module, where the lint does not follow its importers. A named re-export of a sink (`export { reconcile } from '@getforma/core/runtime'`, or a sink imported from core and exported) is reported under the sink's own exit. |
+| `h('script')` | A `script` element built by core's `h()`: `h('script', …)` (any case), under a name `h` is imported as, on core's namespace, or JSX `<script>`. Its `src` runs under `'strict-dynamic'`; it warns in development and 3.0.0 refuses it (FORMA-109). |
+
+Markup, in HTML files and in string literals in either language:
+
+| Exit | What the lint finds |
+|---|---|
+| `data-bind:srcdoc` | The HTML runtime's `data-bind:srcdoc` binding, which no `trustedHtml()` can reach. |
+| `list-row-srcdoc` | A `srcdoc` attribute whose value carries `{item`, a list row's binding, after character references (`&#123;`, `&lbrace;`) and string escapes (`\u{7b}`, `\x7b`) are decoded, as the runtime reads it. |
+| `trusted-types-registry` | The string `@getforma/core#trusted-types`, the key of core's registry, through which the `forma` policy can mint without `trustedHtml()`. |
+
+Rust:
+
+| Exit | What the lint finds |
+|---|---|
+| `RawHtml::trusted` | Each `RawHtml::trusted`, path-qualified, as `<RawHtml>::trusted`, as `Self::trusted` in an `impl` for it, or through an alias of it from any file. |
+| `RawHtml-alias` | `RawHtml` under another name: `use … RawHtml as X`, `type X = …RawHtml`, any `= RawHtml` (an associated type, a generic default). |
+| `r#html` | The raw identifier `r#html`, the name of `RawHtml`'s private field. |
+| `body_prefix` | A `body_prefix` other than `None` that is not `Some(&x)` (or `x.as_str()`, `&*x`) where `x`'s last binding in scope is `RawHtml::trusted(..)` as its whole value or is declared `RawHtml`, or `self.x` declared `RawHtml` by the `impl`'s own struct: a string still works in 0.2.x. |
+| `config_json` | `config_json` set to anything but `None`: data's typed home. |
+| `config_script` | `config_script` other than `None`: deprecated, handler text in a nonced script, removed in 3.0.0. |
+| `into_parts_unchecked` | `PageResponse::into_parts_unchecked`. |
+| `with_module_preloads` | `RenderCtx::with_module_preloads`, the typed home for `modulepreload` links. |
+| `with_head_link` | `RenderCtx::with_head_link`, the typed home for head links. |
+| `relax_trusted_types` | `PolicyExtensions::relax_trusted_types`, a route's Trusted Types relaxation. |
+
+The three fields are found where a struct literal or an assignment sets
+them (`field: v`, `x.field = v`), through an `Option` method that writes them
+(`.replace`, `.insert`, `.get_or_insert`, `.get_or_insert_with`, `.as_mut`,
+`.as_deref_mut`), and through a mutable borrow (`&mut c.body_prefix`, as
+`mem::replace` takes).
+
+A typed use is one raw entry, its constructor: `{ __html: trustedHtml(md) }`
+lists `trustedHtml`, and `let shell = RawHtml::trusted(..)` with
+`body_prefix: Some(&shell)` lists `RawHtml::trusted`.
+
+### How it reads, and what it misses
+
+TypeScript and JavaScript are parsed by esbuild, as the build parses them: a
+file that does not parse fails the run (`BUILD-814`) rather than pass unseen
+(a `.js` file is also tried as JSX and as TypeScript). The lint reads
+esbuild's output, where types are gone, JSX is `h()` calls and comments are
+dropped, so a name in a comment, a type, JSX text or a string is never read
+as a use; positions are mapped back through esbuild's source map. Rust is a
+token scan, not a parse: it knows Rust's lexical grammar (nested comments, raw
+strings, byte and C strings, char literals against lifetimes, raw
+identifiers) and pairs brackets, so a struct literal's fields, a struct's
+declared fields, a `use` tree and a pattern are told apart. HTML is read in
+one pass, tag by tag: a comment starts only in text, never inside a quoted
+value; an inline script is parsed as JavaScript (one that does not parse is a
+`BUILD-814`, and the rest of the file is still read); a script of another
+type (`text/x-template`, `application/json`) is read as markup, as a string
+literal is. A string literal's escapes are decoded before its markup is
+read.
+
+What it cannot see, and review must:
+
+- A sink reached through core's module inside a callback
+  (`import('@getforma/core').then((m) => m.template(s))`, or
+  `.then(({ template }) => …)`). `template`, `templateMany`, `reconcile` and
+  `setHTMLUnsafe` are followed from core's own module names and `FormaRuntime`:
+  through named, namespace and default imports, `require` and `await import`,
+  destructuring and aliases of the namespace (`const { template } = F`,
+  `const G = F`), and bracket access (`F['template']`). `trustedHtml` is
+  matched by name wherever it comes from.
+- Provenance across files or through a function: a sink passes only when its
+  argument is a `trustedHtml(…)` call or a `const` bound to one in scope (a
+  parameter, `let`, `var` or any nearer binding of the same name shadows it,
+  and only a `const` is trusted), and `body_prefix` only when the last binding
+  of its name in scope makes or declares a `RawHtml` (a shadowing `let`, a
+  parameter or a closure or pattern binding in between undoes it), or for
+  `self.x` that the `impl`'s own struct declares `RawHtml`. Everything else is
+  reported, so the lint errs toward an entry on the list.
+- A name built at run time: the registry key from variables
+  (`` `${pkg}#trusted-types` ``) or found with `Object.getOwnPropertySymbols`,
+  and an attribute name such as `` `data-bind:${attr}` ``. A key or name
+  written whole, or as a sum of literals esbuild folds
+  (`'@getforma/core' + '#trusted-types'`), is found.
+- A Rust name assembled by a macro (`paste!`), and `body_prefix` carried in by
+  struct update (`PageConfig { ..base }`).
+- Props built from data at run time (`JSON.parse('{"dangerouslySetInnerHTML": …}')`,
+  a key assembled from variables): the lint reads the names written in the
+  source.
+- `h()` given a tag only known at run time (`h(tag, …)`).
+- The browser's own sinks (`innerHTML`, `insertAdjacentHTML`, `document.write`,
+  `Element.setHTMLUnsafe`, `document.createElement('script')`): not Forma's
+  exits, and what Trusted Types refuses in the browser (DR-20).
+
 ## When Do You Need This?
 
 | Scenario | Need @getforma/build? |

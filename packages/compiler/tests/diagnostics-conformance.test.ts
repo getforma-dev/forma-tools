@@ -14,10 +14,11 @@
  * whose construct also brings a note (a BUILD-504 declaration) marks it too,
  * so "reports exactly its markers" holds for both halves.
  *
- * Three codes cannot be written as a page: BUILD-606 (the compiler failing, or
- * its module not being written), BUILD-801 (the build without a compiler) and
- * BUILD-802 (a build option). Each has its own test, here or in the build
- * package.
+ * Some codes cannot be written as a page: BUILD-606 (the compiler failing, or
+ * its module not being written), BUILD-801 to BUILD-804 (the build's own),
+ * BUILD-810 to BUILD-814 (the raw-entry lint, forma-raw-lint, whose corpus is
+ * packages/build/tests/fixtures/raw-lint) and BUILD-901. Each has its own
+ * test, here or in the build package.
  *
  * The catalogue, the fixtures and `docs/DIAGNOSTICS.md` are checked against
  * each other, so a code cannot be added to one and not the others.
@@ -38,7 +39,10 @@ const CORPUS = resolve(__dirname, 'fixtures/conformance');
 const CATALOGUE_DOC = resolve(__dirname, '../../../docs/DIAGNOSTICS.md');
 
 /** Codes with no page that can trigger them; each is tested on its own. */
-const NOT_A_PAGE = new Set(['BUILD-606', 'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-901']);
+const NOT_A_PAGE = new Set([
+  'BUILD-606', 'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804',
+  'BUILD-810', 'BUILD-811', 'BUILD-812', 'BUILD-813', 'BUILD-814', 'BUILD-901',
+]);
 
 interface Marker { code: string; file: string; line: number }
 
@@ -128,9 +132,11 @@ describe('the code catalogue', () => {
 
   it('has exactly these notes, the codes strict mode never fails on: BUILD-504 and the deprecations', () => {
     // A construct DR-1 admits, and the deprecated paths that keep working in
-    // A2 (a build that still sets `wasm` must pass in strict mode).
+    // A2 (a build that still sets `wasm` must pass in strict mode); and the
+    // raw-entry lint's BUILD-813, an allowlist entry listing nothing, on which
+    // the lint's run does not fail.
     expect(DIAGNOSTIC_CATALOGUE.filter((e) => !e.strict).map((e) => e.code))
-      .toEqual(['BUILD-504', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-901']);
+      .toEqual(['BUILD-504', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-813', 'BUILD-901']);
   });
 
   it('gives every code a why and a fix', () => {
@@ -161,7 +167,10 @@ describe('the code catalogue', () => {
         for (const m of readFileSync(join(dir, name), 'utf8').matchAll(/\b(BUILD-\d{3})\b/g)) used.add(m[1]!);
       }
     }
-    expect([...used]).toEqual(expect.arrayContaining(['BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-901']));
+    expect([...used]).toEqual(expect.arrayContaining([
+      'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804',
+      'BUILD-810', 'BUILD-811', 'BUILD-812', 'BUILD-813', 'BUILD-814', 'BUILD-901',
+    ]));
     for (const code of used) expect(catalogued.has(code), code).toBe(true);
     // Every walker report names a code: no warnDegraded call without one.
     const walker = readFileSync(join(srcDir, 'ir-walk.ts'), 'utf8');

@@ -1,0 +1,6 @@
+<!doctype html>
+<!-- The review's h06 and h08 (FORMA-126 review, should-fix 6). -->
+<div title="<!--" data-bind:srcdoc="doc">--></div> <!-- expect: data-bind:srcdoc -->
+<script type="text/x-template"><iframe data-bind:srcdoc="doc"></iframe></script> <!-- expect: data-bind:srcdoc -->
+<script type="application/json">{"frame": "<iframe data-bind:srcdoc='doc'></iframe>"}</script> <!-- expect: data-bind:srcdoc -->
+<div title='a "quoted" <!-- value' data-bind:srcdoc="doc"></div> <!-- expect: data-bind:srcdoc -->

@@ -1,0 +1,9 @@
+<!doctype html>
+<html>
+  <body>
+    <ul data-list="{rows}">
+      <li><iframe sandbox srcdoc="{item.doc}" title="{item.title}"></iframe></li> <!-- expect: list-row-srcdoc -->
+      <li><iframe sandbox srcdoc='<p>{item.body}</p>'></iframe></li> <!-- expect: list-row-srcdoc -->
+    </ul>
+  </body>
+</html>

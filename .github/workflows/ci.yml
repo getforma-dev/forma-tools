@@ -66,6 +66,13 @@ jobs:
       - run: npm run build -w packages/compiler
       - run: npm test --workspaces
       - run: npm run build --workspaces
+      # SR8 through the package as an application installs it (FORMA-126):
+      # the packed forma-raw-lint bin fails a seeded body_prefix, passes it
+      # listed, and fails it past its end date; on Windows through npm's .cmd
+      # shim. esbuild is installed at the version package-lock.json records
+      # (FORMA-010). MEASURED locally: 1.6s with a warm npm cache (the pack, an
+      # install of the tarball and esbuild, four runs).
+      - run: node scripts/test-raw-lint-bin.mjs
 
   # Cross-implementation FMIR contract: the binary this compiler emits has to
   # be readable — and render the same HTML — for the REAL Rust consumer.
