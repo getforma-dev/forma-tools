@@ -84,9 +84,9 @@ export const RAW_LINT_CATALOGUE: readonly RawLintCode[] = Object.freeze([
   },
   {
     code: 'BUILD-813',
-    title: 'Allowlist entry that lists nothing (forma-raw-lint; note)',
-    why: 'No raw entry matches it, so the inventory overstates: the exit was removed, or moved to another line or symbol. A note: the run does not fail on it.',
-    fix: 'Remove the entry, or point its line or symbol at where the raw entry now is.',
+    title: 'Allowlist entry that lists fewer uses than it says (forma-raw-lint; note)',
+    why: 'It matches fewer raw entries than its count, or none, so the inventory overstates and leaves room for unreviewed uses: one was removed, or moved to another line or symbol. A note: the run does not fail on it.',
+    fix: 'Lower its count to the uses it lists, remove it if it lists none, or point its line or symbol at where the raw entry now is.',
     severity: 'warning',
   },
   {
@@ -465,8 +465,10 @@ export function rawLint(options: RawLintOptions): RawLintReport {
     if (expired(e)) {
       const listing = matches.length === 0 ? 'and lists nothing' : `listing ${matches.length} ${e.exit} use${matches.length === 1 ? '' : 's'}`;
       diagnostics.push(diagnostic('BUILD-811', { ...where, message: `the allowlist entry for ${e.exit} in ${e.path} (${e.line !== undefined ? `line ${e.line}` : `symbol ${e.symbol}`}, owner ${e.owner}) ended on ${e.until}, ${listing}` }));
-    } else if (matches.length === 0) {
-      diagnostics.push(diagnostic('BUILD-813', { ...where, message: `the allowlist entry for ${e.exit} in ${e.path} (${e.line !== undefined ? `line ${e.line}` : `symbol ${e.symbol}`}) lists nothing` }));
+    } else if (matches.length < e.count) {
+      // Slack in a count admits new uses unreviewed (FORMA-126 review, should-fix 8).
+      const lists = matches.length === 0 ? 'lists nothing' : `lists ${matches.length} of its count ${e.count}`;
+      diagnostics.push(diagnostic('BUILD-813', { ...where, message: `the allowlist entry for ${e.exit} in ${e.path} (${e.line !== undefined ? `line ${e.line}` : `symbol ${e.symbol}`}) ${lists}` }));
     }
   }
 
@@ -492,7 +494,7 @@ export function formatRawLintReport(report: RawLintReport): string {
     `forma-raw-lint: ${plural(report.rawEntries.length, 'raw entry', 'raw entries')} in ${plural(report.files, 'file', 'files')}: ` +
     `${listed} listed, ${count('BUILD-810')} not on the allowlist; ` +
     `${plural(count('BUILD-811'), 'allowlist entry', 'allowlist entries')} past the end date; ` +
-    `${plural(count('BUILD-813'), 'allowlist entry', 'allowlist entries')} listing nothing` +
+    `${plural(count('BUILD-813'), 'allowlist entry', 'allowlist entries')} listing fewer uses than they say` +
     (count('BUILD-812') ? `; ${plural(count('BUILD-812'), 'allowlist problem', 'allowlist problems')}` : '') +
     (count('BUILD-814') ? `; ${plural(count('BUILD-814'), 'file', 'files')} not read` : '') +
     (report.exitCode === 0 ? '. Pass.' : '. Fail.'),

@@ -362,12 +362,13 @@ or one that uses `@getforma/core` alone) runs it with
 **Exit codes.** 0, it passes; 1, a raw entry not on the allowlist
 (`BUILD-810`), an entry past its end date (`BUILD-811`) or a source file it
 cannot parse (`BUILD-814`); 2, a usage error or an allowlist it cannot use
-(`BUILD-812`). An entry that lists nothing (`BUILD-813`) is a note. The codes
+(`BUILD-812`). An entry that lists fewer uses than its count, or none
+(`BUILD-813`), is a note. The codes
 are in the build diagnostics catalogue, [`docs/DIAGNOSTICS.md`](https://github.com/getforma-dev/forma-tools/blob/main/docs/DIAGNOSTICS.md).
 
 ```text
 BUILD-810 error body_prefix in src/server/mod.rs:772:9 (in index_handler): body_prefix: body_prefix set to a value not traced to RawHtml::trusted (a string still works in 0.2.x); not on the allowlist
-forma-raw-lint: 6 raw entries in 123 files: 5 listed, 1 not on the allowlist; 0 allowlist entries past the end date; 0 allowlist entries listing nothing. Fail.
+forma-raw-lint: 6 raw entries in 123 files: 5 listed, 1 not on the allowlist; 0 allowlist entries past the end date; 0 allowlist entries listing fewer uses than they say. Fail.
 ```
 
 ### The allowlist
@@ -412,7 +413,8 @@ Each entry has:
 - `reason`: why it is raw, and where it is going.
 - `count` (optional, default 1): how many uses of that exit the entry lists.
   A second use in the same function is not on the allowlist until the count
-  says so.
+  says so, and an entry that lists fewer uses than its count is a `BUILD-813`
+  note, so a count never leaves room for an unreviewed use.
 
 An unknown field, a missing one, an exit the lint does not know or a date
 that is not a real day stops the run with `BUILD-812`, naming the entry and

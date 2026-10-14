@@ -803,11 +803,11 @@ Printed once per entry (`packages/build/tests/raw-lint.test.ts` > "SR8: a seeded
 
 Printed once per problem (`packages/build/tests/raw-lint.test.ts` > "BUILD-812: an allowlist the lint cannot use stops the run with exit code 2, naming the entry and the field").
 
-### BUILD-813 Allowlist entry that lists nothing (forma-raw-lint; note)
+### BUILD-813 Allowlist entry that lists fewer uses than it says (forma-raw-lint; note)
 
-**Why.** No raw entry matches it, so the inventory overstates: the exit was removed, or moved to another line or symbol. A note: the run does not fail on it.
+**Why.** It matches fewer raw entries than its count, or none, so the inventory overstates and leaves room for unreviewed uses: one was removed, or moved to another line or symbol. A note: the run does not fail on it.
 
-**Fix.** Remove the entry, or point its line or symbol at where the raw entry now is.
+**Fix.** Lower its count to the uses it lists, remove it if it lists none, or point its line or symbol at where the raw entry now is.
 
 **In the lint.** A note: never fails the run.
 

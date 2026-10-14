@@ -308,7 +308,21 @@ describe('the allowlist', () => {
     });
     expect(report.diagnostics.map((d) => [d.code, d.severity, d.exit])).toEqual([['BUILD-813', 'warning', 'body_prefix']]);
     expect(report.diagnostics[0]!.entry).toMatchObject({ index: 1, symbol: 'page' });
+    expect(report.diagnostics[0]!.message).toContain('lists nothing');
     expect(report.exitCode).toBe(0);
+  });
+
+  it('BUILD-813: an entry that lists fewer uses than its count is a note, so counts stay tight', () => {
+    // The review's should-fix 8: count 1000000 passed quietly.
+    app();
+    for (const count of [3, 1000000]) {
+      const report = rawLint({ paths: ['src'], cwd: tmp, today: TODAY, allowlist: writeAllowlist([{ ...base, symbol: 'page', count }]) });
+      expect(report.diagnostics.map((d) => [d.code, d.severity])).toEqual([['BUILD-813', 'warning']]);
+      expect(report.diagnostics[0]!.message).toContain(`lists 2 of its count ${count}`);
+      expect(report.exitCode).toBe(0);
+    }
+    const exact = rawLint({ paths: ['src'], cwd: tmp, today: TODAY, allowlist: writeAllowlist([{ ...base, symbol: 'page', count: 2 }]) });
+    expect(exact.diagnostics).toEqual([]);
   });
 
   it('BUILD-811: an entry past its end date fails even when it lists nothing', () => {
@@ -508,7 +522,7 @@ describe('the command', () => {
     writeFileSync(join(tmp, 'forma-raw-allowlist.json'), JSON.stringify({ version: 1, entries: [{ path: 'src/a.ts', line: 2, exit: 'trustedHtml', owner: 'web', until: LATER, reason: 'r' }] }));
     const pass = cli(['--today', TODAY, 'src']);
     expect(pass.code).toBe(0);
-    expect(pass.out).toBe('forma-raw-lint: 1 raw entry in 2 files: 1 listed, 0 not on the allowlist; 0 allowlist entries past the end date; 0 allowlist entries listing nothing. Pass.');
+    expect(pass.out).toBe('forma-raw-lint: 1 raw entry in 2 files: 1 listed, 0 not on the allowlist; 0 allowlist entries past the end date; 0 allowlist entries listing fewer uses than they say. Pass.');
 
     expect(cli(['--allowlist', 'other.json', 'src']).code).toBe(2);
     expect(cli([]).code).toBe(2);
