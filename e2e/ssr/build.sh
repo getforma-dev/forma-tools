@@ -50,6 +50,12 @@ node "$SCRIPT_DIR/build-cases.mjs"
 
 # render/Cargo.toml depends on forma's crates through this link.
 ln -sfn "$FORMA_DIR" "$SCRIPT_DIR/render/forma"
+# Cargo fingerprints a path dependency by its files' mtimes, not by where the
+# link points: after re-pointing it at an OLDER checkout, cargo would reuse the
+# previous walker and the pages would be rendered by the wrong forma. Rebuild
+# forma's two crates every time (a few seconds) so the walker is FORMA_DIR's.
+cargo clean --quiet --manifest-path "$SCRIPT_DIR/render/Cargo.toml" \
+  -p forma-ir -p forma-server -p forma-e2e-render
 cargo run --quiet --manifest-path "$SCRIPT_DIR/render/Cargo.toml" -- \
   "$SCRIPT_DIR/cases" "$SCRIPT_DIR/out/build" "$SCRIPT_DIR/out/site"
 
