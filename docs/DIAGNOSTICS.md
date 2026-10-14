@@ -812,7 +812,8 @@ Printed naming each core, its version and the entries that import it, as `@getfo
 `forma-raw-lint`, the build package's command for an application's CI
 (FORMA-126; v2's SR8, M8, DR-19, L-37), reports these. It finds every use of
 INV1's and INV2's exits (the raw-HTML constructors and the string forms the
-A2 bridge still accepts, the typed raw homes, Trusted Types' per-route
+A2 bridge still accepts, `reconcile()`, `mountMarkup()` and a mount handle's
+`update()` among them, the typed raw homes, Trusted Types' per-route
 relaxation) and fails on any that `forma-raw-allowlist.json` does not list
 with an owner and an end date, and on any entry past its end date. Each line
 names the exit (`trustedHtml`, `body_prefix`, …), the file, line and column,
