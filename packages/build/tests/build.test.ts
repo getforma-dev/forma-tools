@@ -508,6 +508,30 @@ describe('@getforma/build — functional', () => {
     expect(existsSync(outDir)).toBe(false);
   }, 15_000);
 
+  it('rejects an unknown serviceWorker value, naming it', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+
+    // A JavaScript config with a near miss used to get the precache worker
+    // silently.
+    const error = await rejection({ ...config, serviceWorker: 'ondemand' });
+    expect(error.message).toContain(
+      "serviceWorker is 'ondemand': use 'precache' (the default) or 'on-demand'",
+    );
+    expect(existsSync(outDir)).toBe(false);
+
+    // Two-sided: both documented values still build.
+    for (const serviceWorker of ['precache', 'on-demand'] as const) {
+      await build({ ...config, serviceWorker });
+      expect(existsSync(join(outDir, 'sw.js'))).toBe(true);
+    }
+  }, 15_000);
+
   // ---- Test 12: WASM build through a .cmd-shimmed tool -------------------
   it('runs a .cmd-shimmed wasm-pack (the Windows npm install shape)', async () => {
     const entryFile = join(srcDir, 'app.ts');

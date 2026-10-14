@@ -71,12 +71,13 @@ CacheStorage denial and quota errors do not block successful network responses.
 The worker is still registered by the application; generation does not register
 it automatically. Unhashed fonts use the browser HTTP cache. The default remains
 `serviceWorker: 'precache'`, and watch mode always uses the network-only worker.
+Any other `serviceWorker` value is a config error.
 
 ## What It Does
 
 | Step | What happens |
 |------|-------------|
-| **Validate** | Rejects two entries sharing an `outfile`, an `outfile` that is a path, a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir` |
+| **Validate** | Rejects an unknown `serviceWorker` value, two entries sharing an `outfile`, an `outfile` that is a path, a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir` |
 | **Bundle** | esbuild bundles each entry point with JSX transform (`jsxFactory: "h"`) |
 | **CSS** | Runs Tailwind CLI or concatenates CSS files |
 | **Hash** | SHA-256 content hash appended to filenames (`app.a1b2c3d4.js`) |
@@ -179,8 +180,14 @@ The Rust server (`forma-server`) reads this manifest to serve assets with correc
 
 Watch builds emit a network-only worker for stable `/_assets/` URLs. It bypasses
 both CacheStorage and the browser's HTTP cache, immediately activates, and
-removes old `forma-*` caches without touching other applications' caches.
-Production builds continue using cache-first content-hashed assets.
+deletes every cache named `forma-*`; caches named otherwise are left alone.
+Production builds keep content-hashed assets cache-first in the worker's own
+cache. If CacheStorage fails they answer from the network, and a failed cache
+write (a quota error, say) never fails the response.
+
+Every worker mode deletes all `forma-*` caches except its own. Forma
+applications that share an origin share that prefix, so each deletes the
+other's caches; per-application cache names are not implemented.
 
 When upgrading a running development app from the old cache-first worker,
 rebuild the frontend, restart any server that embeds build output, then reload

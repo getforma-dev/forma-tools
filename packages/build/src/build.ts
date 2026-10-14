@@ -281,9 +281,11 @@ function compressAssets(distDir: string): number {
 
 /**
  * Reject configurations whose output cannot be correct, BEFORE anything is
- * written. The first three checks close a silent failure mode; the fourth
+ * written. The first four checks close a silent failure mode; the fifth
  * turns a crash into a message:
  *
+ *  - An unknown `serviceWorker` value (a near miss such as 'ondemand' in a
+ *    JavaScript config) silently produced the precache worker.
  *  - Two entries sharing an `outfile` write one file, and the route serves
  *    whichever build finished last.
  *  - An `outfile` containing a path separator lands esbuild's output in a
@@ -296,6 +298,7 @@ function compressAssets(distDir: string): number {
  *    checked) threw `TypeError: mapping.css is not iterable`, naming neither
  *    the route nor the key; a string there was read letter by letter.
  *
+ * Verified by: packages/build/tests/build.test.ts > "rejects an unknown serviceWorker value, naming it"
  * Verified by: packages/build/tests/build.test.ts > "rejects two entryPoints that share an outfile"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route that names an asset no entry produces"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route without css, naming the route"
@@ -304,6 +307,13 @@ function compressAssets(distDir: string): number {
 function validateConfig(config: BuildConfig): void {
   const problems: string[] = [];
   const entryNames = new Set<string>();
+
+  const serviceWorker: unknown = config.serviceWorker;
+  if (serviceWorker !== undefined && serviceWorker !== 'precache' && serviceWorker !== 'on-demand') {
+    problems.push(
+      `serviceWorker is '${String(serviceWorker)}': use 'precache' (the default) or 'on-demand'`,
+    );
+  }
 
   for (const entry of config.entryPoints) {
     if (entryNames.has(entry.outfile)) problems.push(`entryPoints: duplicate outfile '${entry.outfile}'`);
