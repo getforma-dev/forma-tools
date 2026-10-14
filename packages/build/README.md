@@ -86,6 +86,7 @@ Any other `serviceWorker` value is a config error.
 | **SSR** | (Optional) Emits one `<page>.ir` FMIR binary per entry for Rust server-side rendering |
 | **WASM** | (Optional) Runs `wasm-pack build` for the Rust IR walker |
 | **Budget** | Warns if route brotli size exceeds threshold (default 200KB) |
+| **Swap in** | A production build writes all of the above into a staging directory beside `outputDir` (`.<name>.forma-staging-…`) and swaps it in only when every step has succeeded: a build that fails part way leaves `outputDir` exactly as the last good build left it, so the application never embeds half a build. Watch mode writes in place and replaces `manifest.json` and `sw.js` by rename, so a server reading them mid-rebuild never sees half a file |
 
 ## Configuration
 

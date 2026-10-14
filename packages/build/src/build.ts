@@ -26,6 +26,7 @@ import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { serviceWorkerSource } from './service-worker.js';
 import { splitGraph, type SplitGraph } from './split-graph.js';
+import { createStagingDirectory, replaceDirectory, writeFileAtomic } from './output.js';
 
 import type {
   BuildConfig,
@@ -512,7 +513,7 @@ function generateServiceWorker(
     .sort().map(file => `/_assets/${file}`) : undefined;
   const swContent = serviceWorkerSource(swCacheName, precacheUrls, config.watch === true, immutableUrls);
 
-  writeFileSync(join(distDir, 'sw.js'), swContent);
+  writeFileAtomic(join(distDir, 'sw.js'), swContent);
   console.log(`   SW generated: dist/sw.js (${config.watch ? 'network-only development' : `cache: ${swCacheName}`})`);
 }
 
@@ -527,16 +528,44 @@ function generateServiceWorker(
  * (with optional SSR IR emission), island registry generation, WASM build,
  * content hashing, compression, manifest generation, service worker
  * generation, and budget warnings.
+ *
+ * A production build writes into a staging directory beside `outputDir` and
+ * swaps it in only when every step has succeeded, so a build that fails part
+ * way leaves the previous output exactly as it was, and nothing beside it
+ * (L-21). The application embeds `outputDir` in its binary, and used to embed
+ * half a build after a failure. Watch mode writes in place, as before.
+ * Verified by: packages/build/tests/build.test.ts > "leaves the previous build byte-identical when a build fails after writing files"
+ * Verified by: packages/build/tests/build.test.ts > "a failed first build leaves no output directory and nothing beside it"
  */
 export async function build(config: BuildConfig): Promise<BuildResult> {
-  // Validate before the clean: a config error must not destroy the previous
-  // build's output on its way to failing.
+  // Validate before anything is written: a config error must not touch the
+  // previous build's output on its way to failing.
   validateConfig(config);
+  if (config.watch) return buildInto(config, config.outputDir);
 
+  const staging = createStagingDirectory(config.outputDir);
+  let result: BuildResult;
+  try {
+    result = await buildInto({ ...config, outputDir: staging }, config.outputDir);
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw err;
+  }
+  // Throws with the previous output restored if the swap itself fails.
+  replaceDirectory(staging, config.outputDir);
+  return result;
+}
+
+/**
+ * The pipeline, writing into `config.outputDir`: the staging directory for a
+ * production build, the output itself in watch mode. `shownDir` is the
+ * directory named in log lines, the one the application reads.
+ */
+async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildResult> {
   const distDir = config.outputDir;
   const createdDir = !existsSync(distDir);
 
-  // ── Clean output directory ────────────────────────────────────────
+  // ── Clean output directory (watch mode; a staging directory is new) ──
   rmSync(distDir, { recursive: true, force: true });
   mkdirSync(distDir, { recursive: true });
 
@@ -624,7 +653,9 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
                 previousFiles = graph.files;
                 const { manifest } = generateManifest(config, graph.assets, false, graph.staticDependencies);
                 manifest.build_hash = 'dev';
-                writeFileSync(join(distDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+                // Replaced by rename: the application's server, and the
+                // watched code-splitting test, read this file mid-rebuild.
+                writeFileAtomic(join(distDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
               });
             },
           }],
@@ -646,11 +677,11 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
       const { manifest, warnings } = generateManifest(config, graph?.assets ?? {}, false, graph?.staticDependencies);
       manifest.build_hash = 'dev';
 
-      writeFileSync(
+      writeFileAtomic(
         join(distDir, 'manifest.json'),
         JSON.stringify(manifest, null, 2) + '\n',
       );
-      console.log(`\nDev manifest written: ${distDir}/manifest.json`);
+      console.log(`\nDev manifest written: ${shownDir}/manifest.json`);
 
       // Generate a dev service worker so /sw.js doesn't 404
       generateServiceWorker(config, {}, 'dev', false);
@@ -714,7 +745,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
       JSON.stringify(manifest, null, 2) + '\n',
     );
     console.log(
-      `\nManifest written: ${distDir}/manifest.json (build_hash: ${manifest.build_hash.slice(0, 12)}...)`,
+      `\nManifest written: ${shownDir}/manifest.json (build_hash: ${manifest.build_hash.slice(0, 12)}...)`,
     );
 
     // ── Service worker generation ─────────────────────────────────────
@@ -726,7 +757,8 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
       warnings,
     };
   } catch (err) {
-    // Clean up output directory if we created it, to prevent stale partial output
+    // Watch mode: remove the output directory if this build created it. A
+    // production build's caller removes the staging directory.
     if (createdDir && existsSync(distDir)) {
       rmSync(distDir, { recursive: true, force: true });
     }
