@@ -22,6 +22,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job declares its token (FORMA-010): each one only reads this
+# repository and checks out the public getforma-dev ones. The cache and
+# artifact steps authenticate with the runner's own service token, which
+# `permissions:` does not govern.
 jobs:
   # The matrix includes Windows because this toolchain's first field-reported
   # bug was Windows-only and structural: the tailwind step spawned `npx` with
@@ -32,6 +36,8 @@ jobs:
   # the primary consumer develops on Windows. This matrix is NOT the cost
   # problem and is not trimmed.
   test:
+    permissions:
+      contents: read
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -42,17 +48,21 @@ jobs:
           - os: windows-latest
             node-version: 22
     # MEASURED locally: `npm test --workspaces` = 3s wall, 453 tests, 14 files.
-    # The job is dominated by `npm install` (~1m ubuntu, ~2-3m windows) and the
-    # two builds (~45s). Realistic worst case ~5m on the Windows leg; 15 is 3x
-    # that. Nothing here can hang: no server, no prompt, no unbounded wait.
+    # The job is dominated by the dependency install (~1m ubuntu, ~2-3m windows,
+    # measured with `npm install`) and the two builds (~45s). Realistic worst
+    # case ~5m on the Windows leg; 15 is 3x that. Nothing here can hang: no
+    # server, no prompt, no unbounded wait.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      - run: npm install
+      # `npm ci` installs exactly what package-lock.json records and fails when
+      # it disagrees with package.json; `npm install` may resolve anew and
+      # rewrite it (FORMA-010, DR-32).
+      - run: npm ci
       - run: npm run build -w packages/compiler
       - run: npm test --workspaces
       - run: npm run build --workspaces
@@ -86,6 +96,8 @@ jobs:
   # before the expensive tier asks for any, taking this workflow's peak
   # concurrent demand from 4 jobs to 3.
   fmir-contract:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: test
     # MEASURED locally: `cargo test -p forma-ir` warm = 10s for the whole
@@ -94,25 +106,25 @@ jobs:
     # case ~6m fully cold; 20 is >3x.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
       - name: Check out the Rust consumer
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: getforma-dev/forma
           path: forma-checkout
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: forma-checkout
           key: fmir-contract
 
-      - run: npm install
+      - run: npm ci
 
       # Emit straight over the consumer's committed fixtures, so `git diff`
       # below is a byte-exact answer to "is what this compiler emits still what
@@ -148,6 +160,8 @@ jobs:
           exit 1
 
   e2e:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     needs: test  # Only run E2E if unit tests pass
     # MEASURED locally: `npm run test:e2e:ci` = 8s wall, 6.6s test time, 15/15
@@ -163,8 +177,8 @@ jobs:
     # 1m52s, Playwright 44 tests included. Realistic worst case ~6m; 20 is >3x.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -172,7 +186,7 @@ jobs:
       # Clone and build FormaJS for E2E fixtures.
       # getforma-dev/formajs is PUBLIC (verified unauthenticated), so no PAT.
       - name: Clone FormaJS
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: getforma-dev/formajs
           path: formajs-checkout
@@ -190,7 +204,7 @@ jobs:
         run: FORMAJS_DIR="$PWD/formajs-checkout" bash e2e/sync-fixtures.sh
 
       # Install forma-tools deps and run E2E
-      - run: npm install
+      - run: npm ci
 
       # The SSR lane, e2e/ssr/ (FORMA-001): each case is compiled by THIS
       # repo's compiler and build package, rendered by forma's real walker and
@@ -199,16 +213,16 @@ jobs:
       # default branch, so a merge there that breaks the chain turns this job
       # red. getforma-dev/forma is PUBLIC, so no PAT.
       - name: Check out forma (the Rust walker)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: getforma-dev/forma
           path: forma-checkout
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       # The renderer reaches forma's crates through this link (build.sh makes
       # it too); it must exist before rust-cache reads the crate's metadata.
       - name: Link the forma checkout for the renderer
         run: ln -sfn "$PWD/forma-checkout" e2e/ssr/render/forma
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: e2e/ssr/render
           key: e2e-ssr
@@ -221,7 +235,7 @@ jobs:
       - name: Resolve Playwright version
         id: pw
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
@@ -233,7 +247,7 @@ jobs:
       - name: Run E2E tests
         run: npm run test:e2e:ci
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()
         with:
           name: playwright-report
