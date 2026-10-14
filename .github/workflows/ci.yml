@@ -156,7 +156,13 @@ jobs:
     # Playwright's webServer has no explicit timeout so it inherits the 60s
     # default — `npx serve` failing to bind fails the run at 60s, it cannot
     # hang. Realistic worst case ~5m; 15 is 3x.
-    timeout-minutes: 15
+    #
+    # The SSR lane (FORMA-001) adds, MEASURED locally: `e2e/ssr/build.sh` = 13s
+    # with a cold Rust target (debug build of the renderer against forma's
+    # crates), and the whole Playwright run = 15s wall for 43 tests. A cold
+    # Rust build on a runner is ~2m without the cache. Realistic worst case
+    # ~8m; 25 is 3x.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -186,6 +192,29 @@ jobs:
 
       # Install forma-tools deps and run E2E
       - run: npm install
+
+      # The SSR lane, e2e/ssr/ (FORMA-001): each case is compiled by THIS
+      # repo's compiler and build package, rendered by forma's real walker and
+      # page template (`forma_server::render_page`), and adopted in Chromium by
+      # the FormaJS checkout above. Both other repos are checked out at their
+      # default branch, so a merge there that breaks the chain turns this job
+      # red. getforma-dev/forma is PUBLIC, so no PAT.
+      - name: Check out forma (the Rust walker)
+        uses: actions/checkout@v4
+        with:
+          repository: getforma-dev/forma
+          path: forma-checkout
+      - uses: dtolnay/rust-toolchain@stable
+      # The renderer reaches forma's crates through this link (build.sh makes
+      # it too); it must exist before rust-cache reads the crate's metadata.
+      - name: Link the forma checkout for the renderer
+        run: ln -sfn "$PWD/forma-checkout" e2e/ssr/render/forma
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: e2e/ssr/render
+          key: e2e-ssr
+      - name: Build the SSR site (compiler -> forma walker -> FormaJS)
+        run: FORMAJS_DIR="$PWD/formajs-checkout" FORMA_DIR="$PWD/forma-checkout" bash e2e/ssr/build.sh
 
       # Cache the browser binaries (~130 MB) keyed on the resolved Playwright
       # version. `--with-deps` still runs so the OS packages are present; only

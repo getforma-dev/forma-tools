@@ -1,0 +1,27 @@
+# The Rust half of the SSR e2e lane: renders each built case with forma's REAL
+# walker and page template (`forma_server::render_page`), exactly as a Forma
+# handler does, and writes the page and its response headers to disk for the
+# static server in ../serve.mjs.
+#
+# `forma/` is a symlink to a checkout of getforma-dev/forma that ../build.sh
+# creates (FORMA_DIR, default ../../forma from the repo root; in CI the
+# workflow's `forma-checkout`). Path dependencies, not crates.io: the lane
+# tests the walker this compiler ships alongside, not a release snapshot, and a
+# path dependency cannot silently fall back to the published crate.
+[package]
+name = "forma-e2e-render"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+forma-ir = { path = "forma/crates/forma-ir" }
+forma-server = { path = "forma/crates/forma-server" }
+serde_json = "1"
+
+# Standalone: never a member of any enclosing workspace. `forma/` is excluded
+# because cargo would otherwise adopt path dependencies under this directory as
+# members of this workspace, and they inherit their edition and lints from
+# forma's own workspace root.
+[workspace]
+exclude = ["forma"]
