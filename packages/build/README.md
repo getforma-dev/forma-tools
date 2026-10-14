@@ -424,7 +424,7 @@ TypeScript and JavaScript, inline scripts in HTML included:
 | Exit | What the lint finds |
 |---|---|
 | `trustedHtml` | Each call of `trustedHtml()`, under any name it is imported or destructured as (`@getforma/core`, `./runtime`, the CDN's `FormaRuntime`), and each reference to it that is not a call, or that exports it under another name. |
-| `dangerouslySetInnerHTML` | The prop with an `__html` that is not a `trustedHtml(…)` call or a variable this file binds to one (a string still works in 2.x and warns in development); by JSX, `h()`, a quoted key, shorthand or assignment. |
+| `dangerouslySetInnerHTML` | The prop with an `__html` that is not a `trustedHtml(…)` call or a `const` in scope bound to one (a string still works in 2.x and warns in development); by JSX, `h()`, a quoted key, shorthand or assignment. |
 | `setHTMLUnsafe` | Core's `setHTMLUnsafe(el, markup)` given markup not traced to `trustedHtml()`. |
 | `template` | Core's `template(markup)`, likewise. |
 | `templateMany` | Core's `templateMany(markup)`, likewise. |
@@ -446,7 +446,7 @@ Rust:
 | `RawHtml::trusted` | Each `RawHtml::trusted`, path-qualified, as `<RawHtml>::trusted`, as `Self::trusted` in an `impl` for it, or through an alias of it from any file. |
 | `RawHtml-alias` | `RawHtml` under another name: `use … RawHtml as X`, `type X = …RawHtml`, any `= RawHtml` (an associated type, a generic default). |
 | `r#html` | The raw identifier `r#html`, the name of `RawHtml`'s private field. |
-| `body_prefix` | A `body_prefix` other than `None` that is not `Some(&x)` (or `x.as_str()`, `&*x`) for an `x` this file binds to `RawHtml::trusted(..)` or declares as a `RawHtml`: a string still works in 0.2.x. |
+| `body_prefix` | A `body_prefix` other than `None` that is not `Some(&x)` (or `x.as_str()`, `&*x`) where `x`'s last binding in scope is `RawHtml::trusted(..)` or declared `RawHtml`, or `self.x` declared `RawHtml` by the `impl`'s own struct: a string still works in 0.2.x. |
 | `config_json` | `config_json` other than `None`: data's typed home. |
 | `config_script` | `config_script` other than `None`: deprecated, handler text in a nonced script, removed in 3.0.0. |
 | `into_parts_unchecked` | `PageResponse::into_parts_unchecked`. |
@@ -480,9 +480,13 @@ What it cannot see, and review must:
   from core's own module names and `FormaRuntime`; `trustedHtml` is matched by
   name wherever it comes from.
 - Provenance across files or through a function: a sink passes only when its
-  argument is a `trustedHtml(…)` call or a variable the same file binds to
-  one, and `body_prefix` only for a `RawHtml` the same file makes or declares.
-  Everything else is reported, so the lint errs toward an entry on the list.
+  argument is a `trustedHtml(…)` call or a `const` bound to one in scope (a
+  parameter, `let`, `var` or any nearer binding of the same name shadows it,
+  and only a `const` is trusted), and `body_prefix` only when the last binding
+  of its name in scope makes or declares a `RawHtml` (a shadowing `let`, a
+  parameter or a closure or pattern binding in between undoes it), or for
+  `self.x` that the `impl`'s own struct declares `RawHtml`. Everything else is
+  reported, so the lint errs toward an entry on the list.
 - The registry key built at run time (`'@getforma/core' + '#trusted-types'`)
   or found with `Object.getOwnPropertySymbols`.
 - A Rust name assembled by a macro (`paste!`), and `body_prefix` carried in by

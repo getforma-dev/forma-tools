@@ -17,9 +17,10 @@
  *   update (`PageConfig { ..base }`) from a value built elsewhere.
  * - A `RawHtml` reaching `body_prefix` through a function or another file:
  *   `body_prefix` passes only when its value is `Some(&x)` (or `x.as_str()`,
- *   `&*x`) for an `x` this file binds to `RawHtml::trusted(..)` or declares as
- *   a `RawHtml`; anything else is reported, so it errs on the side of a
- *   listed entry.
+ *   `&*x`) where `x`'s last binding in scope is `RawHtml::trusted(..)` or is
+ *   declared a `RawHtml`, or `self.x` that the impl's own struct declares a
+ *   `RawHtml`; anything else is reported, so it errs on the side of a listed
+ *   entry.
  * Aliases (`use … as`, `type … =`) are collected across every Rust file in
  * the run first, so a call through an alias defined in another file is found.
  *
@@ -220,6 +221,16 @@ const IDENT_EXITS: ReadonlyMap<string, string> = new Map([
 ]);
 const FIELD_EXITS = new Set(['body_prefix', 'config_json', 'config_script']);
 
+interface RBinding {
+  /** The token that binds the name. */
+  pos: number;
+  /** The block it is visible in (its `{` and `}`; -1 and the end for the file). */
+  open: number;
+  close: number;
+  /** It holds a RawHtml. */
+  raw: boolean;
+}
+
 /** A Rust file read once: its tokens, and the aliases of `RawHtml` it defines. */
 export class RustFile {
   readonly toks: RTok[];
@@ -294,6 +305,8 @@ interface Scope {
   close: number;
   kind: string;
   name: string | null;
+  /** The item keyword's token (`fn`, `impl`, `struct`, …), when there is one. */
+  head?: number;
   /** An `impl` block for `RawHtml` (or an alias): `Self::trusted` is `RawHtml::trusted`. */
   rawSelf: boolean;
 }
@@ -303,8 +316,16 @@ class RustScan {
   private readonly pair: number[];
   private readonly found: Found[] = [];
   private readonly rawNames: Set<string>;
-  /** Bindings this file makes a `RawHtml`: `let x = RawHtml::trusted(..)`, `x: RawHtml`. */
-  private readonly rawBindings = new Set<string>();
+  /**
+   * Every binding of each name (let, parameter, closure parameter, for and
+   * match patterns): where it is made, the block it is visible in, and
+   * whether it holds a `RawHtml` (FORMA-126 review, should-fix 1).
+   */
+  private readonly bindings = new Map<string, RBinding[]>();
+  /** For each struct, its fields declared `RawHtml`. */
+  private readonly structRawFields = new Map<string, Set<string>>();
+  /** The innermost `{` around each token, or -1. */
+  private enclosingBrace: number[] = [];
   /** For each `{`, what it opens. */
   private readonly scopes = new Map<number, Scope>();
 
@@ -316,7 +337,7 @@ class RustScan {
 
   run(): Found[] {
     this.classifyBraces();
-    this.collectRawBindings();
+    this.collectBindings();
     const stack: Scope[] = [];
     for (let i = 0; i < this.toks.length; i++) {
       while (stack.length > 0 && stack[stack.length - 1]!.close < i) stack.pop();
@@ -386,8 +407,8 @@ class RustScan {
       const t = this.toks[j]!;
       if (t.type !== 'id' || !ITEM_KEYWORDS.has(t.value)) continue;
       if (t.value === 'impl') return this.implScope(j, k, close);
-      if (t.value === 'macro_rules') return { open, close, kind: 'macro_rules', name: this.isP(j + 1, '!') && this.isId(j + 2) ? this.toks[j + 2]!.value : null, rawSelf: false };
-      return { open, close, kind: t.value, name: this.isId(j + 1) ? this.toks[j + 1]!.value : null, rawSelf: false };
+      if (t.value === 'macro_rules') return { open, close, kind: 'macro_rules', name: this.isP(j + 1, '!') && this.isId(j + 2) ? this.toks[j + 2]!.value : null, rawSelf: false, head: j };
+      return { open, close, kind: t.value, name: this.isId(j + 1) ? this.toks[j + 1]!.value : null, rawSelf: false, head: j };
     }
     // A struct-like enum variant's fields are declarations, not a literal.
     if (parent?.kind === 'enum') return { open, close, kind: 'struct', name: null, rawSelf: false };
@@ -413,26 +434,165 @@ class RustScan {
     return { open: k, close, kind: 'impl', name, rawSelf: name !== null && this.rawNames.has(name) };
   }
 
-  /** `let [mut] x [: T] = RawHtml::trusted(..)` and `x: [&['a] [mut]] [path::]RawHtml`. */
-  private collectRawBindings(): void {
-    for (let i = 0; i < this.toks.length; i++) {
-      if (this.isId(i, 'let')) {
-        let k = i + 1;
-        if (this.isId(k, 'mut')) k++;
-        if (!this.isId(k)) continue;
-        const name = this.toks[k]!.value;
-        let e = k + 1;
-        while (e < this.toks.length && !this.isP(e, '=') && !this.isP(e, ';')) e++;
-        if (this.isP(e, '=') && this.trustedCallAt(e + 1) !== -1) this.rawBindings.add(name);
+  // -- bindings -------------------------------------------------------------
+  //
+  // A name holds a RawHtml at a use only when its last binding before the
+  // use, in a block that encloses the use, is `let x = RawHtml::trusted(..)`,
+  // `let x: RawHtml = ..` or a parameter `x: &RawHtml`. Any other binding of
+  // the name in between (a shadowing `let`, a parameter, a closure parameter,
+  // a `for` or match pattern) shadows it. Bindings are over-approximated,
+  // which can only make a name untrusted.
+
+  private bindName(name: string, pos: number, blockOpen: number, raw: boolean): void {
+    const binding: RBinding = { pos, open: blockOpen, close: blockOpen === -1 ? this.toks.length : this.pair[blockOpen]!, raw };
+    const list = this.bindings.get(name);
+    if (list) list.push(binding);
+    else this.bindings.set(name, [binding]);
+  }
+
+  /** Whether `name`, used at token `u`, holds a RawHtml. */
+  private holdsRaw(name: string, u: number): boolean {
+    let best: RBinding | undefined;
+    for (const b of this.bindings.get(name) ?? []) {
+      if (b.pos < u && b.open < u && u < b.close && (!best || b.pos > best.pos)) best = b;
+    }
+    return best?.raw === true;
+  }
+
+  /** A type at `k` that is a RawHtml: `[&['a] [mut]] [path::]RawHtml`. */
+  private isRawType(k: number): boolean {
+    if (this.isP(k, '&') || this.isP(k, '&&')) k++;
+    if (this.toks[k]?.type === 'life') k++;
+    if (this.isId(k, 'mut')) k++;
+    const last = this.file.pathEnd(k);
+    return last !== -1 && this.rawNames.has(this.toks[last]!.value);
+  }
+
+  /** An identifier at `k` that a pattern binds (not a path, a variant, `mut`, `ref` or `_`). */
+  private isPatternName(k: number): boolean {
+    const t = this.toks[k];
+    if (!t || t.type !== 'id' || ['mut', 'ref', '_', 'in', 'if', 'box'].includes(t.value)) return false;
+    if (/^[A-Z]/.test(t.value) || t.value.startsWith('$')) return false;
+    return !this.isP(k + 1, '(') && !this.isP(k + 1, '{') && !this.isP(k + 1, '::') && !this.isP(k + 1, '!') && !this.isP(k - 1, '::') && !this.isP(k - 1, '.');
+  }
+
+  /** The pattern names in `[from, to)`, nested brackets included; stops at a depth-0 token in `stops`. */
+  private patternNames(from: number, to: number, stops: string[]): { names: number[]; end: number } {
+    const names: number[] = [];
+    let k = from;
+    while (k < to) {
+      const t = this.toks[k]!;
+      if (t.type === 'p' && stops.includes(t.value)) break;
+      if (this.isId(k) && stops.includes(t.value)) break;
+      if (t.type === 'p' && (t.value === '(' || t.value === '[' || t.value === '{') && this.pair[k]! > k) {
+        for (let j = k + 1; j < this.pair[k]!; j++) if (this.isPatternName(j)) names.push(j);
+        k = this.pair[k]! + 1;
+        continue;
       }
-      if (this.isId(i) && this.isP(i + 1, ':')) {
-        let k = i + 2;
-        if (this.isP(k, '&')) k++;
-        if (this.toks[k]?.type === 'life') k++;
-        if (this.isId(k, 'mut')) k++;
-        const last = this.file.pathEnd(k);
-        if (last !== -1 && this.rawNames.has(this.toks[last]!.value)) this.rawBindings.add(this.toks[i]!.value);
+      if (this.isPatternName(k)) names.push(k);
+      k++;
+    }
+    return { names, end: k };
+  }
+
+  private collectBindings(): void {
+    const n = this.toks.length;
+    this.enclosingBrace = new Array<number>(n).fill(-1);
+    const braces: number[] = [];
+    for (let i = 0; i < n; i++) {
+      while (braces.length > 0 && this.pair[braces[braces.length - 1]!]! < i) braces.pop();
+      this.enclosingBrace[i] = braces[braces.length - 1] ?? -1;
+      if (this.isP(i, '{') && this.pair[i]! > i) braces.push(i);
+    }
+    // Struct fields declared RawHtml (`self.x` holds one only in that struct's impl).
+    for (const scope of this.scopes.values()) {
+      if (scope.kind !== 'struct' || !scope.name) continue;
+      for (let k = scope.open + 1; k < scope.close; k++) {
+        if (this.toks[k]!.type === 'p' && ['(', '[', '{'].includes(this.toks[k]!.value) && this.pair[k]! > k) {
+          k = this.pair[k]!;
+          continue;
+        }
+        if (this.isId(k) && this.isP(k + 1, ':') && this.isRawType(k + 2)) {
+          const fields = this.structRawFields.get(scope.name) ?? new Set<string>();
+          fields.add(this.toks[k]!.value);
+          this.structRawFields.set(scope.name, fields);
+        }
       }
+    }
+    for (let i = 0; i < n; i++) {
+      const t = this.toks[i]!;
+      if (t.type === 'id' && t.value === 'let') {
+        const { names, end } = this.patternNames(i + 1, n, [':', '=', ';', 'else']);
+        const single = names.length === 1 && (names[0] === i + 1 || (names[0] === i + 2 && this.isId(i + 1, 'mut')));
+        let raw = false;
+        if (single) {
+          if (this.isP(end, ':') && this.isRawType(end + 1)) raw = true;
+          let e = end;
+          while (e < n && !this.isP(e, '=') && !this.isP(e, ';')) e++;
+          if (this.isP(e, '=') && this.trustedCallAt(e + 1) !== -1) raw = true;
+        }
+        for (const k of names) this.bindName(this.toks[k]!.value, k, this.enclosingBrace[i]!, single && raw);
+      } else if (t.type === 'id' && t.value === 'fn') {
+        this.bindParameters(i);
+      } else if (t.type === 'p' && t.value === '|' && !this.endsValue(i - 1)) {
+        // A closure's parameters, visible (over-approximated) in the block around it.
+        let close = i + 1;
+        while (close < n && !this.isP(close, '|')) {
+          if (this.toks[close]!.type === 'p' && ['(', '[', '{'].includes(this.toks[close]!.value) && this.pair[close]! > close) close = this.pair[close]!;
+          close++;
+        }
+        for (const k of this.patternNames(i + 1, close, []).names) this.bindName(this.toks[k]!.value, k, this.enclosingBrace[i]!, false);
+        i = close;
+      } else if (t.type === 'id' && t.value === 'for' && !this.isP(i + 1, '<')) {
+        const { names, end } = this.patternNames(i + 1, n, ['in', '{', ';']);
+        if (this.isId(end, 'in')) for (const k of names) this.bindName(this.toks[k]!.value, k, this.enclosingBrace[i]!, false);
+      } else if (t.type === 'p' && t.value === '=>') {
+        // A match arm's pattern: back to the previous arm.
+        let b = i - 1;
+        while (b >= 0) {
+          const bt = this.toks[b]!;
+          if (bt.type === 'p' && (bt.value === ')' || bt.value === ']') && this.pair[b]! >= 0 && this.pair[b]! < b) {
+            b = this.pair[b]! - 1;
+            continue;
+          }
+          if (bt.type === 'p' && (bt.value === ',' || bt.value === '{' || bt.value === '}' || bt.value === ';')) break;
+          b--;
+        }
+        for (const k of this.patternNames(b + 1, i, []).names) this.bindName(this.toks[k]!.value, k, this.enclosingBrace[i]!, false);
+      }
+    }
+  }
+
+  /** A token that ends a value: after it, `|` is an operator, not a closure. */
+  private endsValue(k: number): boolean {
+    const t = this.toks[k];
+    if (!t) return false;
+    if (t.type === 'id') return !['move', 'return', 'in', 'else', 'match', 'if', 'while', 'let'].includes(t.value);
+    if (t.type === 'num' || t.type === 'str' || t.type === 'char') return true;
+    return t.type === 'p' && (t.value === ')' || t.value === ']' || t.value === '?');
+  }
+
+  /** A function's parameters, visible in its body: `name: &RawHtml` holds one. */
+  private bindParameters(fn: number): void {
+    let k = fn + 2;
+    if (this.isP(k, '<')) k = this.file.angleEnd(k) + 1;
+    if (!this.isP(k, '(') || this.pair[k]! < k) return;
+    const close = this.pair[k]!;
+    let body = close + 1;
+    while (body < this.toks.length && !this.isP(body, '{') && !this.isP(body, ';')) body++;
+    if (!this.isP(body, '{')) return;
+    let start = k + 1;
+    while (start < close) {
+      let end = start;
+      while (end < close && !this.isP(end, ',')) {
+        if (this.toks[end]!.type === 'p' && ['(', '[', '{'].includes(this.toks[end]!.value) && this.pair[end]! > end) end = this.pair[end]!;
+        end++;
+      }
+      const { names, end: colon } = this.patternNames(start, end, [':']);
+      const single = names.length === 1 && names[0] === colon - 1;
+      const raw = single && this.isP(colon, ':') && this.isRawType(colon + 1);
+      for (const nk of names) this.bindName(this.toks[nk]!.value, nk, body, raw);
+      start = end + 1;
     }
   }
 
@@ -471,7 +631,7 @@ class RustScan {
   }
 
   /** Whether `[a, b)` is a `RawHtml` this file vouched for, wrapped in `Some(&…)` or not. */
-  private isRawValue(a: number, b: number): boolean {
+  private isRawValue(a: number, b: number, stack: Scope[]): boolean {
     if (this.isId(a, 'Some') && this.isP(a + 1, '(') && this.pair[a + 1] === b - 1) {
       a += 2;
       b -= 1;
@@ -479,8 +639,14 @@ class RustScan {
     while (a < b && (this.isP(a, '&') || this.isP(a, '*') || this.isP(a, '&&'))) a++;
     const call = this.trustedCallAt(a);
     if (call !== -1) return call === b - 1 || this.isMethodTail(call + 1, b);
-    if (this.isId(a, 'self') && this.isP(a + 1, '.')) a += 2;
-    if (!this.isId(a) || !this.rawBindings.has(this.toks[a]!.value)) return false;
+    if (this.isId(a, 'self') && this.isP(a + 1, '.') && this.isId(a + 2)) {
+      // A field declared RawHtml by this impl's own struct.
+      const impl = [...stack].reverse().find((sc) => sc.kind === 'impl');
+      const field = this.toks[a + 2]!.value;
+      if (!impl?.name || !this.structRawFields.get(impl.name)?.has(field)) return false;
+      return a + 3 === b || this.isMethodTail(a + 3, b);
+    }
+    if (!this.isId(a) || !this.holdsRaw(this.toks[a]!.value, a)) return false;
     return a + 1 === b || this.isMethodTail(a + 1, b);
   }
 
@@ -553,7 +719,7 @@ class RustScan {
     const end = this.valueEnd(start);
     if (end === start + 1 && this.isId(start, 'None')) return;
     if (name === 'body_prefix') {
-      if (!this.isRawValue(start, end)) this.report(i, stack, 'body_prefix', 'body_prefix set to a value not traced to RawHtml::trusted (a string still works in 0.2.x)');
+      if (!this.isRawValue(start, end, stack)) this.report(i, stack, 'body_prefix', 'body_prefix set to a value not traced to RawHtml::trusted (a string still works in 0.2.x)');
     } else if (name === 'config_json') {
       this.report(i, stack, 'config_json', 'config_json: data written into the page as JSON');
     } else {

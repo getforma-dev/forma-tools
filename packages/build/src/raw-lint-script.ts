@@ -21,9 +21,9 @@
  * - The registry key built at run time (`'@getforma/core' + '#trusted-types'`)
  *   or found by `Object.getOwnPropertySymbols(globalThis)`.
  * - A value's provenance across files or through a function: a raw sink is
- *   passed only when its argument is a `trustedHtml(…)` call or a variable
- *   this file binds to one; anything else is reported, so the lint errs on
- *   the side of a listed entry.
+ *   passed only when its argument is a `trustedHtml(…)` call or a `const` in
+ *   scope bound to one (lexically: a nearer binding of the name shadows it);
+ *   anything else is reported, so the lint errs on the side of a listed entry.
  * - The browser's own sinks (`innerHTML`, `insertAdjacentHTML`,
  *   `document.write`, `Element.setHTMLUnsafe`): not Forma's exits, and what
  *   Trusted Types refuses in the browser (DR-20). A `srcdoc` write is reported
@@ -363,6 +363,14 @@ const SINK_ARGUMENT: ReadonlyMap<string, number> = new Map([
   ['reconcile', 1],
 ]);
 const GLOBAL_OBJECTS = new Set(['window', 'globalThis', 'self']);
+const ASSIGNMENT_OPS = new Set(['=', '+=', '-=', '||=', '&&=', '??=']);
+
+type BindingKind = 'trustedVar' | 'trustedCallee' | 'other';
+
+interface Binding {
+  region: number;
+  kind: BindingKind;
+}
 
 function isFormaModule(spec: string): boolean {
   return FORMA_MODULES.some((m) => spec === m || spec.startsWith(m + '/'));
@@ -429,14 +437,25 @@ class ScriptScan {
   private readonly found: Found[] = [];
   /** Token indices not to read as uses: import and re-export lists, destructured requires. */
   private readonly skip = new Set<number>();
-  /** Local names bound to core's trustedHtml (beside `trustedHtml` itself). */
-  private readonly trustedCallees = new Set<string>(['trustedHtml']);
   /** Local names bound to core's other sinks, to the sink's name. */
   private readonly sinkLocals = new Map<string, string>();
   /** Local names bound to core's module as a namespace. */
   private readonly namespaces = new Set<string>(['FormaRuntime']);
-  /** Variables this file binds to a trustedHtml() call. */
-  private readonly trustedVars = new Set<string>();
+  /**
+   * Lexical regions: the file (0), and each function, method, arrow and
+   * catch clause, from its parameters to the end of its body.
+   */
+  private regions: Array<{ start: number; end: number; parent: number }> = [];
+  /** The innermost region of each token. */
+  private regionOf: number[] = [];
+  /** Every binding of each name, with its region and what it holds. */
+  private readonly bindings = new Map<string, Binding[]>();
+  /** `const` declarations whose initialiser may make them trusted. */
+  private readonly constCandidates: Array<{ binding: Binding; start: number; end: number }> = [];
+  /** Assignments (`x = …`), by name and token; each untrusts the binding it writes. */
+  private readonly assignments: Array<{ name: string; at: number }> = [];
+  /** `name@region` for each binding an assignment writes. */
+  private readonly assigned = new Set<string>();
   /** Export specifiers that rename trustedHtml, by token index, to the new name. */
   private readonly exportAliases = new Map<number, string>();
   private symbols: Array<string | null> = [];
@@ -447,8 +466,10 @@ class ScriptScan {
   }
 
   run(): Found[] {
+    this.computeRegions();
     this.collectBindings();
-    this.collectTrustedVars();
+    this.collectDeclarations();
+    this.classifyConsts();
     this.symbols = this.computeSymbols();
     for (let i = 0; i < this.toks.length; i++) this.visit(i);
     return this.found;
@@ -519,7 +540,7 @@ class ScriptScan {
     let k = i;
     if (this.isId(k) && GLOBAL_OBJECTS.has(this.toks[k]!.value) && this.isP(k + 1, '.')) k += 2;
     if (this.isId(k) && this.namespaces.has(this.toks[k]!.value) && this.isP(k + 1, '.') && this.isId(k + 2, 'trustedHtml')) return k + 3 - i;
-    if (k === i && this.isId(k) && this.trustedCallees.has(this.toks[k]!.value)) return 1;
+    if (k === i && this.isId(k) && this.isTrustedCallee(k)) return 1;
     return 0;
   }
 
@@ -529,7 +550,7 @@ class ScriptScan {
       a++;
       b--;
     }
-    if (b - a === 1 && this.isId(a) && this.trustedVars.has(this.toks[a]!.value)) return true;
+    if (b - a === 1 && this.isId(a) && this.resolve(this.toks[a]!.value, a) === 'trustedVar') return true;
     const callee = this.trustedCalleeLength(a);
     if (callee === 0) return false;
     let open = a + callee;
@@ -602,9 +623,9 @@ class ScriptScan {
    * (an application's own module may re-export it); the other sinks, whose
    * names are common words, only from core.
    */
-  private bindImport(imported: string, local: string, fromCore: boolean): void {
-    if (imported === 'trustedHtml') this.trustedCallees.add(local);
-    else if (fromCore && SINK_ARGUMENT.has(imported)) this.sinkLocals.set(local, imported);
+  private bindImport(imported: string, local: string, fromCore: boolean, region = 0): void {
+    this.bind(local, region, imported === 'trustedHtml' ? 'trustedCallee' : 'other');
+    if (fromCore && SINK_ARGUMENT.has(imported)) this.sinkLocals.set(local, imported);
   }
 
   /**
@@ -626,7 +647,7 @@ class ScriptScan {
       if ((nameTok.type === 'id' || nameTok.type === 'str') && this.isId(s + 1, 'as')) {
         const alias = this.t(s + 2)!.value;
         // `export { trustedHtml as x }`, or a local bound to it exported under a third name.
-        const isTrusted = nameTok.value === 'trustedHtml' || (!reexport && this.trustedCallees.has(nameTok.value));
+        const isTrusted = nameTok.value === 'trustedHtml' || (!reexport && this.isTrustedCallee(s));
         if (isTrusted && alias !== 'trustedHtml') this.exportAliases.set(s, alias);
       }
     }
@@ -669,40 +690,187 @@ class ScriptScan {
       const nameTok = this.t(s)!;
       if (nameTok.type !== 'id') continue;
       if (this.isP(s + 1, ':') && this.isId(s + 2)) {
-        this.bindImport(nameTok.value, this.t(s + 2)!.value, true);
+        this.bindImport(nameTok.value, this.t(s + 2)!.value, true, this.regionOf[s + 2]);
         this.skip.add(s);
         this.skip.add(s + 2);
         s += 2;
       } else if (this.isP(s - 1, '{') || this.isP(s - 1, ',')) {
-        this.bindImport(nameTok.value, nameTok.value, true);
+        this.bindImport(nameTok.value, nameTok.value, true, this.regionOf[s]);
         this.skip.add(s);
       }
     }
   }
 
-  /**
-   * Variables bound to a trustedHtml() call (their uses are the call's), and
-   * locals bound to trustedHtml itself (calls through them are uses).
-   */
-  private collectTrustedVars(): void {
-    // Two rounds, so `const th = trustedHtml; const x = th(…)` is followed.
-    for (let round = 0; round < 2; round++) {
-      for (let i = 0; i < this.toks.length; i++) {
-        if (!(this.isId(i, 'const') || this.isId(i, 'let') || this.isId(i, 'var'))) continue;
-        let k = i + 1;
-        while (this.isId(k) && this.isP(k + 1, '=')) {
-          const name = this.t(k)!.value;
-          const start = k + 2;
-          const end = this.expressionEnd(start);
-          if (this.isTrusted(start, end)) this.trustedVars.add(name);
-          else {
-            const callee = this.trustedCalleeLength(start);
-            if (callee > 0 && start + callee === end) this.trustedCallees.add(name);
-          }
-          if (!this.isP(end, ',')) break;
-          k = end + 1;
+  // -- scopes ---------------------------------------------------------------
+  //
+  // Trust is lexical (FORMA-126 review, should-fix 1). A name is trusted
+  // markup at a use only when the nearest region declaring it declares it
+  // only as a `const` bound to a trustedHtml() call, and nothing in the file
+  // assigns to it; a parameter, `let`, `var`, function, class, catch clause or
+  // destructured binding of the same name in a nearer region shadows it.
+  // Bindings are over-approximated (every identifier in a parameter list or a
+  // pattern counts), which can only make a name untrusted.
+
+  private bind(name: string, region: number, kind: BindingKind): Binding {
+    const binding: Binding = { region, kind };
+    const list = this.bindings.get(name);
+    if (list) list.push(binding);
+    else this.bindings.set(name, [binding]);
+    return binding;
+  }
+
+  /** What `name` holds at token `at`: the kind of its nearest declaration, or `none`. */
+  private resolve(name: string, at: number): BindingKind | 'none' {
+    const list = this.bindings.get(name);
+    if (!list) return 'none';
+    for (let r = this.regionOf[at] ?? 0; r !== -1; r = this.regions[r]!.parent) {
+      const here = list.filter((b) => b.region === r);
+      if (here.length === 0) continue;
+      const kind = here[0]!.kind;
+      if (here.some((b) => b.kind !== kind)) return 'other';
+      if (kind !== 'other' && this.assigned.has(`${name}@${r}`)) return 'other';
+      return kind;
+    }
+    return 'none';
+  }
+
+  /** The identifier at `i` names trustedHtml itself or a local bound to it there. */
+  private isTrustedCallee(i: number): boolean {
+    const name = this.toks[i]!.value;
+    return name === 'trustedHtml' || this.resolve(name, i) === 'trustedCallee';
+  }
+
+  /** The regions, and each token's innermost one. */
+  private computeRegions(): void {
+    const n = this.toks.length;
+    const found: Array<{ start: number; end: number; params: [number, number] }> = [];
+    for (let k = 0; k < n; k++) {
+      if (this.isP(k, '=>')) {
+        let pStart = k - 1;
+        if (this.isP(pStart, ')') && this.pair[pStart]! >= 0) pStart = this.pair[pStart]!;
+        const end = this.isP(k + 1, '{') && this.pair[k + 1]! > k ? this.pair[k + 1]! : this.expressionEnd(k + 1) - 1;
+        found.push({ start: pStart, end: Math.max(end, k), params: [pStart, k - 1] });
+      } else if (this.isP(k, '{') && this.isP(k - 1, ')') && this.pair[k - 1]! >= 0 && this.pair[k]! > k) {
+        const open = this.pair[k - 1]!;
+        const before = this.t(open - 1);
+        if (before?.type === 'id' && ['if', 'for', 'while', 'switch', 'with'].includes(before.value)) continue;
+        if (before?.type === 'id' && before.value === 'await' && this.isId(open - 2, 'for')) continue;
+        found.push({ start: open, end: this.pair[k]!, params: [open + 1, k - 2] });
+      }
+    }
+    found.sort((a, b) => a.start - b.start || b.end - a.end);
+    this.regions = [{ start: 0, end: n - 1, parent: -1 }];
+    this.regionOf = new Array<number>(n).fill(0);
+    const stack: number[] = [0];
+    let next = 0;
+    for (let i = 0; i < n; i++) {
+      while (stack.length > 1 && this.regions[stack[stack.length - 1]!]!.end < i) stack.pop();
+      while (next < found.length && found[next]!.start === i) {
+        const f = found[next++]!;
+        const id = this.regions.length;
+        this.regions.push({ start: f.start, end: f.end, parent: stack[stack.length - 1]! });
+        stack.push(id);
+        // Every identifier in the parameters is a binding of this region.
+        for (let p = f.params[0]; p <= f.params[1]; p++) {
+          if (this.isId(p) && !this.isP(p - 1, '.') && !this.isP(p - 1, '?.')) this.pendingParams.push({ name: this.toks[p]!.value, region: id });
         }
       }
+      this.regionOf[i] = stack[stack.length - 1]!;
+    }
+    for (const p of this.pendingParams) this.bind(p.name, p.region, 'other');
+  }
+
+  private readonly pendingParams: Array<{ name: string; region: number }> = [];
+
+  /**
+   * `const`, `let` and `var` declarators, function and class names, and
+   * assignments. Imports and destructured requires are bound where they are
+   * read (collectBindings).
+   */
+  private collectDeclarations(): void {
+    const toks = this.toks;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i]!;
+      if (t.type !== 'id' || this.isP(i - 1, '.') || this.isP(i - 1, '?.')) continue;
+      if ((t.value === 'function' || t.value === 'class') && this.isId(i + 1) && toks[i + 1]!.value !== 'extends') {
+        this.bind(toks[i + 1]!.value, this.regionOf[i]!, 'other');
+        continue;
+      }
+      if (t.value === 'const' || t.value === 'let' || t.value === 'var') {
+        if (this.skip.has(i + 1)) continue;
+        let k = i + 1;
+        for (;;) {
+          if (this.isId(k)) {
+            const name = toks[k]!.value;
+            const region = this.regionOf[k]!;
+            if (this.isP(k + 1, '=')) {
+              const end = this.expressionEnd(k + 2);
+              const binding = this.bind(name, region, 'other');
+              if (t.value === 'const') this.constCandidates.push({ binding, start: k + 2, end });
+              if (!this.isP(end, ',')) break;
+              k = end + 1;
+              continue;
+            }
+            this.bind(name, region, 'other');
+            if (!this.isP(k + 1, ',')) break;
+            k += 2;
+            continue;
+          }
+          if ((this.isP(k, '{') || this.isP(k, '[')) && this.pair[k]! > k) {
+            // A pattern: every identifier in it is bound here (over-approximated).
+            const close = this.pair[k]!;
+            for (let p = k + 1; p < close; p++) {
+              // Names a destructured require of core bound already are not bound again.
+              if (this.isId(p) && !this.isP(p - 1, '.') && !this.skip.has(p)) this.bind(toks[p]!.value, this.regionOf[p]!, 'other');
+            }
+            const end = this.isP(close + 1, '=') ? this.expressionEnd(close + 2) : close + 1;
+            if (!this.isP(end, ',')) break;
+            k = end + 1;
+            continue;
+          }
+          break;
+        }
+        continue;
+      }
+      // An assignment to a name already declared: `x = …`, `x += …`.
+      const op = toks[i + 1];
+      if (op?.type === 'p' && ASSIGNMENT_OPS.has(op.value) && !this.isId(i - 1, 'const') && !this.isId(i - 1, 'let') && !this.isId(i - 1, 'var')) {
+        this.assignments.push({ name: t.value, at: i });
+      }
+    }
+    // Each assignment writes the nearest binding of its name.
+    for (const a of this.assignments) {
+      const list = this.bindings.get(a.name) ?? [];
+      for (let r = this.regionOf[a.at] ?? 0; r !== -1; r = this.regions[r]!.parent) {
+        if (list.some((b) => b.region === r)) {
+          this.assigned.add(`${a.name}@${r}`);
+          break;
+        }
+      }
+    }
+  }
+
+  /**
+   * Which `const`s hold trusted markup (`const x = trustedHtml(…)`) and which
+   * hold trustedHtml itself (`const mint = trustedHtml`). Repeated, so a
+   * const bound to another trusted const is followed.
+   */
+  private classifyConsts(): void {
+    for (let round = 0; round < 4; round++) {
+      let changed = false;
+      for (const c of this.constCandidates) {
+        let kind: BindingKind = 'other';
+        if (this.isTrusted(c.start, c.end)) kind = 'trustedVar';
+        else {
+          const callee = this.trustedCalleeLength(c.start);
+          if (callee > 0 && c.start + callee === c.end) kind = 'trustedCallee';
+        }
+        if (kind !== c.binding.kind) {
+          c.binding.kind = kind;
+          changed = true;
+        }
+      }
+      if (!changed) break;
     }
   }
 
@@ -859,7 +1027,7 @@ class ScriptScan {
     const onNamespace = afterDot && this.isId(i - 2) && this.namespaces.has(this.t(i - 2)!.value);
 
     // trustedHtml, and any local bound to it.
-    if (name === 'trustedHtml' || (!afterDot && this.trustedCallees.has(name))) {
+    if (name === 'trustedHtml' || (!afterDot && this.resolve(name, i) === 'trustedCallee')) {
       if (this.isKey(i) && name !== 'trustedHtml') return;
       // `const mint = trustedHtml`: the new name's declaration is not a use; the reference is.
       if (name !== 'trustedHtml' && this.isP(i + 1, '=') && (this.isId(i - 1, 'const') || this.isId(i - 1, 'let') || this.isId(i - 1, 'var'))) return;
