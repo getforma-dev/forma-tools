@@ -181,8 +181,11 @@ jobs:
     # The SSR lane (FORMA-001) adds, MEASURED in CI on its first run (a cold
     # rust-cache): the "Build the SSR site" step 26s, of which cargo ~20s (a
     # debug build of the renderer against forma's crates), and the whole job
-    # 1m52s, Playwright 44 tests included. Realistic worst case ~6m; 20 is >3x.
-    timeout-minutes: 20
+    # 1m52s, Playwright 44 tests included. Realistic worst case ~6m. The two
+    # browser install steps are bounded on their own with one retry each (at
+    # most 9 and 5 minutes, FORMA-179), so 25 holds both at their worst plus
+    # the rest.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -236,17 +239,65 @@ jobs:
       - name: Build the SSR site (compiler -> forma walker -> FormaJS)
         run: FORMAJS_DIR="$PWD/formajs-checkout" FORMA_DIR="$PWD/forma-checkout" bash e2e/ssr/build.sh
 
-      # Cache the browser binaries (~130 MB) keyed on the resolved Playwright
-      # version. `--with-deps` still runs so the OS packages are present; only
-      # the download is skipped on a hit.
-      - name: Resolve Playwright version
+      # Chromium in two halves, its system packages from the runner's apt
+      # mirror and then the browser from Playwright's CDN, each restored from a
+      # cache when it can be and each bounded with one retry (FORMA-179): a
+      # slow apt mirror once held formajs's WebKit install past its job's
+      # timeout. Both caches are keyed on the resolved Playwright version,
+      # which decides the browser build and the package list; the packages'
+      # key also names the runner image, whose package versions they must
+      # match.
+      - name: Resolve Playwright version and runner image
         id: pw
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      # apt checks each restored archive against the signed package index
+      # before it installs it, and downloads again any that differs.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/playwright-apt
+          key: playwright-apt-${{ steps.pw.outputs.image }}-${{ steps.pw.outputs.version }}-chromium
+      - name: Install chromium's system packages, retried once
+        # Normally seconds (formajs measured 22 MB in 2s); each attempt is cut
+        # at 4 minutes.
+        timeout-minutes: 9
+        run: |
+          shopt -s nullglob
+          mkdir -p ~/.cache/playwright-apt
+          cached=(~/.cache/playwright-apt/*.deb)
+          echo "${#cached[@]} archives restored from the cache"
+          if [ "${#cached[@]}" -gt 0 ]; then sudo cp "${cached[@]}" /var/cache/apt/archives/; fi
+          for attempt in 1 2; do
+            if timeout --kill-after=20s 4m npx playwright install-deps chromium; then
+              break
+            fi
+            if [ "$attempt" = 2 ]; then
+              echo "::error::installing chromium's system packages failed twice; see the apt output above"
+              exit 1
+            fi
+            echo "::warning::installing chromium's system packages failed or ran past 4 minutes; retrying once"
+            sudo dpkg --configure -a
+          done
+          fresh=(/var/cache/apt/archives/*.deb)
+          if [ "${#fresh[@]}" -gt 0 ]; then cp "${fresh[@]}" ~/.cache/playwright-apt/; fi
+          echo "${#fresh[@]} archives kept for the cache"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
-      - run: npx playwright install chromium --with-deps
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}-chromium
+      - name: Install chromium, retried once
+        # A no-op on a cache hit; each attempt is cut at 2 minutes.
+        timeout-minutes: 5
+        run: |
+          for attempt in 1 2; do
+            if timeout --kill-after=20s 2m npx playwright install chromium; then
+              exit 0
+            fi
+            echo "::warning::installing chromium failed or ran past 2 minutes (attempt $attempt of 2)"
+          done
+          echo "::error::installing chromium failed twice; see the output above"
+          exit 1
 
       - name: Build package browser test (worker upgrade)
         run: npm run test:browser -w packages/build
