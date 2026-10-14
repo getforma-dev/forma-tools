@@ -2,5 +2,8 @@
   "name": "forma-e2e-frame-app",
   "private": true,
   "type": "module",
-  "description": "The application the preview-frame e2e lane builds (e2e/frame/build.sh installs @getforma/core into it from a packed tarball, without saving it here)."
+  "description": "The application the preview-frame e2e lane builds. package-lock.json pins @getforma/core's dependencies; e2e/frame/build.sh installs them with npm ci, then core itself from a tarball packed from the FormaJS checkout, without saving it here.",
+  "dependencies": {
+    "alien-signals": "~3.1.2"
+  }
 }

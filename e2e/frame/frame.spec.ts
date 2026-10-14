@@ -150,17 +150,19 @@ test('with previewFrame off the manifest names no runtime and forma-server refus
 test('a runtime neither may inline: the build refuses it with BUILD-806, and forma-server refuses the same bytes with FRAME-103', async () => {
   expect(report.tampered).toMatchObject({ ok: false, code: 'FRAME-103' });
 
-  // The packed core, its frame runtime with the same bytes appended as the
-  // output forma-server refused.
+  // The packed core (with the dependency its bundle imports), its frame
+  // runtime with the same bytes appended as the output forma-server refused,
+  // imported by the application's page, as the build finds core.
   const root = mkdtempSync(join(tmpdir(), 'forma-frame-tampered-'));
   try {
     const core = join(root, 'node_modules', '@getforma', 'core');
     cpSync(lane.core.dir, core, { recursive: true });
+    cpSync(join(lane.core.dir, '..', '..', 'alien-signals'), join(root, 'node_modules', 'alien-signals'), { recursive: true });
     appendFileSync(join(core, 'dist', 'formajs-frame.global.js'), lane.tamper);
     expect(readFileSync(join(core, 'dist', 'formajs-frame.global.js'))
       .equals(readFileSync(join(lane.on.dist, '..', 'dist-tampered', lane.on.asset)))).toBe(true);
     mkdirSync(join(root, 'src'));
-    writeFileSync(join(root, 'src', 'app.ts'), 'export const page = "home";\n');
+    writeFileSync(join(root, 'src', 'app.ts'), "import { createSignal } from '@getforma/core';\nexport const count = createSignal(0);\n");
 
     const { build } = await import(pathToFileURL(join(REPO, 'packages', 'build', 'dist', 'index.js')).href);
     const error = await build({

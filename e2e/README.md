@@ -66,8 +66,11 @@ runtime):
 
 1. `e2e/frame/build.sh` packs `@getforma/core` from the FormaJS checkout
    (`npm pack`, so the package's `files` decide what an application gets),
-   installs the tarball into the fixture application `e2e/frame/app` as an
-   application installs it, and builds it with THIS repo's `@getforma/build`
+   installs core's dependencies into the fixture application `e2e/frame/app`
+   from its lockfile (`npm ci`), then the tarball itself, saved nowhere (a
+   lockfile entry for a local tarball lets `npm ci` install a cached copy of
+   an earlier core under the same integrity), and builds it with THIS repo's
+   `@getforma/build`
    (`e2e/frame/build-app.mjs`): `out/dist-on` with `previewFrame: true`,
    `out/dist-off` without it, and `out/dist-tampered`, dist-on with a
    `</script>` appended to its runtime. The script fails unless the build's
@@ -149,7 +152,7 @@ e2e/
 │   ├── origin.ts                    ← The SSR port (FORMA_SSR_E2E_PORT, default 3458)
 │   └── regressions.spec.ts          ← The SSR regression fixtures
 ├── frame/
-│   ├── app/                         ← The fixture application (core installed from the packed tarball)
+│   ├── app/                         ← The fixture application (its lockfile pins core's dependencies; core from the packed tarball)
 │   ├── build.sh                     ← Builds the lane (FORMAJS_DIR, FORMA_DIR)
 │   ├── build-app.mjs                ← @getforma/build with and without previewFrame
 │   ├── server/                      ← Rust: forma-server's PreviewFrame::load and PageResponse::frame
@@ -176,4 +179,5 @@ e2e/
 | "the lock file needs to be updated" (cargo) | forma's crates changed dependencies: `cargo build --manifest-path e2e/ssr/render/Cargo.toml` once, commit `e2e/ssr/render/Cargo.lock` |
 | "the preview-frame lane is not built" | `bash e2e/frame/build.sh` (or `npm run test:e2e`, which runs it) |
 | "formajs-frame.global.js not found" | FORMAJS_DIR must be a FormaJS checkout with FORMA-128's frame runtime, built |
+| "@getforma/core depends on …, which e2e/frame/app/package-lock.json does not pin" | core gained or moved a dependency: add it to `e2e/frame/app/package.json`, run `npm install --package-lock-only` there, commit both |
 | "the lock file needs to be updated" (cargo, frame lane) | `cargo build --manifest-path e2e/frame/server/Cargo.toml` once, commit `e2e/frame/server/Cargo.lock` |

@@ -44,6 +44,20 @@ function fail(message) {
 if (!existsSync(join(repo, 'packages', 'build', 'dist', 'index.js'))) fail('packages/build/dist is missing; run `npm run build` first');
 if (!existsSync(join(core, 'package.json'))) fail(`${core} is missing; run e2e/frame/build.sh, which installs the packed core`);
 
+// Core's dependencies are the ones the fixture's lockfile pins (npm ci), not
+// whatever the registry served when the tarball was installed.
+const lock = JSON.parse(readFileSync(join(app, 'package-lock.json'), 'utf8'));
+for (const [name, range] of Object.entries(JSON.parse(readFileSync(join(core, 'package.json'), 'utf8')).dependencies ?? {})) {
+  const pinned = lock.packages?.[`node_modules/${name}`]?.version;
+  const installed = existsSync(join(app, 'node_modules', name, 'package.json'))
+    ? JSON.parse(readFileSync(join(app, 'node_modules', name, 'package.json'), 'utf8')).version
+    : undefined;
+  if (!pinned || installed !== pinned) {
+    fail(`@getforma/core depends on ${name} ${range}, which e2e/frame/app/package-lock.json does not pin (pinned ${pinned ?? 'nothing'}, installed ${installed ?? 'nothing'}): ` +
+      'add it to e2e/frame/app/package.json and run `npm install --package-lock-only` there');
+  }
+}
+
 const { build } = await import(join(repo, 'packages/build/dist/index.js'));
 const sha256 = (bytes, encoding) => createHash('sha256').update(bytes).digest(encoding);
 
