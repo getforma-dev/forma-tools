@@ -54,6 +54,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Every package installed has a registry signature and, where npm holds
+      # one, an attestation that verify (FORMA-180 F11); the lint requires it
+      # after every `npm ci` here.
+      - run: npm audit signatures
       - run: npm run build
       - run: npm test
 
@@ -103,6 +107,10 @@ jobs:
           fi
 
       - run: npm ci
+      # The tree that produces the bytes that publish: every package has a
+      # registry signature and, where npm holds one, an attestation that
+      # verify (FORMA-180 F11). Reads only; the packed bytes are unchanged.
+      - run: npm audit signatures
       # The build package marks @getforma/compiler external, and both builds
       # run so the workspace is in the state the tests saw.
       - run: npm run build

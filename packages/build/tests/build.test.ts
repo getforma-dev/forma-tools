@@ -3,6 +3,7 @@ import { build } from '../src/build';
 import * as publicApi from '../src/index';
 import type { BuildConfig, AssetManifest } from '../src/types';
 import { APP_NAME_VECTORS } from './helpers/app-name-vectors';
+import { buildInChild } from './helpers/child-build';
 import {
   mkdtempSync,
   writeFileSync,
@@ -13,7 +14,7 @@ import {
   readdirSync,
   chmodSync,
 } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
@@ -1012,5 +1013,107 @@ describe('@getforma/build — SSR output', () => {
     expect(manifestResult.manifest.routes['/']!.ir)
       .not.toBe(manifestResult.manifest.routes['/about']!.ir);
     expect(readdirSync(outDir).filter((f) => f.includes('.islands.'))).toEqual([]);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// The production build's console summary (FORMA-180 F3)
+// ---------------------------------------------------------------------------
+//
+// A production build bundles into a staging directory and renames it into
+// place, so esbuild's own summary named `.dist.forma-staging-<pid>-<hex>/app.js`,
+// a path nothing reads. The build now prints its own summary under
+// `outputDir`, with the hashed names the manifest holds, and runs esbuild at
+// `logLevel: 'warning'`, so its warnings and errors still print. The build
+// runs in a child so the test sees what a terminal sees, by stream.
+
+describe('@getforma/build — the production build\'s console summary (FORMA-180 F3)', () => {
+  let tmpRoot: string;
+  let srcDir: string;
+  let outDir: string;
+  let scratch: string;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'forma-build-summary-'));
+    srcDir = join(tmpRoot, 'src');
+    outDir = join(tmpRoot, 'dist');
+    scratch = join(tmpRoot, 'scratch');
+    mkdirSync(srcDir, { recursive: true });
+    mkdirSync(scratch, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  const config = (entries: string[], codeSplitting = false): BuildConfig => ({
+    entryPoints: entries.map((name) => ({ entry: join(srcDir, `${name}.ts`), outfile: `${name}.js` })),
+    routes: Object.fromEntries(entries.map((name) => [`/${name}`, { js: [name], css: [] }])),
+    outputDir: outDir,
+    codeSplitting,
+  });
+
+  it('a production build\'s summary names dist/<entry>.<hash>.js, never the staging directory', async () => {
+    writeFileSync(join(srcDir, 'app.ts'), 'export const x = 1;\n');
+    writeFileSync(join(srcDir, 'about.ts'), 'export const y = 2;\n');
+
+    const { manifest, output, stdout } = await buildInChild(config(['app', 'about']), tmpRoot, scratch);
+    expect(manifest).toBeDefined();
+
+    // The summary names each bundle as the manifest names it, under outputDir,
+    // with forward slashes on every platform (so on Windows too).
+    const shown = outDir.split(sep).join('/');
+    for (const name of ['app.js', 'about.js']) {
+      const hashed = manifest!.assets[name]!;
+      expect(hashed).toMatch(/^(app|about)\.[0-9a-f]{8}\.js$/);
+      expect(stdout).toContain(`${shown}/${hashed}`);
+    }
+    // The summary's own lines: no backslash, on Windows either (the other
+    // lines print outputDir as the configuration spelled it).
+    const summaryLines = stdout.split('\n').filter((line) => /\.[0-9a-f]{8}\.js\s+\d/.test(line));
+    expect(summaryLines).toHaveLength(2);
+    for (const line of summaryLines) expect(line).not.toContain('\\');
+    expect(stdout).toMatch(/dist\/app\.[0-9a-f]{8}\.js\s+\d+(\.\d+)?k?b/);
+    // Neither stream names the staging directory, by either of its forms.
+    expect(output).not.toContain('forma-staging');
+    expect(output).not.toContain('.dist.forma-');
+  }, 30_000);
+
+  it('a code-splitting build\'s summary names the hashed entries and chunks under outputDir', async () => {
+    writeFileSync(join(srcDir, 'shared.ts'), 'export const shared = "s".repeat(64);\n');
+    writeFileSync(join(srcDir, 'app.ts'), 'import { shared } from "./shared"; export const x = shared + 1;\n');
+    writeFileSync(join(srcDir, 'about.ts'), 'import { shared } from "./shared"; export const y = shared + 2;\n');
+
+    const { manifest, output, stdout } = await buildInChild(config(['app', 'about'], true), tmpRoot, scratch);
+    expect(manifest).toBeDefined();
+
+    const hashedEntries = ['app.js', 'about.js'].map((name) => manifest!.assets[name]!);
+    const chunks = readdirSync(outDir).filter((f) => /^chunk\.[0-9A-Z]+\.js$/.test(f));
+    expect(chunks.length).toBeGreaterThan(0);
+    const shown = outDir.split(sep).join('/');
+    for (const file of [...hashedEntries, ...chunks]) expect(stdout).toContain(`${shown}/${file}`);
+    expect(output).not.toContain('forma-staging');
+    expect(output).not.toContain('.dist.forma-');
+  }, 30_000);
+
+  it('a production build still prints esbuild\'s warnings', async () => {
+    // A duplicate object key is an esbuild warning, not an error: the build
+    // succeeds and the warning must still reach the terminal.
+    writeFileSync(join(srcDir, 'app.ts'), 'export const o = { a: 1, a: 2 };\n');
+
+    const { manifest, stderr } = await buildInChild(config(['app']), tmpRoot, scratch);
+    expect(manifest).toBeDefined();
+    expect(stderr).toContain('[WARNING]');
+    expect(stderr).toContain('Duplicate key "a"');
+  }, 30_000);
+
+  it('a production build still prints esbuild\'s errors, and fails', async () => {
+    writeFileSync(join(srcDir, 'app.ts'), 'export const x = ;\n');
+
+    const { manifest, message, stderr } = await buildInChild(config(['app']), tmpRoot, scratch);
+    expect(manifest).toBeUndefined();
+    expect(message).toContain('Build failed with 1 error');
+    expect(stderr).toContain('[ERROR]');
+    expect(stderr).toContain('Unexpected ";"');
   }, 30_000);
 });

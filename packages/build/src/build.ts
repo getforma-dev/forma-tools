@@ -22,7 +22,7 @@ import {
   statSync,
   existsSync,
 } from 'node:fs';
-import { join, extname, basename, dirname } from 'node:path';
+import { join, extname, basename, dirname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
@@ -498,6 +498,38 @@ function validateConfig(config: BuildConfig): void {
 }
 
 // ---------------------------------------------------------------------------
+// Build Summary
+// ---------------------------------------------------------------------------
+
+/** esbuild's size notation: `842b`, `1.2kb`, `3.4mb`. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}b`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}kb`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}mb`;
+}
+
+/**
+ * The production build's summary, in place of esbuild's: every file the
+ * bundling pass wrote, by the name it has after hashing and under `shownDir`,
+ * the directory the application reads, never the staging directory the
+ * pass wrote into (FORMA-180 F3). Sizes are the metafile's, the bytes
+ * before compression. Forward slashes on every platform, as the manifest
+ * and the URLs name the files, so the line reads the same on Windows.
+ * Verified by: packages/build/tests/build.test.ts > "a production build's summary names dist/<entry>.<hash>.js, never the staging directory"
+ */
+function printBundleSummary(metafiles: esbuild.Metafile[], assets: Record<string, string>, shownDir: string): void {
+  const lines: string[] = [];
+  const dir = shownDir.split(sep).join('/');
+  for (const metafile of metafiles) {
+    for (const [path, output] of Object.entries(metafile.outputs)) {
+      const name = basename(path);
+      lines.push(`   ${dir}/${assets[name] ?? name}  ${formatBytes(output.bytes)}`);
+    }
+  }
+  if (lines.length) console.log(`\n${lines.join('\n')}\n`);
+}
+
+// ---------------------------------------------------------------------------
 // Manifest Generation
 // ---------------------------------------------------------------------------
 
@@ -693,7 +725,14 @@ function sharedOptions(config: BuildConfig): Partial<esbuild.BuildOptions> {
       : {},
     minify: !config.watch,
     sourcemap: config.watch ? 'inline' : false,
-    logLevel: 'info',
+    // A production build writes into a staging directory, so esbuild's own
+    // summary would name `.dist.forma-staging-<pid>-<hex>/app.js`, a path
+    // nothing reads; the build prints its own from the metafile, under the
+    // names the application reads (FORMA-180 F3). Warnings and errors still
+    // print. Watch mode writes in place and keeps esbuild's summary.
+    // Verified by: packages/build/tests/build.test.ts > "a production build's summary names dist/<entry>.<hash>.js, never the staging directory"
+    // Verified by: packages/build/tests/build.test.ts > "a production build still prints esbuild's warnings"
+    logLevel: config.watch ? 'info' : 'warning',
     jsx: 'transform',
     jsxFactory: 'h',
     jsxFragment: 'Fragment',
@@ -1052,19 +1091,24 @@ async function buildInto(config: BuildConfig, shownDir: string, frame?: FrameRun
     }
 
     // ── Parallel production builds ────────────────────────────────────
+    // Each pass's metafile feeds the summary printed once the files have
+    // their hashed names (FORMA-180 F3).
+    const metafiles: esbuild.Metafile[] = [];
     if (config.codeSplitting && config.entryPoints.length) {
       const result = await esbuild.build(splitOptions);
       if (!result.metafile) throw new Error('Split build did not return its module graph.');
+      metafiles.push(result.metafile);
       graph = splitGraph(result.metafile, config.entryPoints, distDir);
       for (const entry of config.entryPoints) {
         if (config.serverInlined?.includes(entry.outfile)) cpSync(join(distDir, graph.assets[entry.outfile]), join(distDir, entry.outfile));
       }
     } else await Promise.all(
-      config.entryPoints.map((entry) => {
+      config.entryPoints.map(async (entry) => {
         const buildOptions: esbuild.BuildOptions = {
           ...shared,
           entryPoints: [entry.entry],
           outfile: join(distDir, entry.outfile),
+          metafile: true,
         };
 
         if (config.ssr && entry.ssr !== false && formaSsrPlugin) {
@@ -1082,7 +1126,8 @@ async function buildInto(config: BuildConfig, shownDir: string, frame?: FrameRun
           ];
         }
 
-        return esbuild.build(buildOptions);
+        const result = await esbuild.build(buildOptions);
+        if (result.metafile) metafiles.push(result.metafile);
       }),
     );
 
@@ -1105,6 +1150,7 @@ async function buildInto(config: BuildConfig, shownDir: string, frame?: FrameRun
 
     // ── Content hashing ───────────────────────────────────────────────
     const assets = hashAssets(config, graph?.assets);
+    printBundleSummary(metafiles, assets, shownDir);
     console.log(`   ${Object.keys(assets).length} assets hashed`);
 
     // ── Compression ───────────────────────────────────────────────────
