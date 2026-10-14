@@ -92,6 +92,17 @@ describe('formaCompiler file gating', () => {
     expect(runTransform(plugin, unrelated, '/proj/src/view.ts')).toBeNull();
   });
 
+  it('leaves a module that imports h from "@getforma/core" to runtime h()', () => {
+    // It passes the quick `forma/` substring check by accident; the transform
+    // still declines it. The compiled path is not yet equivalent to runtime
+    // h() (hydration, core's URL guard, children), so widening it is its own
+    // change, not part of a patch.
+    const scoped = `
+      import { h } from '@getforma/core';
+      export const view = h('div', { class: 'card' }, 'hello');
+    `;
+    expect(runTransform(plugin, scoped, '/proj/src/view.ts')).toBeNull();
+  });
 });
 
 describe('formaServer file gating', () => {
