@@ -1,0 +1,9 @@
+<!doctype html>
+<!-- The review's h03 and h04 (FORMA-126 review, should-fix 6): the runtime reads
+     the value the browser decoded, so a character reference is the brace. -->
+<ul data-list="{rows}">
+  <li><iframe sandbox srcdoc="&#123;item.html}"></iframe></li> <!-- expect: list-row-srcdoc -->
+  <li><iframe sandbox srcdoc="&lbrace;item.html}"></iframe></li> <!-- expect: list-row-srcdoc -->
+  <li><iframe sandbox srcdoc="&#x7B;item.html}"></iframe></li> <!-- expect: list-row-srcdoc -->
+  <li><iframe sandbox srcdoc=&lcub;item.html}></iframe></li> <!-- expect: list-row-srcdoc -->
+</ul>

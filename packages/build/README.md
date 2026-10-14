@@ -437,7 +437,7 @@ Markup, in HTML files and in string literals in either language:
 | Exit | What the lint finds |
 |---|---|
 | `data-bind:srcdoc` | The HTML runtime's `data-bind:srcdoc` binding, which no `trustedHtml()` can reach. |
-| `list-row-srcdoc` | A `srcdoc` attribute whose value carries `{item`, a list row's binding. |
+| `list-row-srcdoc` | A `srcdoc` attribute whose value carries `{item`, a list row's binding, after character references (`&#123;`, `&lbrace;`) and string escapes (`\u{7b}`, `\x7b`) are decoded, as the runtime reads it. |
 | `trusted-types-registry` | The string `@getforma/core#trusted-types`, the key of core's registry, through which the `forma` policy can mint without `trustedHtml()`. |
 
 Rust:
@@ -476,8 +476,13 @@ as a use; positions are mapped back through esbuild's source map. Rust is a
 token scan, not a parse: it knows Rust's lexical grammar (nested comments, raw
 strings, byte and C strings, char literals against lifetimes, raw
 identifiers) and pairs brackets, so a struct literal's fields, a struct's
-declared fields, a `use` tree and a pattern are told apart. HTML is read tag
-by tag, outside comments; an inline script is parsed as JavaScript.
+declared fields, a `use` tree and a pattern are told apart. HTML is read in
+one pass, tag by tag: a comment starts only in text, never inside a quoted
+value; an inline script is parsed as JavaScript (one that does not parse is a
+`BUILD-814`, and the rest of the file is still read); a script of another
+type (`text/x-template`, `application/json`) is read as markup, as a string
+literal is. A string literal's escapes are decoded before its markup is
+read.
 
 What it cannot see, and review must:
 

@@ -346,12 +346,18 @@ describe('reading sources', () => {
     writeFileSync(join(tmp, 'src', 'broken.ts'), 'export const a = 1;\nexport const b = (;\n');
     writeFileSync(join(tmp, 'src', 'page.html'), '<!doctype html>\n<p>x</p>\n<script>\n  const = 1;\n</script>\n');
     writeFileSync(join(tmp, 'src', 'data.html'), '<script type="application/json">{ not: js }</script>\n<script src="/app.js"></script>\n');
+    // The review's h20: the browser ends the script at the first </script>, so
+    // the script fails and the frame after it is markup, still read.
+    writeFileSync(join(tmp, 'src', 'after.html'), '<script>/* </script> */</script><iframe data-bind:srcdoc="doc"></iframe>\n');
     const report = rawLint({ paths: ['src'], cwd: tmp, today: TODAY });
     expect(report.diagnostics.map((d) => [d.code, d.file, d.line])).toEqual([
+      ['BUILD-810', 'src/after.html', 1],
+      ['BUILD-814', 'src/after.html', 1],
       ['BUILD-814', 'src/broken.ts', 2],
       ['BUILD-814', 'src/page.html', 4],
     ]);
-    expect(report.diagnostics[1]!.message).toContain('an inline script');
+    expect(report.diagnostics[0]!.exit).toBe('data-bind:srcdoc');
+    expect(report.diagnostics[3]!.message).toContain('an inline script');
     expect(report.exitCode).toBe(1);
   });
 

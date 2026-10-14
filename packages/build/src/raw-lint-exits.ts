@@ -103,7 +103,7 @@ export const REGISTRY_KEY = '@getforma/core#trusted-types';
 export function scanMarkup(source: string): Array<{ exit: string; offset: number; message: string }> {
   const out: Array<{ exit: string; offset: number; message: string }> = [];
   // An HTML comment is inert markup: blanked, so offsets stay the source's.
-  const text = source.replace(/<!--[\s\S]*?(?:-->|$)/g, (m) => ' '.repeat(m.length));
+  const text = maskComments(source);
   for (const m of text.matchAll(/(?<![\w:.-])data-bind:srcdoc(?![\w-])/gi)) {
     out.push({ exit: 'data-bind:srcdoc', offset: m.index!, message: 'data-bind:srcdoc binds an iframe document from data' });
   }
@@ -121,7 +121,12 @@ export function scanMarkup(source: string): Array<{ exit: string; offset: number
   return out;
 }
 
-/** The value of an attribute whose `=` ends just before `start`, quoted (escaped quotes too) or not. */
+/**
+ * The value of an attribute whose `=` ends just before `start`, quoted
+ * (escaped quotes too) or not, with its character references decoded, as the
+ * browser hands it to the runtime (`&#123;item` is `{item`; FORMA-126 review,
+ * should-fix 6).
+ */
 function attributeValue(text: string, start: number): string {
   let i = start;
   if (text[i] === '\\') i++;
@@ -131,8 +136,134 @@ function attributeValue(text: string, start: number): string {
     while (end < text.length && text[end] !== quote) end++;
     // An escaped quote (`\"` in a Rust or JS string) ends the value too.
     const value = text.slice(i + 1, end);
-    return value.endsWith('\\') ? value.slice(0, -1) : value;
+    return decodeReferences(value.endsWith('\\') ? value.slice(0, -1) : value);
   }
   const m = /^[^\s>]*/.exec(text.slice(start));
-  return m ? m[0] : '';
+  return decodeReferences(m ? m[0] : '');
+}
+
+const NAMED_REFERENCES: Readonly<Record<string, string>> = {
+  lbrace: '{', lcub: '{', rbrace: '}', rcub: '}', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", period: '.', lowbar: '_',
+};
+
+/** Numeric character references (`&#123;`, `&#x7b;`) and the named ones markup here could use. */
+export function decodeReferences(value: string): string {
+  return value.replace(/&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([a-zA-Z]+));?/g, (m, dec?: string, hex?: string, name?: string) => {
+    if (dec !== undefined || hex !== undefined) {
+      const cp = dec !== undefined ? parseInt(dec, 10) : parseInt(hex!, 16);
+      return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+    }
+    return NAMED_REFERENCES[name!.toLowerCase()] ?? m;
+  });
+}
+
+/**
+ * Markup with its comments blanked, offsets kept: a comment starts only in
+ * text, never inside a tag, where `<!--` in a quoted value is part of the
+ * value (`<div title="<!--" data-bind:srcdoc="x">`; should-fix 6).
+ */
+export function maskComments(source: string): string {
+  const n = source.length;
+  let out = '';
+  let i = 0;
+  while (i < n) {
+    const lt = source.indexOf('<', i);
+    if (lt === -1) {
+      out += source.slice(i);
+      break;
+    }
+    out += source.slice(i, lt);
+    if (source.startsWith('<!--', lt)) {
+      const close = source.indexOf('-->', lt + 4);
+      const end = close === -1 ? n : close + 3;
+      out += source.slice(lt, end).replace(/[^\n]/g, ' ');
+      i = end;
+      continue;
+    }
+    if (/[a-zA-Z]/.test(source[lt + 1] ?? '')) {
+      const end = tagEnd(source, lt);
+      out += source.slice(lt, end);
+      i = end;
+      continue;
+    }
+    out += '<';
+    i = lt + 1;
+  }
+  return out;
+}
+
+/** The end (exclusive) of the start tag at `lt`, its quoted values honoured. */
+export function tagEnd(text: string, lt: number): number {
+  const n = text.length;
+  let j = lt + 1;
+  while (j < n && text[j] !== '>') {
+    const c = text[j];
+    if (c === '"' || c === "'") {
+      const close = text.indexOf(c, j + 1);
+      j = close === -1 ? n : close + 1;
+      continue;
+    }
+    j++;
+  }
+  return Math.min(j + 1, n);
+}
+
+/**
+ * A string literal's text with its escapes decoded (`\u{7b}`, `\x7b`,
+ * `\u007b`, `\"`), and for each decoded character the offset in the literal
+ * it came from, so markup hidden by an escape is still read and reported where
+ * it is written (should-fix 6, the review's r21).
+ */
+export function cookEscapes(raw: string): { text: string; map: number[] } {
+  let text = '';
+  const map: number[] = [];
+  const push = (out: string, from: number) => {
+    text += out;
+    for (let k = 0; k < out.length; k++) map.push(from);
+  };
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] !== '\\' || i + 1 >= raw.length) {
+      push(raw[i]!, i);
+      i++;
+      continue;
+    }
+    const c = raw[i + 1]!;
+    const simple: Record<string, string> = { n: '\n', t: '\t', r: '\r', '0': '\0', '\\': '\\', '"': '"', "'": "'", '`': '`', $: '$' };
+    if (simple[c] !== undefined) {
+      push(simple[c]!, i);
+      i += 2;
+      continue;
+    }
+    let m: RegExpExecArray | null;
+    if ((m = /^x([0-9a-fA-F]{2})/.exec(raw.slice(i + 1)))) {
+      push(String.fromCharCode(parseInt(m[1]!, 16)), i);
+      i += 1 + m[0].length;
+      continue;
+    }
+    if ((m = /^u\{([0-9a-fA-F_]{1,8})\}/.exec(raw.slice(i + 1))) || (m = /^u([0-9a-fA-F]{4})/.exec(raw.slice(i + 1)))) {
+      const cp = parseInt(m[1]!.replace(/_/g, ''), 16);
+      push(cp <= 0x10ffff ? String.fromCodePoint(cp) : m[0], i);
+      i += 1 + m[0].length;
+      continue;
+    }
+    if (c === '\n' || c === '\r') {
+      // A line continuation: the newline and the next line's indentation go.
+      let j = i + 1;
+      while (j < raw.length && /\s/.test(raw[j]!)) j++;
+      i = j;
+      continue;
+    }
+    push(raw.slice(i, i + 2), i);
+    i += 2;
+  }
+  map.push(raw.length);
+  return { text, map };
+}
+
+/** The markup exits in a string literal's raw text, its escapes decoded; offsets are into the raw text. */
+export function scanStringMarkup(raw: string, escapes: boolean): Array<{ exit: string; offset: number; message: string }> {
+  if (!escapes || !raw.includes('\\')) return scanMarkup(raw);
+  const cooked = cookEscapes(raw);
+  return scanMarkup(cooked.text).map((m) => ({ ...m, offset: cooked.map[m.offset] ?? m.offset }));
 }

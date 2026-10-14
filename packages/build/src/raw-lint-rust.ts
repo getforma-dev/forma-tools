@@ -27,7 +27,7 @@
  * Verified by: packages/build/tests/raw-lint.test.ts > "Rust exits: each fails unlisted, passes listed, fails expired"
  */
 
-import { positionIn, scanMarkup, type Found } from './raw-lint-exits.js';
+import { positionIn, scanStringMarkup, type Found } from './raw-lint-exits.js';
 
 type RTokType = 'id' | 'str' | 'char' | 'life' | 'num' | 'p';
 
@@ -39,6 +39,8 @@ interface RTok {
   raw?: boolean;
   /** Offset of a string's first content character. */
   contentStart?: number;
+  /** A raw string (`r"…"`, `r#"…"#`): its text has no escapes. */
+  rawString?: boolean;
 }
 
 const PUNCT = ['..=', '...', '::', '->', '=>', '==', '!=', '<=', '>=', '&&', '||', '..', '+=', '-=', '*=', '/=', '%=', '^=', '&=', '|='];
@@ -61,7 +63,7 @@ function tokenize(code: string): RTok[] {
     const close = '"' + '#'.repeat(hashes);
     const end = code.indexOf(close, j + 1);
     const stop = end === -1 ? n : end;
-    toks.push({ type: 'str', value: code.slice(j + 1, stop), start: prefixStart, contentStart: j + 1 });
+    toks.push({ type: 'str', value: code.slice(j + 1, stop), start: prefixStart, contentStart: j + 1, rawString: true });
     return end === -1 ? n : end + close.length;
   };
 
@@ -662,7 +664,7 @@ class RustScan {
   private visit(i: number, stack: Scope[]): void {
     const tok = this.toks[i]!;
     if (tok.type === 'str') {
-      for (const m of scanMarkup(tok.value)) this.report(i, stack, m.exit, m.message, tok.contentStart! + m.offset);
+      for (const m of scanStringMarkup(tok.value, !tok.rawString)) this.report(i, stack, m.exit, m.message, tok.contentStart! + m.offset);
       return;
     }
     if (tok.type !== 'id') return;

@@ -374,7 +374,11 @@ export function rawLint(options: RawLintOptions): RawLintReport {
         for (const a of rust.aliases) aliases.add(a);
         rustFiles.push({ file, rust });
       } else if (HTML_FILE.test(abs)) {
-        found.push(...scanHtml(source, file).map((f) => ({ ...f, file })));
+        const html = scanHtml(source, file);
+        found.push(...html.found.map((f) => ({ ...f, file })));
+        for (const err of html.errors) {
+          diagnostics.push(diagnostic('BUILD-814', { exit: null, file, line: err.line, column: err.column, symbol: null, message: `${file} cannot be parsed: ${err.message}` }));
+        }
       } else {
         found.push(...scanScript(source, file).map((f) => ({ ...f, file })));
       }

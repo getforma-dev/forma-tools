@@ -6,3 +6,5 @@ export const page = `
 <section>
   <iframe sandbox data-bind:srcdoc="{doc}"></iframe> <!-- expect: data-bind:srcdoc -->
 </section>`;
+
+export const commentInValue = '<div title="<!--" data-bind:srcdoc="doc">-->'; // expect: data-bind:srcdoc

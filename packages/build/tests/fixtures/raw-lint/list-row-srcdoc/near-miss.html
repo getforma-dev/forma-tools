@@ -8,3 +8,6 @@
     <p>srcdoc="{item.doc}" in text is not markup.</p>
   </body>
 </html>
+<!-- The review's h18: a space after the brace is not the runtime's {item. -->
+<ul data-list="{rows}"><li><iframe srcdoc="{ item.html }"></iframe></li></ul>
+<p>srcdoc="&#123;item.html}" in text is not markup.</p>

@@ -35,7 +35,7 @@
 
 import { transformSync, type Loader } from 'esbuild';
 
-import { positionIn, scanMarkup, type Found, type Position } from './raw-lint-exits.js';
+import { positionIn, scanMarkup, scanStringMarkup, tagEnd, type Found, type Position } from './raw-lint-exits.js';
 
 /** A file the lint could not read or parse (BUILD-814). */
 export class ScanError extends Error {
@@ -1008,7 +1008,7 @@ class ScriptScan {
   private visit(i: number): void {
     const tok = this.toks[i]!;
     if (tok.type === 'str' || tok.type === 'tpl') {
-      for (const m of scanMarkup(tok.value)) {
+      for (const m of scanStringMarkup(tok.value, true)) {
         this.report(i, m.exit, m.message, this.map.inside(tok.start, tok.start + 1 + m.offset));
       }
     }
@@ -1192,66 +1192,67 @@ class ScriptScan {
 const SCRIPT_TYPES = new Set(['', 'module', 'text/javascript', 'application/javascript', 'text/ecmascript', 'application/ecmascript']);
 
 /**
- * The raw entries in an HTML file: the markup exits in its tags (not its text
- * or comments), and every exit in its inline scripts.
+ * The raw entries in an HTML file, read in one pass: the markup exits in its
+ * tags (not its text, and comments only where they start in text), every
+ * exit in its inline scripts, and the markup exits in a script of another
+ * type (`text/x-template`, `application/json`), read as a string would be.
+ * A script that does not parse is returned among `errors` (BUILD-814), and
+ * the rest of the file is still read (FORMA-126 review, should-fix 6).
  *
  * Verified by: packages/build/tests/raw-lint.test.ts > "markup exits: each fails unlisted, passes listed, fails expired"
  */
-export function scanHtml(source: string, file: string): Found[] {
+export function scanHtml(source: string, file: string): { found: Found[]; errors: ScanError[] } {
   const found: Found[] = [];
-  // Comments become spaces, so offsets and lines stay the file's.
-  const masked = source.replace(/<!--[\s\S]*?(?:-->|$)/g, (m) => m.replace(/[^\n]/g, ' '));
-  const blank = (from: number, to: number, text: string) => text.slice(0, from) + text.slice(from, to).replace(/[^\n]/g, ' ') + text.slice(to);
-  let tags = masked;
-  for (const m of masked.matchAll(/<(script|style)\b([^>]*)>([\s\S]*?)(?:<\/\1\s*>|$)/gi)) {
-    const contentStart = m.index! + m[0].indexOf('>') + 1;
-    const contentEnd = contentStart + m[3]!.length;
-    tags = blank(contentStart, contentEnd, tags);
-    if (m[1]!.toLowerCase() !== 'script') continue;
-    const attrs = m[2]!;
-    if (/\bsrc\s*=/i.test(attrs)) continue;
-    const type = /\btype\s*=\s*["']?([^"'\s>]*)/i.exec(attrs)?.[1]?.toLowerCase() ?? '';
-    if (!SCRIPT_TYPES.has(type)) continue;
-    // The script alone, at its own offsets.
-    const virtual = source.slice(0, contentStart).replace(/[^\n]/g, ' ') + source.slice(contentStart, contentEnd);
-    try {
-      found.push(...scanScript(virtual, file, ['js', 'jsx']));
-    } catch (err) {
-      if (err instanceof ScanError) throw new ScanError(`an inline script: ${err.message}`, err.line, err.column);
-      throw err;
-    }
-  }
-  for (const tag of htmlTags(tags)) {
-    for (const m of scanMarkup(tag.text)) {
-      const pos = positionIn(source, tag.start + m.offset);
+  const errors: ScanError[] = [];
+  const n = source.length;
+  const markup = (text: string, base: number) => {
+    for (const m of scanMarkup(text)) {
+      const pos = positionIn(source, base + m.offset);
       found.push({ exit: m.exit, line: pos.line, column: pos.column, symbol: null, message: m.message });
     }
-  }
-  return found.sort((a, b) => a.line - b.line || a.column - b.column);
-}
-
-/** Each start tag, its quoted attribute values honoured (a `>` inside one does not end it). */
-function htmlTags(text: string): Array<{ start: number; text: string }> {
-  const tags: Array<{ start: number; text: string }> = [];
-  const n = text.length;
-  let i = text.indexOf('<');
-  while (i !== -1 && i < n) {
-    if (!/[a-zA-Z]/.test(text[i + 1] ?? '')) {
-      i = text.indexOf('<', i + 1);
+  };
+  let i = 0;
+  while (i < n) {
+    const lt = source.indexOf('<', i);
+    if (lt === -1) break;
+    if (source.startsWith('<!--', lt)) {
+      const close = source.indexOf('-->', lt + 4);
+      i = close === -1 ? n : close + 3;
       continue;
     }
-    let j = i + 1;
-    while (j < n && text[j] !== '>') {
-      const c = text[j];
-      if (c === '"' || c === "'") {
-        const close = text.indexOf(c, j + 1);
-        j = close === -1 ? n : close + 1;
-        continue;
-      }
-      j++;
+    if (!/[a-zA-Z]/.test(source[lt + 1] ?? '')) {
+      i = lt + 1;
+      continue;
     }
-    tags.push({ start: i, text: text.slice(i, Math.min(j + 1, n)) });
-    i = text.indexOf('<', j);
+    const end = tagEnd(source, lt);
+    const tag = source.slice(lt, end);
+    markup(tag, lt);
+    i = end;
+    const name = /^<([a-zA-Z][^\s/>]*)/.exec(tag)![1]!.toLowerCase();
+    if (name !== 'script' && name !== 'style') continue;
+    // Raw text up to the element's end tag.
+    const closeRe = new RegExp(`</${name}[\\s/>]`, 'ig');
+    closeRe.lastIndex = end;
+    const closeAt = closeRe.exec(source)?.index ?? n;
+    if (name === 'script' && !/\ssrc\s*=/i.test(tag)) {
+      const type = (/\stype\s*=\s*["']?([^"'\s>]*)/i.exec(tag)?.[1] ?? '').toLowerCase();
+      if (SCRIPT_TYPES.has(type)) {
+        // The script alone, at its own offsets.
+        const virtual = source.slice(0, end).replace(/[^\n]/g, ' ') + source.slice(end, closeAt);
+        try {
+          found.push(...scanScript(virtual, file, ['js', 'jsx']));
+        } catch (err) {
+          if (!(err instanceof ScanError)) throw err;
+          errors.push(new ScanError(`an inline script: ${err.message}`, err.line, err.column));
+        }
+      } else {
+        for (const m of scanStringMarkup(source.slice(end, closeAt), false)) {
+          const pos = positionIn(source, end + m.offset);
+          found.push({ exit: m.exit, line: pos.line, column: pos.column, symbol: null, message: m.message });
+        }
+      }
+    }
+    i = closeAt;
   }
-  return tags;
+  return { found: found.sort((a, b) => a.line - b.line || a.column - b.column), errors };
 }
