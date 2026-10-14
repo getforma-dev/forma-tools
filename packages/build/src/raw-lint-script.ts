@@ -14,8 +14,8 @@
  * not a proof):
  * - A sink reached through core's module in a callback
  *   (`import('@getforma/core').then((m) => m.template(s))`, or with
- *   `({ template }) =>`): `template`, `templateMany`, `reconcile` and
- *   `setHTMLUnsafe` are tracked from core's own module names (`@getforma/core`,
+ *   `({ template }) =>`): `template`, `templateMany`, `reconcile`,
+ *   `mountMarkup` and `setHTMLUnsafe` are tracked from core's own module names (`@getforma/core`,
  *   its subpaths, `formajs`) and the CDN runtime's `FormaRuntime` global,
  *   through imports, `require`, `await import`, destructuring, aliases and
  *   bracket access. `trustedHtml` is matched by name wherever it comes from.
@@ -27,6 +27,10 @@
  *   passed only when its argument is a `trustedHtml(…)` call or a `const` in
  *   scope bound to one (lexically: a nearer binding of the name shadows it);
  *   anything else is reported, so the lint errs on the side of a listed entry.
+ * - `update()` on a mount handle the file does not see made or hold under a
+ *   plain name: a parameter, a callback's argument, a handle in a collection
+ *   or a property, one returned by a wrapper in the same file, or
+ *   `Reflect.get(w, 'update')`.
  * - The browser's own sinks (`innerHTML`, `insertAdjacentHTML`,
  *   `document.write`, `Element.setHTMLUnsafe`): not Forma's exits, and what
  *   Trusted Types refuses in the browser (DR-20). A `srcdoc` write is reported
@@ -367,6 +371,8 @@ const SINK_ARGUMENT: ReadonlyMap<string, number> = new Map([
   ['templateMany', 0],
   ['setHTMLUnsafe', 1],
   ['reconcile', 1],
+  // 2.1.0's tiered mount (FORMA-128): `mountMarkup(root, markup, options)` (the A2 audit's S2).
+  ['mountMarkup', 1],
 ]);
 const GLOBAL_OBJECTS = new Set(['window', 'globalThis', 'self']);
 
@@ -452,6 +458,12 @@ class ScriptScan {
   private readonly skip = new Set<number>();
   /** Local names bound to core's other sinks, to the sink's name. */
   private readonly sinkLocals = new Map<string, string>();
+  /** Names a mountMarkup() handle is held under: variables, fields and properties assigned one. */
+  private readonly handleNames = new Set<string>();
+  /** Locals `update` is destructured into from a mountMarkup() call. */
+  private readonly handleUpdateLocals = new Set<string>();
+  /** `update` tokens chained on a mountMarkup() call: `mountMarkup(…).update(…)`. */
+  private readonly directUpdates = new Set<number>();
   /** Local names of core's h() (beside `h`, which JSX compiles to). */
   private readonly hLocals = new Set<string>(['h']);
   /** Local names bound to core's module as a namespace. */
@@ -487,6 +499,7 @@ class ScriptScan {
   run(): Found[] {
     this.computeRegions();
     this.collectBindings();
+    this.collectMountHandles();
     this.collectDeclarations();
     this.classifyConsts();
     this.symbols = this.computeSymbols();
@@ -647,6 +660,92 @@ class ScriptScan {
     this.bind(local, region, imported === 'trustedHtml' ? 'trustedCallee' : 'other');
     if (fromCore && SINK_ARGUMENT.has(imported)) this.sinkLocals.set(local, imported);
     if (fromCore && imported === 'h') this.hLocals.add(local);
+  }
+
+  /**
+   * The handles mountMarkup() calls make (the A2 audit's S2): a handle's
+   * `update(markup)` is the same raw sink. A call is followed when its result
+   * is assigned to a name (`const w = mountMarkup(…)`, `w = …`, `w ??= …`,
+   * `w = t ? mountMarkup(…) : …`, a class field, `this.handle = …`; by name,
+   * file-wide), chained (`mountMarkup(…).update(…)`, `['update']`) or
+   * destructured (`const { update } = mountMarkup(…)`, `{ update: up }`). A
+   * handle the file does not see made (a parameter) or hold under a plain
+   * name (a collection, a property, a wrapper's return) is a listed miss.
+   */
+  private collectMountHandles(): void {
+    for (let k = 0; k < this.toks.length; k++) {
+      const t = this.toks[k]!;
+      let start: number;
+      let open: number;
+      if (t.type === 'id' && !this.isP(k - 1, '.') && !this.isP(k - 1, '?.') && this.sinkLocals.get(t.value) === 'mountMarkup') {
+        start = k;
+        open = k + 1;
+      } else if (t.type === 'id' && t.value === 'mountMarkup' && this.isP(k - 1, '.') && this.isNamespaceAt(k - 2)) {
+        start = k - 2;
+        open = k + 1;
+      } else if (t.type === 'str' && t.value === 'mountMarkup' && this.isP(k - 1, '[') && this.isP(k + 1, ']') && this.isNamespaceAt(k - 2)) {
+        start = k - 2;
+        open = k + 2;
+      } else {
+        continue;
+      }
+      if (this.isP(start, ')') && this.pair[start]! >= 0) start = this.pair[start]!;
+      while (this.isP(start - 1, '.') && this.isId(start - 2)) start -= 2;
+      if (!this.isP(open, '(') || this.pair[open]! < open) continue;
+      const close = this.pair[open]!;
+      // `mountMarkup(…).update(…)`, `?.update`, `['update']`, `?.['update']`.
+      const after = close + 1;
+      if ((this.isP(after, '.') || this.isP(after, '?.')) && this.isId(after + 1, 'update')) this.directUpdates.add(after + 1);
+      const bracket = this.isP(after, '?.') ? after + 1 : after;
+      if (this.isP(bracket, '[') && this.t(bracket + 1)?.type === 'str' && this.t(bracket + 1)!.value === 'update' && this.isP(bracket + 2, ']')) this.directUpdates.add(bracket + 1);
+      const assign = this.assignmentBefore(start);
+      if (assign === -1) continue;
+      const target = assign - 1;
+      if (this.isId(target)) {
+        this.handleNames.add(this.toks[target]!.value);
+      } else if (this.isP(target, '}') && this.pair[target]! >= 0) {
+        // `const { update, unmount } = mountMarkup(…)`, `{ update: up }`.
+        for (let p = this.pair[target]! + 1; p < target; p++) {
+          if (!this.isId(p, 'update') || !(this.isP(p - 1, '{') || this.isP(p - 1, ','))) continue;
+          const local = this.isP(p + 1, ':') && this.isId(p + 2) ? p + 2 : p;
+          this.handleUpdateLocals.add(this.toks[local]!.value);
+          this.skip.add(p);
+          this.skip.add(local);
+        }
+      }
+    }
+  }
+
+  private static readonly ASSIGNMENTS = new Set(['=', '??=', '||=', '&&=']);
+
+  /**
+   * The assignment the expression at `start` is the value of: `=`, `??=`,
+   * `||=` or `&&=` just before it, or before the ternary it is an arm of
+   * (`w = t ? mountMarkup(…) : …`); -1 when it is not assigned (the review of
+   * #27, S2). The walk back stays at the expression's own depth and stops at
+   * a `;`, `,` or an opening bracket, so an arm of a ternary in an argument
+   * or an object literal is not read as assigned to what came before it.
+   */
+  private assignmentBefore(start: number): number {
+    let k = start - 1;
+    if (this.isP(k, '?') || this.isP(k, ':')) {
+      k = -1;
+      for (let j = start - 2; j >= 0; j--) {
+        const t = this.toks[j]!;
+        if (t.type !== 'p') continue;
+        if (t.value === ')' || t.value === ']' || t.value === '}') {
+          if (this.pair[j]! < 0) return -1;
+          j = this.pair[j]!;
+          continue;
+        }
+        if (t.value === '(' || t.value === '[' || t.value === '{' || t.value === '${' || t.value === ';' || t.value === ',') return -1;
+        if (ScriptScan.ASSIGNMENTS.has(t.value)) {
+          k = j;
+          break;
+        }
+      }
+    }
+    return this.t(k)?.type === 'p' && ScriptScan.ASSIGNMENTS.has(this.toks[k]!.value) ? k : -1;
   }
 
   /**
@@ -1012,6 +1111,16 @@ class ScriptScan {
     return this.isP(i + 1, ':') && (this.isP(i - 1, '{') || this.isP(i - 1, ','));
   }
 
+  /**
+   * A method or function declaration at `i` (`update(n) {`, in a class or an
+   * object literal), not a call: its `(…)` is followed by `{`, and the name
+   * is not preceded by `.`, `=`, `(` or `,` (the review of #27's nit).
+   */
+  private isMethodDeclaration(i: number): boolean {
+    if (!this.isP(i + 1, '(') || this.pair[i + 1]! < 0 || !this.isP(this.pair[i + 1]! + 1, '{')) return false;
+    return !(this.isP(i - 1, '.') || this.isP(i - 1, '?.') || this.isP(i - 1, '=') || this.isP(i - 1, '(') || this.isP(i - 1, ','));
+  }
+
   /** A shorthand property `{ key }` or `{ a, key, b }`. */
   private isShorthand(i: number): boolean {
     return (this.isP(i - 1, '{') || this.isP(i - 1, ',')) && (this.isP(i + 1, ',') || this.isP(i + 1, '}')) && this.enclosingIsBrace(i);
@@ -1048,18 +1157,27 @@ class ScriptScan {
         return;
       }
     }
+    // update on a mountMarkup() handle by bracket: `w['update'](b)`, `w?.['update'](b)`,
+    // `` w[`update`](b) `` (a template without a substitution is a string), or chained on the call.
+    if (tok.value === 'update' && this.isP(i - 1, '[') && this.isP(i + 1, ']')) {
+      const receiver = this.isP(i - 2, '?.') ? i - 3 : i - 2;
+      if (this.directUpdates.has(i) || (this.isId(receiver) && this.handleNames.has(this.t(receiver)!.value))) {
+        this.checkSinkUse(i, 'MountHandle.update', i + 2, 0);
+        return;
+      }
+    }
     const kind = keyKind(tok.value);
     if (kind) this.visitKeyName(i, kind);
   }
 
   /** A sink of core's at `i`, its name ending before `after`: called with untraced markup, or referenced. */
-  private checkSinkUse(i: number, sink: string, after: number): void {
+  private checkSinkUse(i: number, sink: string, after: number, argIndex = SINK_ARGUMENT.get(sink)!): void {
     const open = this.isP(after, '(') ? after : this.isP(after, '?.') && this.isP(after + 1, '(') ? after + 1 : -1;
     if (open === -1) {
       this.report(i, sink, `${sink} referenced, not called: the lint cannot see what it is given`);
       return;
     }
-    const arg = this.argument(open, SINK_ARGUMENT.get(sink)!);
+    const arg = this.argument(open, argIndex);
     if (!arg || !this.isTrusted(arg[0], arg[1])) this.report(i, sink, `${sink}() given markup not traced to trustedHtml()`);
   }
 
@@ -1128,7 +1246,17 @@ class ScriptScan {
       return;
     }
 
-    // template, templateMany, setHTMLUnsafe, reconcile from core.
+    // update() on a mountMarkup() handle (the A2 audit's S2), or a local it was
+    // destructured into (`const { update } = …`, `{ update: up }`; by name).
+    if ((name === 'update' || this.handleUpdateLocals.has(name)) && !this.isKey(i)) {
+      const onHandle = name === 'update' && (this.directUpdates.has(i) || (afterDot && this.isId(i - 2) && this.handleNames.has(this.t(i - 2)!.value)));
+      if (onHandle || (!afterDot && this.handleUpdateLocals.has(name) && !this.isMethodDeclaration(i))) {
+        this.checkSinkUse(i, 'MountHandle.update', i + 1, 0);
+        return;
+      }
+    }
+
+    // template, templateMany, setHTMLUnsafe, reconcile, mountMarkup from core.
     const sink = onNamespace ? (SINK_ARGUMENT.has(name) ? name : undefined) : !afterDot && !this.isKey(i) ? this.sinkLocals.get(name) : undefined;
     if (sink) {
       this.checkSinkUse(i, sink, i + 1);

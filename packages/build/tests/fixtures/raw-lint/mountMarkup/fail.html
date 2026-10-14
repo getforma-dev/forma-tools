@@ -1,0 +1,10 @@
+<!doctype html>
+<html>
+  <body>
+    <div id="slot"></div>
+    <script>
+      const html = document.getElementById('generated').textContent;
+      FormaRuntime.mountMarkup(document.getElementById('slot'), html, { tier: 'reviewed', grants: {} }); // expect: mountMarkup
+    </script>
+  </body>
+</html>
