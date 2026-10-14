@@ -6,6 +6,10 @@
  * line of why and one of fix. The catalogue below is the single list of codes;
  * `docs/DIAGNOSTICS.md` documents each one, and a test keeps the two equal.
  *
+ * Codes are numbered by family (L-3). The notes, which strict mode never
+ * fails on, are a construct DR-1 admits (504) and the deprecations (802 to
+ * 804, 901): the old paths keep working in A2.
+ *
  * Codes are numbered by family (L-3):
  *
  *   BUILD-1xx  a subtree the compiler leaves to the browser (rule 11's islands)
@@ -16,6 +20,7 @@
  *   BUILD-6xx  the page module itself: a placeholder, or a literal too long
  *   BUILD-7xx  a construct adoption does not handle; `browserOnly()` is the way out
  *   BUILD-8xx  the build package (reported by @getforma/build, catalogued here)
+ *   BUILD-9xx  the compiler's own deprecated entry points (logged when called)
  *
  * A code never changes meaning. A new construct gets a new code; a retired one
  * stays reserved.
@@ -122,7 +127,7 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
     'The server renders the ELSE branch; if the browser would render the THEN branch, adoption keeps the wrong one until the condition changes value.',
     'Initialize the signals the condition reads with literal defaults.'),
   entry('BUILD-303', 'List over a signal initialized with literal rows',
-    "The signal's literal rows have no slot, so the server renders the list empty unless a handler fills `list:<name>:array`, while the browser renders the rows.",
+    "The list's source is a plain read (`rows`, `rows()`, `() => rows()`) of a signal initialized with literal rows, which have no slot, so the server renders the list empty unless a handler fills `list:<name>:array`, while the browser renders the rows. A derived source over literal rows (`() => rows().filter(…)`) is not detected in A2.",
     'Start the signal empty (`createSignal([])`) and fill it from the server (the handler sets `list:<name>:array`; an island seeds the signal from its props), or unroll a module-level const with `...CONST.map(…)`.'),
 
   // ── 4xx: components ──────────────────────────────────────────────────────
@@ -162,7 +167,7 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
     "Two scopes declare the same signal name, so this one's slot is renamed (`name#2`); a server setting the plain name fills the other one.",
     'Declare the signal once and import it, or set the renamed slot by its exact name.'),
   entry('BUILD-504', 'Signal initialized with an array or object literal (note)',
-    'The signal gets no named slot, so its literal value does not reach the server. DR-1 admits literal arrays and objects, so this is a note, never an error; each read is reported where it is: text, an attribute or a conditional (BUILD-301, 206, 302), and a createList over literal rows (BUILD-303).',
+    'The signal gets no named slot, so its literal value does not reach the server. DR-1 admits literal arrays and objects, so this is a note, never an error. A read in text, an attribute or a conditional is reported where it is (BUILD-301, 206, 302), and a createList whose source is a plain read of literal rows (`rows`, `rows()`, `() => rows()`) as BUILD-303; a derived source such as `createList(() => rows().filter(…))` is not detected in A2.',
     'Act on the diagnostic at each read. A createList over `createSignal([])` needs nothing: both sides start empty.',
     false),
 
@@ -219,6 +224,20 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
   entry('BUILD-802', '`serviceWorker` without `app` (deprecated; note)',
     "The worker is 0.3.0's: its caches are shared by every Forma application on the origin, and it takes over open tabs at once. From 3.0.0 a worker is written only for a named app. A deprecation, not a construct the server cannot render, so --strict does not fail on it.",
     "Set `app` to the name the server passes to forma-server's `sw::ServiceWorker::for_app`, for caches per application and build and a waiting upgrade.",
+    false),
+  entry('BUILD-803', '`wasm` in the config (deprecated; note)',
+    "The `wasm` key goes in 3.0.0 with the WASM walker (forma-ir's `wasm` feature and `@getforma/core/wasm`). The old path keeps working in A2, so strict mode does not fail a build that still sets it.",
+    'Remove `wasm` from the config: islands re-render in the browser with h(), and forma-server renders pages.',
+    false),
+  entry('BUILD-804', 'The wasm-pack step ran (deprecated; note)',
+    "The wasm-pack step goes in 3.0.0: forma_ir.js, forma_ir_bg.wasm and the manifest's wasm entry go with the WASM walker. It still runs and ships the walker in A2, so strict mode does not fail on it.",
+    'Remove `wasm` from the config.',
+    false),
+
+  // ── 9xx: the compiler's own deprecated entry points ──────────────────────
+  entry('BUILD-901', '`transformServerFunctions` called (deprecated; note)',
+    'The "use server" transform goes in 3.0.0 with server functions and `@getforma/core/server` (DR-22). Logged once per process when it is called; `@getforma/build` never calls it, so it is never in a build\'s report.',
+    "Serve the call from a route in the application's Rust server.",
     false),
 ]);
 

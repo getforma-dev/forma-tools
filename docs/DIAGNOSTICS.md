@@ -15,17 +15,22 @@ with the code after `IR:` and the position after the file:
    IR: BUILD-101 call expression helpers.extra(...) in /app/src/home/app.tsx:12:11 — emitted as an empty island shell, so it renders nothing server-side and only appears once the client bundle hydrates
 ```
 
-No line was added or removed by the codes, and the text around them is
-unchanged, so a gate that counts these lines per file (GateWASM's
+Apart from the exceptions below, no line is added or removed and the text
+around the code and position is unchanged, so a gate that counts these lines per file (GateWASM's
 `check-ir-degradations.mjs`) or matches their text (ksx Studio's
 `build.mjs`) sees what it saw at 0.3.6. The exceptions are rare and
 deliberate: three page-level lines that named no file now name the entry
 (`inline return node is not a call expression`, `real emission failed`,
 and the module-write failure, which now also starts with `IR:`); a literal
 past 65,535 bytes is reported where it is written instead of as
-`real emission failed`; and BUILD-701 to BUILD-707 word, with the way out,
+`real emission failed`; BUILD-701 to BUILD-707 word, with the way out,
 constructs that were reported as an unresolved component, a call or a text
-child.
+child; and **BUILD-303 adds a line** where 0.3.6 printed none: a
+`createList` whose source is a plain read (`rows`, `rows()`,
+`() => rows()`) of a signal initialized with literal rows, which the server
+renders empty unless a handler fills it. A gate that counts or matches these
+lines sees one more line per such list (GateWASM `b750ca5` and ksx Studio
+`0cb57e2` have none).
 
 The line and column are where the author wrote the construct: in a `.tsx` or
 `.jsx` file, which the compiler reads after esbuild has turned its JSX into
@@ -48,8 +53,10 @@ The line and column are where the author wrote the construct: in a `.tsx` or
   `line`, `column`, `message`, `why`, `fix` and, for BUILD-403, the
   `chain` (`component`, `file`, `line`, `column` per link). It is written
   whether or not the build fails, and its path must be outside `outputDir`,
-  which the build replaces whole and serves (one inside is refused before
-  anything is written). `version` is 1: a field may be added without
+  which the build replaces whole and serves: one inside is refused before
+  anything is written, inside as the filesystem sees it (through real paths,
+  so a symlink into `outputDir` counts; case-insensitively where the
+  filesystem ignores case; `..` only as a whole segment). `version` is 1: a field may be added without
   changing it; renaming or removing one, or changing what one means,
   increments it.
 - **The result**: `build()` returns the same list as `result.diagnostics`.
@@ -73,9 +80,11 @@ can be counted in strict mode: the number of BUILD-403 entries.
 ## Notes
 
 A note is printed as every diagnostic is, but strict mode never fails on it.
-There are two: BUILD-504, a construct DR-1's published subset admits (each
-read of such a signal is reported where it is read), and BUILD-802, a
-deprecated build option.
+They are BUILD-504, a construct DR-1's published subset admits (its reads
+are reported where they are), and the deprecations, whose old paths keep
+working in A2: BUILD-802 to BUILD-804 (build options and the wasm-pack step;
+a build that still sets `wasm` passes in strict mode) and BUILD-901 (the
+compiler's `transformServerFunctions`).
 
 ## Families
 
@@ -89,6 +98,7 @@ deprecated build option.
 | BUILD-6xx | The page module: a placeholder, or a literal too long |
 | BUILD-7xx | A construct adoption does not handle; `browserOnly()` is the way out |
 | BUILD-8xx | The build package (reported by `@getforma/build`) |
+| BUILD-9xx | The compiler's own deprecated entry points (logged when called) |
 
 ## The codes
 
@@ -324,7 +334,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 ### BUILD-303 List over a signal initialized with literal rows
 
-**Why.** The signal's literal rows have no slot, so the server renders the list empty unless a handler fills `list:<name>:array`, while the browser renders the rows.
+**Why.** The list's source is a plain read (`rows`, `rows()`, `() => rows()`) of a signal initialized with literal rows, which have no slot, so the server renders the list empty unless a handler fills `list:<name>:array`, while the browser renders the rows. A derived source over literal rows (`() => rows().filter(…)`) is not detected in A2.
 
 **Fix.** Start the signal empty (`createSignal([])`) and fill it from the server (the handler sets `list:<name>:array`; an island seeds the signal from its props), or unroll a module-level const with `...CONST.map(…)`.
 
@@ -496,7 +506,7 @@ const [count] = createSignal(7);
 
 ### BUILD-504 Signal initialized with an array or object literal (note)
 
-**Why.** The signal gets no named slot, so its literal value does not reach the server. DR-1 admits literal arrays and objects, so this is a note, never an error; each read is reported where it is: text, an attribute or a conditional (BUILD-301, 206, 302), and a createList over literal rows (BUILD-303).
+**Why.** The signal gets no named slot, so its literal value does not reach the server. DR-1 admits literal arrays and objects, so this is a note, never an error. A read in text, an attribute or a conditional is reported where it is (BUILD-301, 206, 302), and a createList whose source is a plain read of literal rows (`rows`, `rows()`, `() => rows()`) as BUILD-303; a derived source such as `createList(() => rows().filter(…))` is not detected in A2.
 
 **Fix.** Act on the diagnostic at each read. A createList over `createSignal([])` needs nothing: both sides start empty.
 
@@ -725,3 +735,35 @@ Printed by the build itself as `Warning: BUILD-801 @getforma/compiler not availa
 **In strict mode.** A note: never an error.
 
 Printed by the build itself, once per `build()`, as `Warning: BUILD-802 serviceWorker is set without app: …` and in `BuildResult.warnings` (FORMA-130); in the report as a note (`packages/build/tests/strict.test.ts` > "reports BUILD-802 (serviceWorker without app) as a note --strict does not fail on").
+
+### BUILD-803 `wasm` in the config (deprecated; note)
+
+**Why.** The `wasm` key goes in 3.0.0 with the WASM walker (forma-ir's `wasm` feature and `@getforma/core/wasm`). The old path keeps working in A2, so strict mode does not fail a build that still sets it.
+
+**Fix.** Remove `wasm` from the config: islands re-render in the browser with h(), and forma-server renders pages.
+
+**In strict mode.** A note: never an error.
+
+Printed by the build itself (FORMA-131), on the console and in `BuildResult.warnings`; in the report as a note (`packages/build/tests/wasm-deprecation.test.ts` > "a strict build that still sets wasm passes, with BUILD-803 and BUILD-804 as notes in its report (FORMA-119)").
+
+### BUILD-804 The wasm-pack step ran (deprecated; note)
+
+**Why.** The wasm-pack step goes in 3.0.0: forma_ir.js, forma_ir_bg.wasm and the manifest's wasm entry go with the WASM walker. It still runs and ships the walker in A2, so strict mode does not fail on it.
+
+**Fix.** Remove `wasm` from the config.
+
+**In strict mode.** A note: never an error.
+
+Printed by the build itself (FORMA-131), on the console and in `BuildResult.warnings`; in the report as a note (`packages/build/tests/wasm-deprecation.test.ts` > "a strict build that still sets wasm passes, with BUILD-803 and BUILD-804 as notes in its report (FORMA-119)").
+
+## BUILD-9xx: The compiler's own deprecated entry points (logged when called)
+
+### BUILD-901 `transformServerFunctions` called (deprecated; note)
+
+**Why.** The "use server" transform goes in 3.0.0 with server functions and `@getforma/core/server` (DR-22). Logged once per process when it is called; `@getforma/build` never calls it, so it is never in a build's report.
+
+**Fix.** Serve the call from a route in the application's Rust server.
+
+**In strict mode.** A note: never an error.
+
+Logged by `transformServerFunctions` on its first call in a process (FORMA-131; `packages/compiler/tests/server-transform-deprecation.test.ts` > "transformServerFunctions logs BUILD-901 once, naming 3.0.0"). Never in a build's report: `@getforma/build` does not call it.

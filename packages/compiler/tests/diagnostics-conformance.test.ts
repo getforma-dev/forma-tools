@@ -38,7 +38,7 @@ const CORPUS = resolve(__dirname, 'fixtures/conformance');
 const CATALOGUE_DOC = resolve(__dirname, '../../../docs/DIAGNOSTICS.md');
 
 /** Codes with no page that can trigger them; each is tested on its own. */
-const NOT_A_PAGE = new Set(['BUILD-606', 'BUILD-801', 'BUILD-802']);
+const NOT_A_PAGE = new Set(['BUILD-606', 'BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-901']);
 
 interface Marker { code: string; file: string; line: number }
 
@@ -122,12 +122,15 @@ describe('the code catalogue', () => {
   it('numbers every code by family, once', () => {
     const codes = DIAGNOSTIC_CATALOGUE.map((e) => e.code);
     expect(new Set(codes).size).toBe(codes.length);
-    for (const code of codes) expect(code).toMatch(/^BUILD-[1-8]\d\d$/);
+    for (const code of codes) expect(code).toMatch(/^BUILD-[1-9]\d\d$/);
     expect([...codes].sort()).toEqual(codes);
   });
 
-  it('has exactly two notes, the codes --strict never fails on: BUILD-504 and BUILD-802', () => {
-    expect(DIAGNOSTIC_CATALOGUE.filter((e) => !e.strict).map((e) => e.code)).toEqual(['BUILD-504', 'BUILD-802']);
+  it('has exactly these notes, the codes strict mode never fails on: BUILD-504 and the deprecations', () => {
+    // A construct DR-1 admits, and the deprecated paths that keep working in
+    // A2 (a build that still sets `wasm` must pass in strict mode).
+    expect(DIAGNOSTIC_CATALOGUE.filter((e) => !e.strict).map((e) => e.code))
+      .toEqual(['BUILD-504', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-901']);
   });
 
   it('gives every code a why and a fix', () => {
@@ -158,7 +161,7 @@ describe('the code catalogue', () => {
         for (const m of readFileSync(join(dir, name), 'utf8').matchAll(/\b(BUILD-\d{3})\b/g)) used.add(m[1]!);
       }
     }
-    expect([...used]).toEqual(expect.arrayContaining(['BUILD-801', 'BUILD-802']));
+    expect([...used]).toEqual(expect.arrayContaining(['BUILD-801', 'BUILD-802', 'BUILD-803', 'BUILD-804', 'BUILD-901']));
     for (const code of used) expect(catalogued.has(code), code).toBe(true);
     // Every walker report names a code: no warnDegraded call without one.
     const walker = readFileSync(join(srcDir, 'ir-walk.ts'), 'utf8');
