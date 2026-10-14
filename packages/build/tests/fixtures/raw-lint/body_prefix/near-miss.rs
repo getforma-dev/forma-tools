@@ -43,3 +43,10 @@ impl App {
 pub fn page(shell: &RawHtml, manifest: &AssetManifest) {
     let config = PageConfig { body_prefix: Some(shell.as_str()), config_json: None };
 }
+
+// Reading the field through Option methods writes nothing.
+pub fn inspect(c: &PageConfig) -> usize {
+    let taken = c.body_prefix.as_deref().unwrap_or("");
+    let shared = &c.body_prefix;
+    c.body_prefix.map(|p| p.len()).unwrap_or(0) + taken.len() + shared.is_some() as usize
+}

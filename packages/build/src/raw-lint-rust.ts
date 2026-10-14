@@ -220,6 +220,9 @@ const IDENT_EXITS: ReadonlyMap<string, string> = new Map([
   ['relax_trusted_types', "relax_trusted_types(): this route's policy relaxes Trusted Types"],
 ]);
 const FIELD_EXITS = new Set(['body_prefix', 'config_json', 'config_script']);
+/** Option methods that write the field, and those of them that take the value written. */
+const OPTION_WRITES = new Set(['replace', 'insert', 'get_or_insert', 'get_or_insert_with', 'as_mut', 'as_deref_mut']);
+const OPTION_VALUE_WRITES = new Set(['replace', 'insert', 'get_or_insert']);
 
 interface RBinding {
   /** The token that binds the name. */
@@ -715,6 +718,10 @@ class RustScan {
       this.report(i, stack, name, `${name} set by shorthand from a local the lint cannot read`);
       return;
     }
+    if (start === -1 && this.isP(i - 1, '.')) {
+      this.visitFieldWrite(i, stack, name);
+      return;
+    }
     if (start === -1) return;
     const end = this.valueEnd(start);
     if (end === start + 1 && this.isId(start, 'None')) return;
@@ -724,6 +731,29 @@ class RustScan {
       this.report(i, stack, 'config_json', 'config_json: data written into the page as JSON');
     } else {
       this.report(i, stack, 'config_script', 'config_script (deprecated): handler text written into a nonced script');
+    }
+  }
+
+  /**
+   * The field written another way (FORMA-126 review, should-fix 3): through
+   * an Option method (`c.body_prefix.replace(s)`, `.insert`, `.get_or_insert`,
+   * `.get_or_insert_with`, `.as_mut`, `.as_deref_mut`), or through a mutable
+   * borrow (`&mut c.body_prefix`, as `mem::replace` and `*(&mut …) =` take).
+   */
+  private visitFieldWrite(i: number, stack: Scope[], name: string): void {
+    if (this.isP(i + 1, '.') && this.isId(i + 2) && OPTION_WRITES.has(this.toks[i + 2]!.value) && this.isP(i + 3, '(')) {
+      const method = this.toks[i + 2]!.value;
+      const open = i + 3;
+      const close = this.pair[open]!;
+      if (name === 'body_prefix' && OPTION_VALUE_WRITES.has(method) && close > open + 1 && this.isRawValue(open + 1, close, stack)) return;
+      this.report(i, stack, name, `${name}.${method}(): a write the lint cannot trace to ${name === 'body_prefix' ? 'RawHtml::trusted' : 'a typed value'}`);
+      return;
+    }
+    // Back over the place expression `c.page.body_prefix` to its start.
+    let k = i;
+    while (this.isP(k - 1, '.') && this.isId(k - 2)) k -= 2;
+    if (this.isId(k - 1, 'mut') && (this.isP(k - 2, '&') || this.isP(k - 2, '&&'))) {
+      this.report(i, stack, name, `&mut ${name}: whatever is written through the borrow the lint cannot see`);
     }
   }
 

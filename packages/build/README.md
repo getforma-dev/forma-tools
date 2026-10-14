@@ -447,12 +447,18 @@ Rust:
 | `RawHtml-alias` | `RawHtml` under another name: `use … RawHtml as X`, `type X = …RawHtml`, any `= RawHtml` (an associated type, a generic default). |
 | `r#html` | The raw identifier `r#html`, the name of `RawHtml`'s private field. |
 | `body_prefix` | A `body_prefix` other than `None` that is not `Some(&x)` (or `x.as_str()`, `&*x`) where `x`'s last binding in scope is `RawHtml::trusted(..)` or declared `RawHtml`, or `self.x` declared `RawHtml` by the `impl`'s own struct: a string still works in 0.2.x. |
-| `config_json` | `config_json` other than `None`: data's typed home. |
+| `config_json` | `config_json` set to anything but `None`: data's typed home. |
 | `config_script` | `config_script` other than `None`: deprecated, handler text in a nonced script, removed in 3.0.0. |
 | `into_parts_unchecked` | `PageResponse::into_parts_unchecked`. |
 | `with_module_preloads` | `RenderCtx::with_module_preloads`, the typed home for `modulepreload` links. |
 | `with_head_link` | `RenderCtx::with_head_link`, the typed home for head links. |
 | `relax_trusted_types` | `PolicyExtensions::relax_trusted_types`, a route's Trusted Types relaxation. |
+
+The three fields are found where a struct literal or an assignment sets
+them (`field: v`, `x.field = v`), through an `Option` method that writes them
+(`.replace`, `.insert`, `.get_or_insert`, `.get_or_insert_with`, `.as_mut`,
+`.as_deref_mut`), and through a mutable borrow (`&mut c.body_prefix`, as
+`mem::replace` takes).
 
 A typed use is one raw entry, its constructor: `{ __html: trustedHtml(md) }`
 lists `trustedHtml`, and `let shell = RawHtml::trusted(..)` with
