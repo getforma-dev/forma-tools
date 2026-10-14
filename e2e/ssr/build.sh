@@ -56,7 +56,12 @@ ln -sfn "$FORMA_DIR" "$SCRIPT_DIR/render/forma"
 # forma's two crates every time (a few seconds) so the walker is FORMA_DIR's.
 cargo clean --quiet --manifest-path "$SCRIPT_DIR/render/Cargo.toml" \
   -p forma-ir -p forma-server -p forma-e2e-render
-cargo run --quiet --manifest-path "$SCRIPT_DIR/render/Cargo.toml" -- \
+# --locked: render/Cargo.lock is the only pin of the crates this job compiles
+# (forma commits no lockfile). When forma's crates add or change a dependency
+# this fails loudly; refresh the lock by running
+#   cargo build --manifest-path e2e/ssr/render/Cargo.toml
+# once without --locked, and commit render/Cargo.lock.
+cargo run --quiet --locked --manifest-path "$SCRIPT_DIR/render/Cargo.toml" -- \
   "$SCRIPT_DIR/cases" "$SCRIPT_DIR/out/build" "$SCRIPT_DIR/out/site"
 
 echo "✓ SSR e2e site built in $SCRIPT_DIR/out/site/"

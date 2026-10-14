@@ -10,20 +10,23 @@
  *
  * The defects the Forma Stack audit verification reproduced (runs 1, 2, 3 and
  * 7; the v2 decision brief, DR-5 and DR-7) are written as the behaviour v2
- * requires and marked `test.fail`, each naming the ticket whose fix flips it.
- * When that fix lands, the case passes, `test.fail` reports it as an
- * unexpected pass, and CI goes red until the marker is removed.
+ * requires, each naming the ticket whose fix flips it. Such a test first
+ * asserts its case's preconditions normally (the page is server-rendered, the
+ * elements exist, the server's value is there), then calls `test.fail()` just
+ * before the defect assertion. So a broken harness fails the test for real
+ * (a precondition fails before the marker); only the named defect is an
+ * expected failure; and when the fix lands, the unexpected pass turns CI red
+ * until that one line is removed.
  *
- * An expected-fail test passes whenever ANY assertion in it fails, including a
- * broken harness. The table "every case is server-rendered and activates"
- * guards against that: it must pass for every case, so an expected-fail case
- * can only be failing on the behaviour it names.
+ * The table "every case is server-rendered and activates" adds the shared
+ * controls (the walker's HTML, activation, Phase 1, no console errors), and
+ * the file refuses to run unless the server on the SSR port serves THIS
+ * clone's site.
  */
-import { readdirSync } from 'node:fs';
+import { readdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Browser, type Page, type Route } from '@playwright/test';
-
-const ORIGIN = 'http://127.0.0.1:3458';
+import { SSR_ORIGIN as ORIGIN } from './origin';
 
 /** Every case under e2e/ssr/cases/, and how its page reports activation. */
 const CASES = {
@@ -42,6 +45,15 @@ type CaseName = keyof typeof CASES;
 const SETTLE = { timeout: 2_000 };
 
 test.use({ baseURL: ORIGIN });
+
+// Playwright reuses whatever server already answers on the SSR port, which may
+// be another clone's, built from another FormaJS or forma. Refuse to test it.
+test.beforeAll(async () => {
+  const answer = await fetch(`${ORIGIN}/__site`).then((r) => r.json() as Promise<{ site: string; built: boolean }>);
+  expect(answer.site, `the server on ${ORIGIN} serves another clone's site; stop it or set FORMA_SSR_E2E_PORT`)
+    .toBe(join(realpathSync(__dirname), 'out', 'site'));
+  expect(answer.built, 'the SSR site is not built; run e2e/ssr/build.sh (npm run test:e2e does)').toBe(true);
+});
 
 /**
  * Collect page errors and console errors (CSP violations are console errors).
@@ -124,6 +136,11 @@ function submitted(page: Page, field: string): Promise<string[]> {
   }, field);
 }
 
+/** A Phase 2 page as parsed: #app carries data-forma-ssr. */
+async function expectServerRendered(page: Page): Promise<void> {
+  await expect(page.locator('#app'), 'a Phase 2 page').toHaveAttribute('data-forma-ssr', '');
+}
+
 /** A select's live state: its value and selected index. */
 function selectState(page: Page, selector: string): Promise<{ value: string; index: number }> {
   return page.locator(selector).evaluate((el: HTMLSelectElement) => ({ value: el.value, index: el.selectedIndex }));
@@ -146,7 +163,7 @@ test.describe('every case is server-rendered and activates', () => {
   for (const name of Object.keys(CASES) as CaseName[]) {
     test(`${name}: walker HTML present, Phase 2 activates, Phase 1 mounts, no errors`, async ({ browser, page }) => {
       const noJs = await openWithoutJs(browser, `/${name}/`);
-      await expect(noJs.page.locator('#app'), 'a Phase 2 page').toHaveAttribute('data-forma-ssr', '');
+      await expectServerRendered(noJs.page);
       const serverHtml = await noJs.page.locator('#app').innerHTML();
       await noJs.close();
       expect(serverHtml.trim().length, 'the walker rendered content into #app').toBeGreaterThan(0);
@@ -172,15 +189,18 @@ test.describe('generic-state', () => {
     await held.activate();
   });
 
-  // Expected to fail until release B gives server state a channel to the
-  // signals (FORMA-103, DR-4) and adoption stops writing on its first run
-  // (FORMA-104, DR-5); whichever makes it pass removes the marker. Today the
-  // first effect run writes the client default 0 over the server's 7. (DR-6,
-  // FORMA-105, ends mount() adoption of a server page; this case then moves
-  // into an island.)
-  test.fail('generic-state: the server value 7 survives activation', async ({ page }) => {
+  test('generic-state: the server value 7 survives activation', async ({ page }) => {
     const held = await openHeld(page, 'generic-state');
+    await expect(page.locator('#count')).toHaveText('7');
     await held.activate();
+
+    // Expected to fail until release B gives server state a channel to the
+    // signals (FORMA-103, DR-4) and adoption stops writing on its first run
+    // (FORMA-104, DR-5); whichever makes it pass removes this line. Today the
+    // first effect run writes the client default 0 over the server's 7. (DR-6,
+    // FORMA-105, ends mount() adoption of a server page; this case then moves
+    // into an island.)
+    test.fail();
     await expect(page.locator('#count')).toHaveText('7', SETTLE);
   });
 });
@@ -195,14 +215,16 @@ test.describe('root-fragment', () => {
     await expect(page.locator('#note')).toHaveText('bye', SETTLE);
   });
 
-  // Expected to fail until FORMA-003 adopts a Fragment as the range of its
-  // children (DR-7 a). Today h(Fragment) builds a real DocumentFragment while
-  // hydrating, adoption treats it as nothing to adopt, removes data-forma-ssr,
-  // and binds no handler.
-  test.fail('root-fragment: after Phase 2 activation, the button updates the text', async ({ page }) => {
+  test('root-fragment: after Phase 2 activation, the button updates the text', async ({ page }) => {
     await openActivated(page, 'root-fragment');
     await expect(page.locator('#note')).toHaveText('hello');
     await page.click('#go');
+
+    // Expected to fail until FORMA-003 adopts a Fragment as the range of its
+    // children (DR-7 a). Today h(Fragment) builds a real DocumentFragment
+    // while hydrating, adoption treats it as nothing to adopt, removes
+    // data-forma-ssr, and binds no handler.
+    test.fail();
     await expect(page.locator('#note')).toHaveText('bye', SETTLE);
   });
 });
@@ -210,13 +232,19 @@ test.describe('root-fragment', () => {
 // ── textarea and title: RCDATA (audit verification run 2) ─────────────────
 
 test.describe('textarea-child', () => {
-  // Expected to fail until FORMA-002 stops the walker writing f: markers inside
-  // RCDATA parents (DR-7 b). Today the value is `<!--f:t0-->hello<!--/f:t0-->`.
-  test.fail('textarea-child: before JavaScript the value and FormData are "hello"', async ({ browser }) => {
+  test('textarea-child: before JavaScript the value and FormData are "hello"', async ({ browser }) => {
     const noJs = await openWithoutJs(browser, '/textarea-child/');
-    const value = await noJs.page.locator('#ta').inputValue();
-    expect({ value, submitted: await submitted(noJs.page, 'ta') }).toEqual({ value: 'hello', submitted: ['hello'] });
+    await expectServerRendered(noJs.page);
+    const value = await noJs.page.locator('form#f textarea#ta').inputValue();
+    const sent = await submitted(noJs.page, 'ta');
     await noJs.close();
+    expect(value, "the server's value is in the textarea").toContain('hello');
+
+    // Expected to fail until FORMA-002 stops the walker writing f: markers
+    // inside RCDATA parents (DR-7 b). Today the value, and what the form
+    // submits, is `<!--f:t0-->hello<!--/f:t0-->`.
+    test.fail();
+    expect({ value, submitted: sent }).toEqual({ value: 'hello', submitted: ['hello'] });
   });
 
   test('textarea-child: after activation the value follows the signal', async ({ page }) => {
@@ -236,30 +264,42 @@ test.describe('textarea-child', () => {
 });
 
 test.describe('textarea-value', () => {
-  // Expected to fail until FORMA-002 writes a textarea's value binding as its
-  // text (DR-7 c). Today the server writes value="hello", which a textarea
-  // ignores, so it is empty and submits "".
-  test.fail('textarea-value: before JavaScript the value and FormData are "hello"', async ({ browser }) => {
+  test('textarea-value: before JavaScript the value and FormData are "hello"', async ({ browser }) => {
     const noJs = await openWithoutJs(browser, '/textarea-value/');
-    const value = await noJs.page.locator('#ta').inputValue();
-    expect({ value, submitted: await submitted(noJs.page, 'ta') }).toEqual({ value: 'hello', submitted: ['hello'] });
+    await expectServerRendered(noJs.page);
+    const value = await noJs.page.locator('form#f textarea#ta').inputValue();
+    const sent = await submitted(noJs.page, 'ta');
     await noJs.close();
+
+    // Expected to fail until FORMA-002 writes a textarea's value binding as its
+    // text (DR-7 c). Today the server writes value="hello", which a textarea
+    // ignores, so it is empty and submits "".
+    test.fail();
+    expect({ value, submitted: sent }).toEqual({ value: 'hello', submitted: ['hello'] });
   });
 
-  // Expected to fail until FORMA-003 writes `value` as the live property
-  // (042e353's writer, kept for writes after activation). Today only the
-  // attribute is written, which a textarea ignores.
-  test.fail('textarea-value: after activation the value follows the signal', async ({ page }) => {
+  test('textarea-value: after activation the value follows the signal', async ({ page }) => {
     await openActivated(page, 'textarea-value');
+    await expect(page.locator('form#f textarea#ta')).toHaveCount(1);
+    await expect(page.locator('#update')).toBeVisible();
+
+    // Expected to fail until FORMA-003 writes `value` as the live property
+    // (042e353's writer, kept for writes after activation). Today only the
+    // attribute is written, which a textarea ignores.
+    test.fail();
     await expect(page.locator('#ta')).toHaveValue('hello', SETTLE);
     await page.click('#update');
     await expect(page.locator('#ta')).toHaveValue('updated', SETTLE);
   });
 
-  // Expected to fail until FORMA-003, as above: the client-rendered path
-  // writes the same attribute.
-  test.fail('textarea-value: client-rendered, the value follows the signal', async ({ page }) => {
+  test('textarea-value: client-rendered, the value follows the signal', async ({ page }) => {
     await openClientRendered(page, 'textarea-value');
+    await expect(page.locator('form#f textarea#ta')).toHaveCount(1);
+    await expect(page.locator('#update')).toBeVisible();
+
+    // Expected to fail until FORMA-003, as above: the client-rendered path
+    // writes the same attribute.
+    test.fail();
     await expect(page.locator('#ta')).toHaveValue('hello', SETTLE);
     await page.click('#update');
     await expect(page.locator('#ta')).toHaveValue('updated', SETTLE);
@@ -267,12 +307,18 @@ test.describe('textarea-value', () => {
 });
 
 test.describe('title', () => {
-  // Expected to fail until FORMA-002 stops the walker writing f: markers inside
-  // RCDATA parents (DR-7 b). Today the element's text is the marker text.
-  test.fail('title: before JavaScript the element text is "hello"', async ({ browser }) => {
+  test('title: before JavaScript the element text is "hello"', async ({ browser }) => {
     const noJs = await openWithoutJs(browser, '/title/');
-    expect(await noJs.page.locator('#tt').textContent()).toBe('hello');
+    await expectServerRendered(noJs.page);
+    const text = await noJs.page.locator('#title-host > title#tt').textContent();
     await noJs.close();
+    expect(text, "the server's value is in the element").toContain('hello');
+
+    // Expected to fail until FORMA-002 stops the walker writing f: markers
+    // inside RCDATA parents (DR-7 b). Today the element's text is the marker
+    // text, `<!--f:t0-->hello<!--/f:t0-->`.
+    test.fail();
+    expect(text).toBe('hello');
   });
 
   test('title: after activation the element text follows the signal; document.title stays the page title', async ({ page }) => {
@@ -289,30 +335,43 @@ test.describe('title', () => {
 // ── select bound to a later option (audit verification run 3) ─────────────
 
 test.describe('select', () => {
-  // Expected to fail until FORMA-002 writes `selected` on the matching option
-  // (DR-7 c). Today the server writes value="b" on the select, which HTML
-  // ignores, so the first option is selected and submitted.
-  test.fail('select: before JavaScript "b" is selected and submitted', async ({ browser }) => {
+  test('select: before JavaScript "b" is selected and submitted', async ({ browser }) => {
     const noJs = await openWithoutJs(browser, '/select/');
+    await expectServerRendered(noJs.page);
+    await expect(noJs.page.locator('form#f select#choice option')).toHaveText(['A', 'B', 'C']);
     const state = await selectState(noJs.page, '#choice');
-    expect({ ...state, submitted: await submitted(noJs.page, 'choice') }).toEqual({ value: 'b', index: 1, submitted: ['b'] });
+    const sent = await submitted(noJs.page, 'choice');
     await noJs.close();
+
+    // Expected to fail until FORMA-002 writes `selected` on the matching option
+    // (DR-7 c). Today the server writes value="b" on the select, which HTML
+    // ignores, so the first option is selected and submitted.
+    test.fail();
+    expect({ ...state, submitted: sent }).toEqual({ value: 'b', index: 1, submitted: ['b'] });
   });
 
-  // Expected to fail until FORMA-003 writes a select's value as the live
-  // property after its options exist (042e353's writer). Today only the
-  // attribute is written, and the first option stays selected.
-  test.fail('select: after activation "b" is selected, and an update selects "c"', async ({ page }) => {
+  test('select: after activation "b" is selected, and an update selects "c"', async ({ page }) => {
     await openActivated(page, 'select');
+    await expect(page.locator('form#f select#choice option')).toHaveText(['A', 'B', 'C']);
+    await expect(page.locator('#pick-c')).toBeVisible();
+
+    // Expected to fail until FORMA-003 writes a select's value as the live
+    // property after its options exist (042e353's writer). Today only the
+    // attribute is written, and the first option stays selected.
+    test.fail();
     expect(await selectState(page, '#choice')).toEqual({ value: 'b', index: 1 });
     await page.click('#pick-c');
     await expect(page.locator('#choice')).toHaveValue('c', SETTLE);
     expect(await submitted(page, 'choice')).toEqual(['c']);
   });
 
-  // Expected to fail until FORMA-003, as above, on the client-rendered path.
-  test.fail('select: client-rendered, "b" is selected, and an update selects "c"', async ({ page }) => {
+  test('select: client-rendered, "b" is selected, and an update selects "c"', async ({ page }) => {
     await openClientRendered(page, 'select');
+    await expect(page.locator('form#f select#choice option')).toHaveText(['A', 'B', 'C']);
+    await expect(page.locator('#pick-c')).toBeVisible();
+
+    // Expected to fail until FORMA-003, as above, on the client-rendered path.
+    test.fail();
     expect(await selectState(page, '#choice')).toEqual({ value: 'b', index: 1 });
     await page.click('#pick-c');
     await expect(page.locator('#choice')).toHaveValue('c', SETTLE);

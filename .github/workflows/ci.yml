@@ -157,12 +157,11 @@ jobs:
     # default — `npx serve` failing to bind fails the run at 60s, it cannot
     # hang. Realistic worst case ~5m; 15 is 3x.
     #
-    # The SSR lane (FORMA-001) adds, MEASURED locally: `e2e/ssr/build.sh` = 13s
-    # with a cold Rust target (debug build of the renderer against forma's
-    # crates), and the whole Playwright run = 15s wall for 43 tests. A cold
-    # Rust build on a runner is ~2m without the cache. Realistic worst case
-    # ~8m; 25 is 3x.
-    timeout-minutes: 25
+    # The SSR lane (FORMA-001) adds, MEASURED in CI on its first run (a cold
+    # rust-cache): the "Build the SSR site" step 26s, of which cargo ~20s (a
+    # debug build of the renderer against forma's crates), and the whole job
+    # 1m52s, Playwright 44 tests included. Realistic worst case ~6m; 20 is >3x.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

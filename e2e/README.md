@@ -29,11 +29,13 @@ exercises the whole Phase 2 chain, one page per case in `e2e/ssr/cases/`:
    `FormData` before JavaScript, after activation and after interaction.
 
 The cases are the Forma Stack audit's verified failures (FORMA-001). Each one
-that fails today is written as the behaviour v2 requires and marked
-`test.fail`, with a comment naming the ticket whose fix flips it; when the fix
-lands, Playwright reports an unexpected pass and the job goes red until the
-marker is removed. `ledger-arrival` is the positive fixture: Ledger's pattern of
-seeding an island's signals from its props before the component runs.
+that fails today is written as the behaviour v2 requires: the test asserts its
+case's preconditions normally, then calls `test.fail()`, with a comment naming
+the ticket whose fix flips it, just before the defect assertion. A broken
+precondition is therefore a real failure; only the named defect is expected.
+When the fix lands, Playwright reports an unexpected pass and the job goes red
+until that line is removed. `ledger-arrival` is the positive fixture: Ledger's
+pattern of seeding an island's signals from its props before the component runs.
 
 | Case | What it pins | Today |
 |------|--------------|-------|
@@ -45,9 +47,15 @@ seeding an island's signals from its props before the component runs.
 | `edited-controls` | text, checkbox and option edited before activation survive it | passes (fails with formajs `042e353`) |
 | `ledger-arrival` | seeded values survive activation; Retry runs | passes |
 
-The table "every case is server-rendered and activates" must pass for every
-case: an expected-fail test also "passes" when the harness is broken, and that
-table is what rules it out.
+The table "every case is server-rendered and activates" adds the shared
+controls for every case: the walker's HTML, activation, the Phase 1 mount, and
+no console error.
+
+The SSR server listens on port 3458, or on `FORMA_SSR_E2E_PORT` when set.
+Playwright reuses a server already on that port, which may be another clone's,
+so the spec first asks `/__site` which site it serves and refuses to run
+unless it is this clone's `e2e/ssr/out/site`, built. The FormaJS-only spec,
+`e2e/full-stack.spec.ts`, runs without the SSR site.
 
 ## How to Run
 
@@ -66,10 +74,11 @@ This automatically:
 4. Starts the static server on port 3457 and the SSR server on port 3458
 5. Runs the Playwright tests in headless Chromium
 
-### Custom FormaJS or forma path
+### Custom FormaJS or forma path, or another SSR port
 
 ```bash
 FORMAJS_DIR=/path/to/formajs FORMA_DIR=/path/to/forma npm run test:e2e
+FORMA_SSR_E2E_PORT=3468 npm run test:e2e    # e.g. a second clone on the same machine
 ```
 
 ### In CI
@@ -101,6 +110,7 @@ e2e/
 │   ├── build-cases.mjs              ← @getforma/build per case, real-IR check
 │   ├── render/                      ← Rust: forma_server::render_page per case
 │   ├── serve.mjs                    ← Serves out/site with each page's headers
+│   ├── origin.ts                    ← The SSR port (FORMA_SSR_E2E_PORT, default 3458)
 │   └── regressions.spec.ts          ← The SSR regression fixtures
 └── README.md                        ← This file
 ```
@@ -119,4 +129,6 @@ e2e/
 | "Cannot find module serve" | `npm install` |
 | "Browser not found" | `npx playwright install chromium` |
 | "FORMA_DIR not found" | `FORMA_DIR=~/path/to/forma npm run test:e2e` (a getforma-dev/forma checkout) |
-| `serve: ... has not been built` | `bash e2e/ssr/build.sh` (or `npm run test:e2e`, which runs it) |
+| "the SSR site is not built" | `bash e2e/ssr/build.sh` (or `npm run test:e2e`, which runs it) |
+| "serves another clone's site" | stop that clone's server, or `FORMA_SSR_E2E_PORT=<free port>` |
+| "the lock file needs to be updated" (cargo) | forma's crates changed dependencies: `cargo build --manifest-path e2e/ssr/render/Cargo.toml` once, commit `e2e/ssr/render/Cargo.lock` |
