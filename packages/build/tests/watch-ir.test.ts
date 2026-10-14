@@ -18,7 +18,8 @@ import type { BuildConfig } from '../src/types';
 import { watching } from './helpers/watch';
 
 const temporary: string[] = [];
-afterEach(() => temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
+// The killed watcher's esbuild service can still write for a moment.
+afterEach(() => temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 
 /** Two server-rendered pages; only `home` renders `Greeting`. */
 function site() {
