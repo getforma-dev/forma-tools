@@ -416,6 +416,31 @@ describe('reading sources', () => {
   });
 });
 
+describe('line endings', () => {
+  it('a CRLF source reports the lines and columns an LF one does', () => {
+    const rs = 'pub fn page() {\n    // RawHtml::trusted in a comment\n    let c = PageConfig { body_prefix: Some(SHELL) };\n}\n';
+    const tsx = "import { h, trustedHtml } from '@getforma/core';\n\nexport function V(p: { s: string }) {\n  return <div\n    data-bind:srcdoc=\"{d}\">{trustedHtml(p.s)}</div>;\n}\n";
+    const html = '<!doctype html>\n<!-- data-bind:srcdoc -->\n<iframe\n  data-bind:srcdoc="{d}"></iframe>\n<script>\n  FormaRuntime.reconcile(el, s);\n</script>\n';
+    const run = (eol: string) => {
+      const dir = join(tmp, eol === '\n' ? 'lf' : 'crlf');
+      mkdirSync(dir);
+      writeFileSync(join(dir, 'a.rs'), rs.replace(/\n/g, eol));
+      writeFileSync(join(dir, 'b.tsx'), tsx.replace(/\n/g, eol));
+      writeFileSync(join(dir, 'c.html'), html.replace(/\n/g, eol));
+      return rawLint({ paths: [dir], root: dir, cwd: tmp, today: TODAY }).rawEntries.map((e) => [e.file, e.line, e.column, e.exit, e.symbol]);
+    };
+    const lf = run('\n');
+    expect(lf).toEqual([
+      ['a.rs', 3, 26, 'body_prefix', 'page'],
+      ['b.tsx', 5, 5, 'data-bind:srcdoc', 'V'],
+      ['b.tsx', 5, 29, 'trustedHtml', 'V'],
+      ['c.html', 4, 3, 'data-bind:srcdoc', null],
+      ['c.html', 6, 16, 'reconcile', null],
+    ]);
+    expect(run('\r\n')).toEqual(lf);
+  });
+});
+
 describe('the command', () => {
   function cli(args: string[], cwd = tmp): { code: number; out: string; err: string } {
     const out: string[] = [];
