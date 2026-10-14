@@ -1068,7 +1068,11 @@ describe('@getforma/build — the production build\'s console summary (FORMA-180
       expect(hashed).toMatch(/^(app|about)\.[0-9a-f]{8}\.js$/);
       expect(stdout).toContain(`${shown}/${hashed}`);
     }
-    expect(stdout).not.toContain('\\');
+    // The summary's own lines: no backslash, on Windows either (the other
+    // lines print outputDir as the configuration spelled it).
+    const summaryLines = stdout.split('\n').filter((line) => /\.[0-9a-f]{8}\.js\s+\d/.test(line));
+    expect(summaryLines).toHaveLength(2);
+    for (const line of summaryLines) expect(line).not.toContain('\\');
     expect(stdout).toMatch(/dist\/app\.[0-9a-f]{8}\.js\s+\d+(\.\d+)?k?b/);
     // Neither stream names the staging directory, by either of its forms.
     expect(output).not.toContain('forma-staging');
