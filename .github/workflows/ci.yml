@@ -182,6 +182,11 @@ jobs:
     # rust-cache): the "Build the SSR site" step 26s, of which cargo ~20s (a
     # debug build of the renderer against forma's crates), and the whole job
     # 1m52s, Playwright 44 tests included. Realistic worst case ~6m; 20 is >3x.
+    # The preview-frame lane (FORMA-175) adds, MEASURED in CI on its first run
+    # (forma-tools#24, the frame server's rust-cache cold): the "Build the
+    # preview-frame lane" step 17s (npm pack, the tarball's install, two
+    # builds, a debug build of the frame server), and the whole job 1m54s,
+    # Playwright 53 tests included.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
