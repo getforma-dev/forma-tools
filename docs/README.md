@@ -19,12 +19,14 @@ retired.
 |---|---|
 | [`../packages/compiler/README.md`](../packages/compiler/README.md) | The Vite plugin, `"use server"` transforms, the esbuild SSR plugin, **what renders server-side and what degrades to an island**, and the slot-naming contract |
 | [`../packages/build/README.md`](../packages/build/README.md) | Bundling, content hashing, Brotli/gzip, the asset manifest, SSR `.ir` wiring |
+| [`DIAGNOSTICS.md`](DIAGNOSTICS.md) | Every build diagnostic code (`BUILD-101` …), what it means for the page and its fix; `--strict`, the JSON report, and the `browserOnly()` way out |
 
 The section to read before debugging an empty page is *What renders
 server-side* in the compiler README: the compiler walks source rather than
 executing it, so a construct it cannot prove becomes an empty island shell that
 renders nothing until the client bundle hydrates. Every such degradation warns
-at build time, naming the file, the construct, and what the page loses.
+at build time with a stable code, naming the file, line and column, the
+construct, and what the page loses; `--strict` makes them errors.
 
 ## Test corpora and suites
 

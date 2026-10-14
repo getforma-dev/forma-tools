@@ -36,6 +36,15 @@ export const SLOT_TYPE_OBJECT = 0x05;
 export const SLOT_SOURCE_SERVER = 0x00;
 export const SLOT_SOURCE_CLIENT = 0x01;
 
+/**
+ * The error the encoder throws for an entry past FMIR's u16 length prefix: the
+ * message as before, with the diagnostic code a build reports it under
+ * (BUILD-604), so the SSR plugin need not match the text.
+ */
+function literalTooLong(message: string): Error {
+  return Object.assign(new Error(message), { code: 'BUILD-604' });
+}
+
 // ---------------------------------------------------------------------------
 // IrEmitContext
 // ---------------------------------------------------------------------------
@@ -281,7 +290,7 @@ export class IrEmitContext {
       // the Rust parser. Fail hard instead of emitting a corrupt binary
       // (generateRealIr catches this and falls back to placeholder IR).
       if (encoded.length > 0xffff) {
-        throw new Error(
+        throw literalTooLong(
           `FMIR string table entry is ${encoded.length} UTF-8 bytes — exceeds the 65535-byte u16 length limit (string starts with ${JSON.stringify(s.slice(0, 40))}...)`,
         );
       }
@@ -317,7 +326,7 @@ export class IrEmitContext {
       // default_len is a u16 — larger defaults would silently wrap and
       // corrupt the slot table (see the matching guard in encodeStringTable).
       if (slot.defaultBytes.length > 0xffff) {
-        throw new Error(
+        throw literalTooLong(
           `FMIR slot '${slot.name}' has a ${slot.defaultBytes.length}-byte default — exceeds the 65535-byte u16 length limit`,
         );
       }

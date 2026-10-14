@@ -153,37 +153,64 @@ served asset tree, read by nothing but a since-removed `@getforma/build` step.)
 The compiler renders what it can prove and defers the rest to the client. The
 deferral is the dangerous part: an unrecognised construct becomes an empty
 island shell (or, for an unresolvable attribute value, an empty attribute), and
-a page that *looks* built can be missing content. **Every such degradation now
-warns**, naming the file, the construct, and what the page loses:
+a page that *looks* built can be missing content. **Every such degradation
+warns** with a stable code, the file, the line and the column, naming the
+construct and what the page loses:
 
 ```
-   IR: child a bare '&&' expression (not wrapped in a function) in src/HomePage.ts
+   IR: BUILD-102 child a bare '&&' expression (not wrapped in a function) in src/HomePage.ts:14:9
        — emitted as an empty island shell, so it renders nothing server-side and
        only appears once the client bundle hydrates — wrap it in a function
        (`() => …`) for a reactive binding, or use createShow/createList for
        conditionals and lists
 ```
 
-Warnings are emitted for: a dynamic tag (`h(tagName, ...)`); a child the walker
-cannot translate (bare identifier, template literal, unwrapped ternary or `&&`);
-a spread that will not statically unroll; each way a `createList` call can fail
-to compile (too few arguments, a non-inline map function, a destructured or
-missing row parameter, no visible return); a `createShow` branch that is not an
-`h()` call; a component that cannot be resolved, is recursive, exceeds the
-3-level inlining depth, is passed a prop that is not a literal, or has no
-followable return; an island component whose content cannot be compiled; and a
-`createSignal` whose initial value is not a literal (which is why it has no
-named slot).
+(One line in the output; wrapped here.) The codes are numbered by family:
+`BUILD-1xx` a subtree left to the browser, `2xx` an attribute, `3xx` text or a
+conditional, `4xx` a component, `5xx` a signal, `6xx` the page module (a
+placeholder, a literal past 65,535 bytes), `7xx` a construct adoption does not
+handle (a plain `.map()` child, `createErrorBoundary`, `createSwitch`,
+`createPortal`, `createSuspense`), each naming `browserOnly()` as the way out.
+[`docs/DIAGNOSTICS.md`](../../docs/DIAGNOSTICS.md) lists every code with its
+why and fix; `tests/fixtures/conformance/<code>/` holds, per code, a page that
+reports it at its line and the near miss that does not.
 
-Bindings warn too, because a binding the compiler cannot evaluate is a page
-whose server render disagrees with its client render:
+The line is the one 0.3.6 printed, with the code after `IR:` and the position
+after the file, one per construct; a `.tsx` file's position is the line the
+author wrote, mapped back through the JSX transform. Composition past the
+3-level inlining limit (`BUILD-403`) names the chain from the page down, so it
+can be counted. A signal initialized with a literal array or object
+(`BUILD-504`) is a note, never an error: DR-1 admits it.
 
-- a **dynamic attribute** whose expression will not evaluate — the attribute is omitted server-side and appears only after hydration;
-- a **dynamic text child** whose expression will not evaluate — it renders empty and fills in after hydration;
-- a **conditional** whose condition will not evaluate — the server renders its ELSE branch, and if the client would render THEN, hydration adopts the wrong one *silently* (both branches have content, so neither mismatch-repair arm fires);
-- a signal whose name is **also declared in another scope**, naming the `#N` slot it actually got.
+`@getforma/build`'s `--strict` turns them into errors that fail the build, all
+at once, and writes them as JSON on request (see its README). For a build that
+uses esbuild directly, `formaSsrPlugin({ page, outDir, entryPoint, strict,
+onDiagnostics })` makes each one an esbuild error at its file and line, and
+`collectDiagnostics(() => generateRealIr(entry))` returns them as data.
 
 A page the compiler fully understands prints nothing.
+
+### Browser-only components: `browserOnly()`
+
+A component declared `const Chart = browserOnly(ChartImpl)` (from
+`@getforma/core`) renders in the browser alone. The compiler emits `<Chart
+title="Sales" />` as a registered island named `Chart` whose server output is
+its empty host element with its declared props, and does not walk the
+component:
+
+```html
+<div data-forma-props="{&quot;title&quot;:&quot;Sales&quot;}" data-forma-island="0"
+     data-forma-component="Chart" data-forma-status="pending" data-forma-hydrate="load"></div>
+```
+
+The declared props are the props it can evaluate to a string, number, boolean
+or null (literals, module-level consts); anything else is reported
+(`BUILD-706`). The declaration is found where the component is, through
+relative imports and re-exports, never in a package; it is an island at any
+depth and whatever its props. Register it in `activateIslands` under the name
+it is rendered with: on a page whose registry does not name it, the build says
+so (`BUILD-708`). A route the server never renders is an `ssr: false` entry in
+`@getforma/build` instead.
 
 ### What renders server-side
 
@@ -198,7 +225,8 @@ A page the compiler fully understands prints nothing.
 | `Card({ title: 'Reports' })` | Inlined, with literal props substituted into the component body (`props.title` and destructured `{ title }`) |
 | `h(Card, { title: 'Reports' })` (what JSX `<Card/>` compiles to) | Same as `Card({...})`: inlined when resolvable, otherwise an island **named `Card`** so the client registry can hydrate it |
 | `...NAV.map(i => h('a', { href: i.href }, i.label))` over a module-level const | Unrolled, with row values substituted into attributes *and* children |
-| Anything else | Empty island shell + a build warning (above) |
+| `<Chart title="Sales" />` with `const Chart = browserOnly(ChartImpl)` | A registered island named `Chart`: its empty host with its declared props (above) |
+| Anything else | Empty island shell + a coded build warning (above) |
 
 Component children (`h(Card, null, 'body')`) are not represented in the IR — the
 compiler cannot know where a component places its children — and warn.

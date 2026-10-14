@@ -39,6 +39,7 @@ const CASES = {
   select: 'mount',
   'edited-controls': 'mount',
   'ledger-arrival': 'island',
+  'browser-only': 'island',
 } as const;
 type CaseName = keyof typeof CASES;
 
@@ -450,5 +451,42 @@ test.describe('ledger-arrival', () => {
     await expect(page.locator('#arrival-retry')).toBeVisible();
 
     expect(errors).toEqual([]);
+  });
+});
+
+// ── browserOnly(): the browser-only marker (FORMA-119; DR-1, L-1) ──────────
+
+test.describe('browser-only', () => {
+  test('browser-only: the server renders the empty host with its declared props, and the rest of the page', async ({ browser }) => {
+    const noJs = await openWithoutJs(browser, '/browser-only/');
+    await expect(noJs.page.locator('#report-title')).toHaveText('Quarterly report');
+    await expect(noJs.page.locator('#report-summary')).toHaveText('Revenue rose in every region.');
+    const host = noJs.page.locator('[data-forma-component="Chart"]');
+    await expect(host).toHaveAttribute('data-forma-status', 'pending');
+    await expect(host).toHaveAttribute('data-forma-props', JSON.stringify({ title: 'Sales', points: 3 }));
+    expect(await host.evaluate((el) => el.childNodes.length), 'the host is empty').toBe(0);
+    await expect(noJs.page.locator('#chart')).toHaveCount(0);
+    await noJs.close();
+  });
+
+  test('browser-only: the browser renders the component in the host, from its props, and it works', async ({ page }) => {
+    const errors = watchErrors(page);
+    const held = await openHeld(page, 'browser-only');
+    await expect(page.locator('#chart')).toHaveCount(0);
+    await held.activate();
+
+    await expect(page.locator('#chart-caption')).toHaveText('Sales: 3 points');
+    await expect(page.locator('#chart')).toHaveAttribute('data-forma-component', 'Chart');
+    await page.click('#chart-add');
+    await expect(page.locator('#chart-caption')).toHaveText('Sales: 4 points', SETTLE);
+    // The server-rendered rest of the page is untouched.
+    await expect(page.locator('#report-title')).toHaveText('Quarterly report');
+    expect(errors).toEqual([]);
+  });
+
+  test('browser-only: client-rendered, the component renders as any component does', async ({ page }) => {
+    await openClientRendered(page, 'browser-only');
+    await expect(page.locator('#chart-caption')).toHaveText('Sales: 3 points');
+    await expect(page.locator('#report-title')).toHaveText('Quarterly report');
   });
 });

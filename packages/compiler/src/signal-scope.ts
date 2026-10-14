@@ -66,6 +66,7 @@ import {
 import { dirname } from 'node:path';
 
 import { nestedScopeBindings } from './component-analyzer.js';
+import { reportDiagnostic } from './diagnostics.js';
 import type { ModuleLoader } from './module-loader.js';
 import { uniqueName } from './utils.js';
 
@@ -131,10 +132,50 @@ export function newSignalRegistry(): SignalRegistry {
  * The consequence is never obvious from the source, so it is spelled out: an
  * unresolved signal is not a missing optimisation, it is a page whose server
  * render disagrees with its client render until the signal changes value.
+ * The line is printed as before, with its code and the declaration's line
+ * and column (diagnostics.ts).
  * Verified by: packages/compiler/tests/ir-diagnostics.test.ts > "warns that a non-literal signal default gets no named slot"
  */
-function warnSignal(filePath: string, message: string): void {
-  console.warn(`   IR: ${message} (${filePath})`);
+function warnSignal(code: string, filePath: string, node: T.Node | null | undefined, message: string): void {
+  reportDiagnostic({ code, file: filePath, node, text: (where) => `${message} (${where})` });
+}
+
+/**
+ * Where each collected default was declared, for a diagnostic raised later,
+ * when the signal's slot is minted (BUILD-503). Keyed by the default object,
+ * which `evaluateSignalDefault` creates fresh for every declaration.
+ */
+const declarationSites = new WeakMap<SignalDefault, T.Node>();
+
+/**
+ * A literal array or object of literals, as DR-1's published subset admits
+ * them: such a signal still gets no named slot, and the line is still printed,
+ * but as a note --strict does not fail on (BUILD-504).
+ * Verified by: packages/compiler/tests/diagnostics-conformance.test.ts > "BUILD-504"
+ */
+function isLiteralStructure(node: T.Node | null | undefined): boolean {
+  if (!node) return false;
+  if (t.isTSAsExpression(node) || t.isTSSatisfiesExpression(node) || t.isTSNonNullExpression(node)
+    || t.isParenthesizedExpression(node)) {
+    return isLiteralStructure(node.expression);
+  }
+  if (t.isStringLiteral(node) || t.isNumericLiteral(node) || t.isBooleanLiteral(node) || t.isNullLiteral(node)) {
+    return true;
+  }
+  if (t.isTemplateLiteral(node)) return node.expressions.length === 0;
+  if (t.isUnaryExpression(node)) {
+    return (node.operator === '-' || node.operator === '+') && t.isNumericLiteral(node.argument);
+  }
+  if (t.isArrayExpression(node)) {
+    return node.elements.every((element) => element !== null && !t.isSpreadElement(element)
+      && isLiteralStructure(element));
+  }
+  if (t.isObjectExpression(node)) {
+    return node.properties.every((prop) => t.isObjectProperty(prop) && !prop.computed
+      && (t.isIdentifier(prop.key) || t.isStringLiteral(prop.key) || t.isNumericLiteral(prop.key))
+      && isLiteralStructure(prop.value));
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,15 +299,18 @@ export function collectSignalDeclarations(
 ): Map<string, SignalDefault> {
   const signals = new Map<string, SignalDefault>();
 
-  const record = (name: string, value: SignalDefault): void => {
+  const record = (name: string, value: SignalDefault, node: T.Node): void => {
     const existing = signals.get(name);
     if (!existing) {
       signals.set(name, value);
+      declarationSites.set(value, node);
       return;
     }
     if (existing.type !== value.type || existing.default !== value.default) {
       if (!options.quiet) warnSignal(
+        'BUILD-502',
         options.filePath,
+        node,
         `signal '${name}' is declared twice in the same scope with different defaults `
         + `(${JSON.stringify(existing.default)} then ${JSON.stringify(value.default)}) — `
         + `the first declaration owns the slot, so the server renders ${JSON.stringify(existing.default)}`,
@@ -295,16 +339,18 @@ export function collectSignalDeclarations(
       if (!initArg || t.isSpreadElement(initArg)) {
         // `createSignal()` with no argument is `undefined` on the client, which
         // renders as empty text — the same thing a null default renders as.
-        record(signalName, { type: 'null', default: null });
+        record(signalName, { type: 'null', default: null }, varDecl);
         continue;
       }
 
       const evaluated = evaluateSignalDefault(initArg as T.Expression, options.constants);
       if (evaluated) {
-        record(signalName, evaluated);
+        record(signalName, evaluated, varDecl);
       } else if (!options.quiet) {
         warnSignal(
+          isLiteralStructure(initArg) ? 'BUILD-504' : 'BUILD-501',
           options.filePath,
+          initArg,
           `signal '${signalName}' is initialized with a ${(initArg as T.Expression).type} the compiler `
           + `cannot evaluate — it gets no named slot, so bindings to it land in anonymous `
           + `'text:'/'attr:' slots that cannot be injected by name and render EMPTY server-side; `
@@ -468,7 +514,9 @@ function materializeBinding(scope: SignalScope, name: string): SignalBinding | u
     // signals and must not share a slot — but it is invisible in the source,
     // and a server injecting `count` would fill only the first. Say so.
     warnSignal(
+      'BUILD-503',
       (scope.scopeId ?? scope.key).split('#')[0]!,
+      declarationSites.get(sigDefault),
       `signal '${name}' is also declared in another scope on this page, so this one gets `
       + `the slot name '${slotName}' — inject it under that exact name. If the two are meant `
       + `to be ONE signal, declare it once and import it rather than re-declaring it`,

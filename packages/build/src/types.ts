@@ -65,6 +65,23 @@ export interface BuildConfig {
   budgetThreshold?: number;
   /** Files that should keep unhashed copies (e.g. for server-inlined assets) */
   serverInlined?: string[];
+  /**
+   * Fail the build on every coded SSR diagnostic (FORMA-119, DR-1): each
+   * construct the compiler cannot represent, with its code, file, line and
+   * column, all reported at once. Off by default, where they stay warnings.
+   * When unset, `--strict` on the command line of the script that calls
+   * `build()` turns it on (`npm run build -- --strict`); `false` ignores the
+   * flag. Needs `@getforma/compiler` 0.3.7 or later. In watch mode a page with
+   * an error keeps its last good module.
+   */
+  strict?: boolean;
+  /**
+   * Also write every SSR diagnostic as JSON to this path (relative to the
+   * working directory), whether or not the build fails: the machine-readable
+   * report an agent can act on (N12). When unset,
+   * `--diagnostics-json=<path>` on the command line sets it.
+   */
+  diagnosticsJson?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,8 +107,43 @@ export interface AssetManifest {
   wasm?: { loader: string; binary: string };
 }
 
+/** One link of a composition chain, from the page down (BUILD-403). */
+export interface BuildDiagnosticChainLink {
+  component: string;
+  file: string;
+  line: number;
+  column: number;
+}
+
+/**
+ * One coded SSR diagnostic (FORMA-119). The catalogue, one entry per code
+ * with its fix, is forma-tools' `docs/DIAGNOSTICS.md`.
+ */
+export interface BuildDiagnostic {
+  /** The stable code, e.g. `BUILD-101`. */
+  code: string;
+  /** `error` under `--strict`, `warning` without it; `note` never fails a build. */
+  severity: 'error' | 'warning' | 'note';
+  /** The page (entry outfile without `.js`) whose module reported it. */
+  page: string;
+  /** The file to edit; empty for a build-level diagnostic. */
+  file: string;
+  /** 1-based line and column in `file`, as authored; 0 when unknown. */
+  line: number;
+  column: number;
+  /** The specific report: the construct, what happens, and its fix. */
+  message: string;
+  /** The catalogue's why and fix for the code. */
+  why: string;
+  fix: string;
+  /** BUILD-403: the composition chain from the page down. */
+  chain?: BuildDiagnosticChainLink[];
+}
+
 export interface BuildResult {
   manifest: AssetManifest;
   buildHash: string;
   warnings: string[];
+  /** Every coded SSR diagnostic the build reported, page by page. */
+  diagnostics: BuildDiagnostic[];
 }

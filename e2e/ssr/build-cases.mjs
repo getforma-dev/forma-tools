@@ -35,6 +35,7 @@ const assetsDir = join(outDir, 'site', '_assets');
 
 /** Islands each case must compile to, by name; every other case has none. */
 const expectedIslands = {
+  'browser-only': ['Chart'],
   'ledger-arrival': ['Arrival'],
 };
 

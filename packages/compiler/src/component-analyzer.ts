@@ -17,6 +17,7 @@ import * as t from '@babel/types';
 import _traverse from '@babel/traverse';
 
 import type { ModuleLoader } from './module-loader';
+import { reportDiagnostic } from './diagnostics.js';
 import {
   readImportBindings,
   resolveExportedFunction,
@@ -434,9 +435,13 @@ export class ComponentAnalyzer {
         // the whole IR emission at encode time.
         const byteLength = new TextEncoder().encode(folded).length;
         if (byteLength > 0xffff) {
-          console.warn(
-            `   IR: const '${decl.id.name}' in ${filename} folds to a ${byteLength}-byte string — exceeds the 65535-byte FMIR string limit, not folding it`,
-          );
+          const name = decl.id.name;
+          reportDiagnostic({
+            code: 'BUILD-605',
+            file: filename,
+            node: decl.id,
+            text: (where) => `const '${name}' in ${where} folds to a ${byteLength}-byte string — exceeds the 65535-byte FMIR string limit, not folding it`,
+          });
           continue;
         }
 

@@ -29,6 +29,14 @@ import { createRequire } from 'node:module';
 import { serviceWorkerSource } from './service-worker.js';
 import { splitGraph, type SplitGraph } from './split-graph.js';
 import { createStagingDirectory, replaceDirectory, writeFileAtomic } from './output.js';
+import {
+  DiagnosticsCollector,
+  compilerMissing,
+  resolveDiagnosticOptions,
+  strictFailure,
+  writeDiagnosticsJson,
+  type CompilerDiagnostic,
+} from './diagnostics.js';
 
 import type {
   BuildConfig,
@@ -523,8 +531,18 @@ function generateServiceWorker(
 // Watch Mode: Server-Rendered Pages
 // ---------------------------------------------------------------------------
 
-/** `formaSsrPlugin` from `@getforma/compiler`, loaded only for SSR builds. */
-type SsrPluginFactory = (opts: { page: string; outDir: string; entryPoint?: string }) => esbuild.Plugin;
+/** `formaSsrPlugin` from `@getforma/compiler`, loaded only for SSR builds.
+ *  `strict` and `onDiagnostics` are read by compiler 0.3.7 and later. */
+type SsrPluginFactory = (opts: {
+  page: string;
+  outDir: string;
+  entryPoint?: string;
+  strict?: boolean;
+  onDiagnostics?: (diagnostics: CompilerDiagnostic[], page: string) => void;
+}) => esbuild.Plugin;
+
+/** What every SSR plugin instance of one build is given besides its page. */
+type SsrPluginShared = Pick<Parameters<SsrPluginFactory>[0], 'strict' | 'onDiagnostics'>;
 
 /**
  * Keep each server-rendered page's FMIR module current in watch mode (N7,
@@ -557,6 +575,7 @@ async function watchServerRenderedPages(
   config: BuildConfig,
   shared: esbuild.BuildOptions,
   ssrPlugin: SsrPluginFactory,
+  pluginShared: SsrPluginShared,
   onPublished: (page: string) => void,
 ): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'forma-ir-'));
@@ -583,7 +602,9 @@ async function watchServerRenderedPages(
       logLevel: 'silent',
       plugins: [
         { name: 'forma-ir-clock', setup(builder) { builder.onStart(() => { started = performance.now(); }); } },
-        ssrPlugin({ page, outDir: scratch, entryPoint: source }),
+        // Under --strict a page with an error is not published: the
+        // compiler's errors reach the publisher below as esbuild errors.
+        ssrPlugin({ page, outDir: scratch, entryPoint: source, ...pluginShared }),
         {
           name: 'forma-ir-publish',
           setup(builder) {
@@ -640,10 +661,13 @@ async function watchServerRenderedPages(
  * Verified by: packages/build/tests/build.test.ts > "leaves the previous build byte-identical when a build fails after writing files"
  * Verified by: packages/build/tests/build.test.ts > "a failed first build leaves no output directory and nothing beside it"
  */
-export async function build(config: BuildConfig): Promise<BuildResult> {
+export async function build(userConfig: BuildConfig): Promise<BuildResult> {
   // Validate before anything is written: a config error must not touch the
   // previous build's output on its way to failing.
-  validateConfig(config);
+  validateConfig(userConfig);
+  // `--strict` and `--diagnostics-json` come from the command line unless the
+  // config sets them (FORMA-119).
+  const config: BuildConfig = { ...userConfig, ...resolveDiagnosticOptions(userConfig) };
   if (config.watch) return buildInto(config, config.outputDir);
 
   const staging = createStagingDirectory(config.outputDir);
@@ -697,16 +721,35 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
 
     // ── Lazy-load SSR plugin only when needed ─────────────────────────
     let formaSsrPlugin: SsrPluginFactory | undefined;
+    // Every page's coded diagnostics (FORMA-119). A production build applies
+    // --strict itself, once every page is compiled, so the failure lists all
+    // of them; watch mode hands it to each page's plugin.
+    const strict = config.strict === true;
+    const collector = new DiagnosticsCollector(strict, config.entryPoints.map((entry) => basename(entry.outfile, '.js')));
+    const pluginShared: SsrPluginShared = {
+      onDiagnostics: collector.onDiagnostics,
+      ...(config.watch && strict ? { strict: true } : {}),
+    };
 
     if (config.ssr) {
       console.log('SSR mode enabled — emitting IR files');
       try {
         const mod = await import('@getforma/compiler');
         formaSsrPlugin = mod.formaSsrPlugin;
-      } catch {
+        // A compiler that predates coded diagnostics would let --strict pass
+        // a page it never checked: refuse instead (fail closed).
+        if (strict && !('collectDiagnostics' in mod)) {
+          throw new Error(
+            '--strict needs @getforma/compiler 0.3.7 or later, which reports coded diagnostics; '
+            + 'the installed compiler does not, so the build cannot check its pages.',
+          );
+        }
+      } catch (error) {
+        if ((error as Error).message.startsWith('--strict needs')) throw error;
         console.warn(
-          'Warning: @getforma/compiler not available for SSR. Skipping IR emission.',
+          'Warning: BUILD-801 @getforma/compiler not available for SSR. Skipping IR emission.',
         );
+        collector.addBuildLevel(compilerMissing());
       }
     }
 
@@ -724,6 +767,7 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
         page: basename(entry.outfile, '.js'),
         outDir: distDir,
         entryPoint: config.ssrEntryPoints?.[basename(entry.outfile, '.js')] ?? entry.entry,
+        ...pluginShared,
       })) : [],
     };
 
@@ -750,7 +794,7 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
       // Server-rendered pages: each page's module is watched over its SSR
       // entry's own module graph, apart from the browser bundles (L-31).
       if (formaSsrPlugin) {
-        await watchServerRenderedPages(config, shared, formaSsrPlugin, (page) => {
+        await watchServerRenderedPages(config, shared, formaSsrPlugin, pluginShared, (page) => {
           irAssets[`${page}.ir`] = `${page}.ir`;
           writeDevManifest();
         });
@@ -796,10 +840,15 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
       // Generate a dev service worker so /sw.js doesn't 404
       generateServiceWorker(config, {}, 'dev', false);
 
+      // The pages' first compilation; each rebuild replaces its page's own.
+      const diagnostics = collector.all();
+      if (config.diagnosticsJson) writeDiagnosticsJson(config.diagnosticsJson, strict, diagnostics);
+
       return {
         manifest,
         buildHash: 'dev',
         warnings,
+        diagnostics,
       };
     }
 
@@ -829,6 +878,7 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
               page: pageName,
               outDir: distDir,
               entryPoint: ssrEntryPoint,
+              ...pluginShared,
             }),
           ];
         }
@@ -836,6 +886,18 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
         return esbuild.build(buildOptions);
       }),
     );
+
+    // ── SSR diagnostics: the JSON report, then --strict ───────────────
+    // Every page is compiled by now, so a strict failure names them all.
+    const diagnostics = collector.all();
+    if (config.diagnosticsJson) {
+      const written = writeDiagnosticsJson(config.diagnosticsJson, strict, diagnostics);
+      console.log(`   SSR diagnostics written: ${written} (${diagnostics.length})`);
+    }
+    if (strict) {
+      const errors = collector.errors();
+      if (errors.length > 0) throw strictFailure(errors);
+    }
 
     // ── WASM build ────────────────────────────────────────────────────
     const wasmBuilt = buildWasm(config);
@@ -865,6 +927,7 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
       manifest,
       buildHash: manifest.build_hash,
       warnings,
+      diagnostics,
     };
   } catch (err) {
     // Watch mode: remove the output directory if this build created it. A

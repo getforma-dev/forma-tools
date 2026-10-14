@@ -40,6 +40,14 @@ import {
   type ConstantLookup,
 } from './export-resolver.js';
 import type { ModuleLoader } from './module-loader.js';
+import type { ImportBinding } from './export-resolver.js';
+import {
+  originalPosition,
+  reportDiagnostic,
+  type DiagnosticChainLink,
+  type Locatable,
+} from './diagnostics.js';
+import { isBrowserOnlyCall, type BrowserOnlyDeclaration } from './browser-only.js';
 import {
   enterComponentScope,
   lookupSignal,
@@ -135,16 +143,92 @@ function exprToText(node: t.Node): string {
  * compiler quietly emitted a placeholder and the wrong page shipped (see the
  * ksx dogfood ledger, findings #9 and #10). A diagnostic therefore always
  * names three things — WHERE (file), WHAT (the construct, in source terms),
- * and SO WHAT (the consequence for the rendered page).
+ * and SO WHAT (the consequence for the rendered page) — and, since FORMA-119,
+ * a stable code and the line and column of `node` (diagnostics.ts).
  * Verified by: packages/compiler/tests/ir-diagnostics.test.ts > "names the file, the construct and the consequence"
+ * Verified by: packages/compiler/tests/diagnostics-conformance.test.ts
  */
 function warnDegraded(
   walkCtx: WalkContext,
+  code: string,
+  node: Locatable | null | undefined,
   construct: string,
   consequence: string,
+  chain?: DiagnosticChainLink[],
 ): void {
-  const where = walkCtx.sourceFile ? ` in ${walkCtx.sourceFile}` : '';
-  console.warn(`   IR: ${construct}${where} — ${consequence}`);
+  reportDiagnostic({
+    code,
+    file: walkCtx.sourceFile ?? '',
+    node,
+    text: (where) => `${construct}${where ? ` in ${where}` : ''} — ${consequence}`,
+    chain,
+  });
+}
+
+/** The way out FORMA-016's constructs name (DR-1, L-1). */
+const BROWSER_ONLY_FIX =
+  'declare the component that renders it with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone';
+
+/**
+ * Core's control-flow components that adoption has no handling for
+ * (FORMA-016): in a server-rendered component each one is reported under its
+ * own code, naming browserOnly() as the way out, where it used to be reported
+ * as a component the compiler could not resolve. What the walker emits for
+ * them is unchanged. `browserOnly` itself, called inside the tree rather than
+ * wrapping a declaration, is reported the same way (BUILD-707).
+ */
+const ADOPTION_GAPS: ReadonlyMap<string, string> = new Map([
+  ['createErrorBoundary', 'BUILD-702'],
+  ['createSwitch', 'BUILD-703'],
+  ['createPortal', 'BUILD-704'],
+  ['createSuspense', 'BUILD-705'],
+]);
+
+/** `xs.map(…)`: a plain array child, which adoption does not reconcile (FORMA-016). */
+function isMapCall(node: t.Node | null | undefined): boolean {
+  return t.isCallExpression(node)
+    && t.isMemberExpression(node.callee)
+    && !node.callee.computed
+    && t.isIdentifier(node.callee.property)
+    && node.callee.property.name === 'map';
+}
+
+/** The FORMA-016 code a call names, if it is one of those constructs. */
+function adoptionGapCode(node: t.Node | null | undefined): string | null {
+  if (isMapCall(node)) return 'BUILD-701';
+  if (t.isCallExpression(node) && t.isIdentifier(node.callee)) {
+    return ADOPTION_GAPS.get(node.callee.name) ?? null;
+  }
+  return null;
+}
+
+/**
+ * FMIR's string table and slot defaults carry a u16 length, so an entry past
+ * 65,535 UTF-8 bytes cannot be encoded: `toBinary` throws and the page falls
+ * back to placeholder IR, as at compiler 0.3.6. This reports it where the
+ * author wrote it (BUILD-604); the SSR plugin then says nothing more about
+ * the same failure. Literals that reach the module another way are reported
+ * by the plugin, under the same code, without a position.
+ * Verified by: packages/compiler/tests/diagnostics-conformance.test.ts > "BUILD-604"
+ */
+function checkLiteralSize(
+  walkCtx: WalkContext,
+  node: Locatable | null | undefined,
+  value: string,
+  what: string,
+): void {
+  // A UTF-16 unit is at most 3 UTF-8 bytes, so only a long string can overflow.
+  if (value.length <= 0xffff / 3) return;
+  const bytes = new TextEncoder().encode(value).length;
+  if (bytes <= 0xffff) return;
+  warnDegraded(
+    walkCtx,
+    'BUILD-604',
+    node,
+    `a ${bytes}-byte ${what}`,
+    'exceeds the 65535-byte FMIR string limit, so the page cannot be encoded and falls back to placeholder IR'
+    + ' — load content that long at run time, or split it',
+  );
 }
 
 /** Describe a child/tag expression in source-like terms for a diagnostic. */
@@ -542,6 +626,18 @@ export interface WalkContext {
   /** Names of island components registered in activateIslands({...}).
    *  Island components are NEVER inlined — they always emit ISLAND_START/ISLAND_END. */
   islandNames?: Set<string>;
+  /** The import binding `name` has in `fromFile`, if any: how a component the
+   *  resolver cannot follow is told apart as one from a package (BUILD-401)
+   *  rather than one the compiler cannot find (BUILD-402). Diagnostics only. */
+  importOf?: (name: string, fromFile?: string) => ImportBinding | null;
+  /** The `const X = browserOnly(Impl)` declaration `name` refers to in
+   *  `fromFile`, if any (browser-only.ts). Asked only where the walk would
+   *  otherwise give up on a component. */
+  findBrowserOnly?: (name: string, fromFile?: string) => BrowserOnlyDeclaration | null;
+  /** The components inlined from the page down to the walk's current scope,
+   *  the page root first: named by BUILD-403 when composition passes the
+   *  inlining limit (L-26). Diagnostics only. */
+  chain?: DiagnosticChainLink[];
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +759,7 @@ function inlinedWalkContext(
   sub: ResolvedSubComponent,
   functionName: string,
   visited: Set<string>,
+  link: DiagnosticChainLink,
 ): WalkContext {
   const constants = moduleConstantScope(sub.source, sub.filePath, walkCtx.loadModule);
   return {
@@ -684,7 +781,23 @@ function inlinedWalkContext(
     sourceFile: sub.filePath,
     visited,
     depth: (walkCtx.depth ?? 0) + 1,
+    chain: [...chainSoFar(walkCtx), link],
   };
+}
+
+/** The chain the walk is in: the context's own, or (a hand-built context)
+ *  the names it has inlined, without positions. */
+function chainSoFar(walkCtx: WalkContext): DiagnosticChainLink[] {
+  if (walkCtx.chain) return walkCtx.chain;
+  return [...(walkCtx.visited ?? [])].map((component) => ({ component, file: '', line: 0, column: 0 }));
+}
+
+/** One chain link: `component`, called at `node` in the walk's current file. */
+function chainLink(walkCtx: WalkContext, component: string, node: Locatable): DiagnosticChainLink {
+  const file = walkCtx.sourceFile ?? '';
+  const start = node.loc?.start;
+  const position = file && start ? originalPosition(file, start) : { line: 0, column: 0 };
+  return { component, file, line: position.line, column: position.column };
 }
 
 // ---------------------------------------------------------------------------
@@ -771,6 +884,8 @@ export function walkHTree(
     if (args.length > 2) {
       warnDegraded(
         walkCtx,
+        'BUILD-407',
+        args[2],
         `children passed to component <${tagArg.name}>`,
         'not represented in SSR IR (the compiler cannot place a component\'s children) — they appear only after the client renders the component',
       );
@@ -779,14 +894,30 @@ export function walkHTree(
     const callArgs = propsArg && !t.isSpreadElement(propsArg) && t.isObjectExpression(propsArg)
       ? [propsArg]
       : [];
-    walkCallExpression(t.callExpression(tagArg, callArgs), hName, ctx, walkCtx);
+    const call = t.callExpression(tagArg, callArgs);
+    // The call stands for the JSX element: its diagnostics point there.
+    call.loc = node.loc;
+    walkCallExpression(call, hName, ctx, walkCtx);
     return;
   }
 
   // Rule 11: non-string tag → island
   if (!t.isStringLiteral(tagArg)) {
+    if (isBrowserOnlyCall(tagArg)) {
+      warnDegraded(
+        walkCtx,
+        'BUILD-707',
+        tagArg,
+        `browserOnly(...) used as a tag`,
+        ISLAND_CONSEQUENCE + ' — declare `const X = browserOnly(Impl)` at the top level of a module, render <X/>, and register X in activateIslands',
+      );
+      emitIsland(ctx);
+      return;
+    }
     warnDegraded(
       walkCtx,
+      'BUILD-103',
+      tagArg,
       `dynamic tag h(${describeNode(tagArg)}, ...)`,
       ISLAND_CONSEQUENCE + ' — use a literal tag name to render it server-side',
     );
@@ -814,6 +945,8 @@ export function walkHTree(
   if (hasProps && (t.isSpreadElement(propsArg) || !t.isObjectExpression(propsArg))) {
     warnDegraded(
       walkCtx,
+      'BUILD-201',
+      propsArg,
       `props on <${tag}> passed as ${t.isSpreadElement(propsArg) ? 'a spread argument' : describeNode(propsArg)} rather than an object literal`,
       `NONE of the attributes it carries are rendered server-side — write them as an object literal on the h('${tag}', { … }) call`,
     );
@@ -827,6 +960,8 @@ export function walkHTree(
       if (t.isSpreadElement(prop)) {
         warnDegraded(
           walkCtx,
+          'BUILD-202',
+          prop,
           `spread props {...${exprToText(prop.argument)}} on <${tag}>`,
           'the attributes it carries are NOT rendered server-side — list them explicitly on the h() call to server-render them',
         );
@@ -836,6 +971,8 @@ export function walkHTree(
       if (prop.computed) {
         warnDegraded(
           walkCtx,
+          'BUILD-203',
+          prop,
           `computed prop key on <${tag}>`,
           'the attribute is NOT rendered server-side — use a literal key so the compiler can name the attribute',
         );
@@ -850,6 +987,8 @@ export function walkHTree(
       if (key === null) {
         warnDegraded(
           walkCtx,
+          'BUILD-203',
+          prop,
           `prop with a ${prop.key.type} key on <${tag}>`,
           'the attribute is NOT rendered server-side — use a plain identifier or string key',
         );
@@ -868,6 +1007,8 @@ export function walkHTree(
       if (t.isObjectMethod(prop)) {
         warnDegraded(
           walkCtx,
+          'BUILD-204',
+          prop,
           `method-valued prop '${key}' on <${tag}>`,
           `the attribute is NOT rendered server-side — write it as an arrow property (\`${key}: () => …\`) for a reactive binding`,
         );
@@ -879,6 +1020,8 @@ export function walkHTree(
       if (key === 'dangerouslySetInnerHTML') {
         warnDegraded(
           walkCtx,
+          'BUILD-205',
+          prop,
           `dangerouslySetInnerHTML on <${tag}>`,
           'its markup is NOT rendered server-side and appears only once the client hydrates — the element ships empty',
         );
@@ -891,6 +1034,7 @@ export function walkHTree(
       if (isStaticLiteral(val)) {
         const strVal = staticLiteralToAttrString(val);
         if (strVal !== null) {
+          checkLiteralSize(walkCtx, val, strVal, `value of attribute '${key}' on <${tag}>`);
           const keyIdx = ctx.addString(key);
           const valIdx = ctx.addString(strVal);
           staticAttrs.push({ keyIdx, valIdx });
@@ -942,9 +1086,14 @@ export function walkHTree(
           ctx.recordSlotRef(slotId);
         } else {
           const evaluated = tryEvalExprDefault(fn, evalEnv(walkCtx));
+          if (evaluated !== undefined && evaluated !== null) {
+            checkLiteralSize(walkCtx, fn, String(evaluated), `value of attribute '${key}' on <${tag}>`);
+          }
           if (evaluated === undefined) {
             warnDegraded(
               walkCtx,
+              'BUILD-206',
+              fn,
               `attribute '${key}' on <${tag}> binds ${describeNode(fn)}, which the compiler cannot evaluate`,
               'the attribute is OMITTED server-side and only appears once the client hydrates —'
               + ' initialize the signals it reads with literal defaults, or fold the value into a module-level const',
@@ -984,6 +1133,9 @@ export function walkHTree(
       // so. That is what stripped the tooltips off ksx's controls.
       // Verified by: packages/compiler/tests/ir-walk.test.ts > "folds a concatenated attribute value into an SSR default"
       const evaluated = evalNode(val, evalEnv(walkCtx));
+      if (evaluated !== undefined && evaluated !== null) {
+        checkLiteralSize(walkCtx, val, String(evaluated), `value of attribute '${key}' on <${tag}>`);
+      }
       if (evaluated === undefined) {
         // The consequence is stated as PERMANENTLY missing, not
         // missing-until-hydration: a prop whose value is not a function is
@@ -993,6 +1145,8 @@ export function walkHTree(
         // Verified by: packages/compiler/tests/ir-diagnostics.test.ts > "concatenated attribute with an unresolvable operand"
         warnDegraded(
           walkCtx,
+          'BUILD-207',
+          val,
           `attribute '${key}' on <${tag}> is ${describeNode(val)}, which the compiler cannot evaluate`,
           'the attribute is OMITTED from the server-rendered HTML and hydration does not re-apply a'
           + ' non-function prop, so it never appears — inline the literal, use a module-level const,'
@@ -1117,6 +1271,19 @@ export function walkCallExpression(
   if (t.isIdentifier(node.callee)) {
     const componentName = node.callee.name;
 
+    /**
+     * A component declared `const X = browserOnly(Impl)` (L-1): emitted as a
+     * registered island whose server output is its empty host element with
+     * its declared props. Asked only where the walk would otherwise give up
+     * on the component, so a page without the marker compiles as before.
+     */
+    const emittedBrowserOnly = (): boolean => {
+      const declaration = walkCtx.findBrowserOnly?.(componentName, walkCtx.sourceFile);
+      if (!declaration) return false;
+      emitBrowserOnlyIsland(node, componentName, ctx, walkCtx);
+      return true;
+    };
+
     // Island components are NEVER inlined — they always emit ISLAND_START/ISLAND_END.
     // This check must come before resolveComponent to prevent depth-0 inlining.
     // When resolvable, we walk the full component h() tree between ISLAND_START
@@ -1159,7 +1326,10 @@ export function walkCallExpression(
                   componentReturn,
                   hName,
                   ctx,
-                  inlinedWalkContext(walkCtx, ctx, sub, resolved.functionName, newVisited),
+                  inlinedWalkContext(
+                    walkCtx, ctx, sub, resolved.functionName, newVisited,
+                    chainLink(walkCtx, componentName, node),
+                  ),
                 );
               } catch (err) {
                 // ISLAND_START is already in the stream: unwinding past the
@@ -1169,6 +1339,8 @@ export function walkCallExpression(
                 // span with whatever content was emitted.
                 warnDegraded(
                   walkCtx,
+                  'BUILD-408',
+                  node,
                   `island component '${componentName}' failed part-way through compiling (${(err as Error).message})`,
                   'its server-rendered content is truncated at that point; the shell still hydrates client-side',
                 );
@@ -1193,12 +1365,17 @@ export function walkCallExpression(
         }
       }
 
+      // A registered browser-only component: the empty host is what it means.
+      if (emittedBrowserOnly()) return;
+
       // Fallback: the island's content could not be compiled — emit the empty
       // div shell the client hydrates into, and name the reason. The island
       // itself still works (it is registered under its own name); what is lost
       // is its server-rendered content.
       warnDegraded(
         walkCtx,
+        'BUILD-408',
+        node,
         `island component '${componentName}' ${reason}`,
         'its shell still hydrates client-side, but the island renders nothing server-side — the page ships with a hole where it will appear',
       );
@@ -1206,12 +1383,38 @@ export function walkCallExpression(
       return;
     }
 
-    /** Every bail-out below defers the component to client-side rendering. */
-    const bailOut = (why: string, fix?: string): void => {
+    /**
+     * Every bail-out below defers the component to client-side rendering,
+     * unless it is declared browser-only, which is the island it asked for.
+     * Core's control-flow components (FORMA-016) and a bare browserOnly()
+     * call are reported under their own codes, whichever bail-out they reach;
+     * what is emitted does not change.
+     */
+    const bailOut = (code: string, why: string, fix?: string, chain?: DiagnosticChainLink[]): void => {
+      const gap = componentName === 'browserOnly' ? 'BUILD-707' : ADOPTION_GAPS.get(componentName);
+      if (!gap && emittedBrowserOnly()) return;
+      if (gap) {
+        warnDegraded(
+          walkCtx,
+          gap,
+          node,
+          componentName === 'browserOnly'
+            ? 'browserOnly(...) called inside the tree'
+            : `${componentName}(...) in a server-rendered component`,
+          componentName === 'browserOnly'
+            ? ISLAND_CONSEQUENCE + ' — browserOnly() wraps a component declaration: declare `const X = browserOnly(Impl)` at the top level of a module, render <X/>, and register X in activateIslands'
+            : ISLAND_CONSEQUENCE + ` — adoption has no handling for ${componentName}; ${BROWSER_ONLY_FIX}`,
+        );
+        emitIsland(ctx, componentName);
+        return;
+      }
       warnDegraded(
         walkCtx,
+        code,
+        node,
         `component ${componentName}(...) ${why}`,
         ISLAND_CONSEQUENCE + (fix ? ` — ${fix}` : ''),
+        chain,
       );
       emitIsland(ctx, componentName);
     };
@@ -1222,16 +1425,20 @@ export function walkCallExpression(
         // Cycle detection
         const visited = walkCtx.visited || new Set<string>();
         if (visited.has(componentName)) {
-          bailOut('is recursive (it appears inside its own subtree)');
+          bailOut('BUILD-404', 'is recursive (it appears inside its own subtree)');
           return;
         }
 
-        // Depth check
+        // Depth check. The chain from the page down is named, so a
+        // consumer can count composition past the limit (L-26).
         const depth = walkCtx.depth ?? 0;
         if (depth >= MAX_RESOLVE_DEPTH) {
+          const chain = [...chainSoFar(walkCtx), chainLink(walkCtx, componentName, node)];
           bailOut(
-            `nests deeper than the ${MAX_RESOLVE_DEPTH}-level inlining limit`,
+            'BUILD-403',
+            `nests deeper than the ${MAX_RESOLVE_DEPTH}-level inlining limit (chain: ${chain.map((link) => link.component).join(' > ')})`,
             'flatten the component tree if it needs to render server-side',
+            chain,
           );
           return;
         }
@@ -1246,6 +1453,7 @@ export function walkCallExpression(
             });
             if (nonStatic) {
               bailOut(
+                'BUILD-405',
                 `is passed a prop the compiler cannot evaluate (${
                   t.isObjectProperty(nonStatic) && t.isIdentifier(nonStatic.key)
                     ? `'${nonStatic.key.name}'`
@@ -1276,21 +1484,29 @@ export function walkCallExpression(
               sub.returnNode,
               hName,
               ctx,
-              inlinedWalkContext(walkCtx, ctx, sub, resolved.functionName, newVisited),
+              inlinedWalkContext(
+                walkCtx, ctx, sub, resolved.functionName, newVisited,
+                chainLink(walkCtx, componentName, node),
+              ),
             );
             return;
           }
-          bailOut('has no return statement the compiler can follow to an h() call');
+          bailOut('BUILD-406', 'has no return statement the compiler can follow to an h() call');
           return;
         } catch (err) {
-          bailOut(`failed to compile (${(err as Error).message})`);
+          bailOut('BUILD-406', `failed to compile (${(err as Error).message})`);
           return;
         }
       }
     }
 
-    // Resolution failed or not available → island
+    // Resolution failed or not available → island. A package import is told
+    // apart from a name the compiler cannot find; the line is the same.
+    const binding = walkCtx.importOf?.(componentName, walkCtx.sourceFile);
+    const fromPackage = binding !== undefined && binding !== null
+      && !binding.source.startsWith('.') && !binding.source.startsWith('/');
     bailOut(
+      fromPackage ? 'BUILD-401' : 'BUILD-402',
       'could not be resolved to a source file',
       'the compiler follows relative imports only; package imports and dynamic references always stay client-side',
     );
@@ -1298,8 +1514,35 @@ export function walkCallExpression(
   }
 
   // Rule 11: Unknown call expression → island
+  const gap = isBrowserOnlyCall(node.callee) ? 'BUILD-707' : adoptionGapCode(node);
+  if (gap === 'BUILD-707') {
+    warnDegraded(
+      walkCtx,
+      'BUILD-707',
+      node,
+      'browserOnly(...)(...) called inside the tree',
+      ISLAND_CONSEQUENCE + ' — browserOnly() wraps a component declaration: declare `const X = browserOnly(Impl)` at the top level of a module, render <X/>, and register X in activateIslands',
+    );
+    emitIsland(ctx);
+    return;
+  }
+  if (gap === 'BUILD-701') {
+    warnDegraded(
+      walkCtx,
+      'BUILD-701',
+      node,
+      `plain array child ${describeNode(node)} (a .map() without createList)`,
+      ISLAND_CONSEQUENCE + ' — adoption does not reconcile a plain array; render rows with'
+      + ' createList(source, keyFn, (row) => h(...)), unroll a module-level const with ...CONST.map(...),'
+      + ` or ${BROWSER_ONLY_FIX}`,
+    );
+    emitIsland(ctx);
+    return;
+  }
   warnDegraded(
     walkCtx,
+    'BUILD-101',
+    node,
     `call expression ${describeNode(node)}`,
     ISLAND_CONSEQUENCE,
   );
@@ -1371,6 +1614,7 @@ function emitChild(
 
   // Rule 2: String literal → TEXT
   if (t.isStringLiteral(child)) {
+    checkLiteralSize(walkCtx, child, child.value, 'text literal');
     ctx.emit(OP_TEXT);
     ctx.emitU32(ctx.addString(child.value));
     return;
@@ -1463,6 +1707,7 @@ function emitChild(
     // the forms that only become null/boolean after evaluation
     // (`ready() && 'Go'` with ready defaulting to false).
     if (folded !== null && typeof folded !== 'boolean') {
+      checkLiteralSize(walkCtx, child, String(folded), 'text value');
       const slotId = ctx.addSlot(
         textSlotName(childIndex, walkCtx),
         TYPE_TEXT,
@@ -1510,9 +1755,33 @@ function emitChild(
       // placeholder and the text only appears after hydration — a flash on
       // every page that computes its text (`() => count() + ' items'`).
       const evaluated = tryEvalExprDefault(arrowOrFunc, evalEnv(walkCtx));
-      if (evaluated === undefined) {
+      if (evaluated !== undefined && evaluated !== null) {
+        checkLiteralSize(walkCtx, arrowOrFunc, String(evaluated), 'text value');
+      }
+      // A reactive child returning rows or a control-flow component is one
+      // of FORMA-016's constructs: it renders empty here, and adoption binds
+      // it as text. Same emission; its own code, naming the way out.
+      const gap = evaluated === undefined ? adoptionGapCode(bodyExpr) : null;
+      if (gap) {
+        const isArray = gap === 'BUILD-701';
         warnDegraded(
           walkCtx,
+          gap,
+          arrowOrFunc,
+          isArray
+            ? `plain array child ${describeNode(arrowOrFunc)} (a .map() without createList)`
+            : `reactive child ${describeNode(arrowOrFunc)}`,
+          'it renders EMPTY server-side and adoption binds it as text — '
+          + (isArray
+            ? 'render rows with createList(source, keyFn, (row) => h(...)), or '
+            : `adoption has no handling for ${describeNode(bodyExpr!)}; `)
+          + BROWSER_ONLY_FIX,
+        );
+      } else if (evaluated === undefined) {
+        warnDegraded(
+          walkCtx,
+          'BUILD-301',
+          arrowOrFunc,
           `dynamic text child ${describeNode(arrowOrFunc)}, which the compiler cannot evaluate`,
           'it renders EMPTY server-side and only fills in once the client hydrates —'
           + ' initialize the signals it reads with literal defaults so the server can render them',
@@ -1549,6 +1818,8 @@ function emitChild(
   // Rule 11: Anything else → ISLAND_START / ISLAND_END
   warnDegraded(
     walkCtx,
+    'BUILD-102',
+    child,
     `child ${describeNode(child)}`,
     ISLAND_CONSEQUENCE
       + " — wrap it in a function (`() => …`) for a reactive binding, or use createShow/createList for conditionals and lists",
@@ -1615,6 +1886,8 @@ function addShowSlot(
   if (value === undefined) {
     warnDegraded(
       walkCtx,
+      'BUILD-302',
+      cond,
       cond
         ? `conditional on ${describeNode(cond)}, which the compiler cannot evaluate`
         : 'conditional with no condition expression',
@@ -1767,6 +2040,8 @@ function emitCreateShowBranch(
   // Anything else → island
   warnDegraded(
     walkCtx,
+    'BUILD-106',
+    expr,
     `createShow branch ${describeNode(expr)}`,
     ISLAND_CONSEQUENCE + ' — a branch must be `() => h(...)` (or a direct h(...) call) to render server-side',
   );
@@ -1846,7 +2121,7 @@ function emitCreateList(
 ): void {
   /** Every bail-out below renders the whole list as an empty client island. */
   const bailOut = (why: string, fix: string): void => {
-    warnDegraded(walkCtx, `createList(...) ${why}`, `the whole list is ${ISLAND_CONSEQUENCE} — ${fix}`);
+    warnDegraded(walkCtx, 'BUILD-107', node, `createList(...) ${why}`, `the whole list is ${ISLAND_CONSEQUENCE} — ${fix}`);
     emitIsland(ctx, 'createList');
   };
 
@@ -2055,6 +2330,8 @@ function emitSpreadChild(
             } else {
               warnDegraded(
                 walkCtx,
+                'BUILD-104',
+                spread,
                 `row ${JSON.stringify(item)} of the unrolled '${arrayName}' spread could not be substituted`,
                 `that one row is ${ISLAND_CONSEQUENCE}`,
               );
@@ -2074,6 +2351,8 @@ function emitSpreadChild(
     if (table.kind === 'unresolved') {
       warnDegraded(
         walkCtx,
+        'BUILD-105',
+        spread,
         `spread child ...${arrayName}.map(...)`,
         `${ISLAND_CONSEQUENCE} — ${table.detail}`,
       );
@@ -2085,6 +2364,8 @@ function emitSpreadChild(
   // Can't statically unroll → island
   warnDegraded(
     walkCtx,
+    'BUILD-104',
+    spread,
     `spread child ...${describeNode(arg)}`,
     ISLAND_CONSEQUENCE
       + ' — only `...CONST.map(item => h(...))` over a module-level array of object literals unrolls statically; use createList for runtime data',
@@ -2405,6 +2686,7 @@ function emitBranchContent(
 ): void {
   // String literal → TEXT
   if (t.isStringLiteral(expr)) {
+    checkLiteralSize(walkCtx, expr, expr.value, 'text literal');
     ctx.emit(OP_TEXT);
     ctx.emitU32(ctx.addString(expr.value));
     return;
@@ -2441,9 +2723,14 @@ function emitBranchContent(
   // Reached from a conditional branch, a createShow branch and a list row
   // body, so the diagnostic names the VALUE rather than guessing which.
   const evaluated = evalNode(expr, evalEnv(walkCtx));
+  if (evaluated !== undefined && evaluated !== null) {
+    checkLiteralSize(walkCtx, expr, String(evaluated), 'text value');
+  }
   if (evaluated === undefined) {
     warnDegraded(
       walkCtx,
+      'BUILD-301',
+      expr,
       `dynamic value ${describeNode(expr)}, which the compiler cannot evaluate`,
       'it renders EMPTY server-side and only fills in once the client hydrates',
     );
@@ -2500,6 +2787,119 @@ function emitIsland(ctx: IrEmitContext, name?: string): void {
   ctx.emit(OP_CLOSE_TAG);
   ctx.emitU32(tagIdx);
 
+  ctx.emit(OP_ISLAND_END);
+  ctx.emitU16(id);
+}
+
+/**
+ * Emit a component declared `const X = browserOnly(Impl)` (DR-1, L-1): a
+ * registered island named as the call names it, whose server output is its
+ * empty host element with its declared props. The browser activates it like
+ * any island; core finds the host empty and renders the component there.
+ *
+ * The declared props are the call site's props the compiler can evaluate to a
+ * string, number, boolean or null. They are written into the host as a static
+ * `data-forma-props` attribute, the inline props channel core reads, so they
+ * take no slot: a prop named like a signal, or two browser-only islands with
+ * the same prop, cannot collide in the page's slot namespace, and the
+ * component receives each prop under its own name. A handler cannot change
+ * them (3.0.0's declared island props do, DR-4). Anything else (a function, a
+ * spread, an array or object, a value only the browser knows) cannot reach
+ * the island's props, and is reported (BUILD-706).
+ *
+ * On a page that activates islands from a literal registry, a browser-only
+ * component the registry does not name would never render (BUILD-708).
+ * Verified by: packages/compiler/tests/browser-only.test.ts
+ */
+function emitBrowserOnlyIsland(
+  node: t.CallExpression,
+  componentName: string,
+  ctx: IrEmitContext,
+  walkCtx: WalkContext,
+): void {
+  if (walkCtx.islandNames && walkCtx.islandNames.size > 0 && !walkCtx.islandNames.has(componentName)) {
+    warnDegraded(
+      walkCtx,
+      'BUILD-708',
+      node,
+      `browserOnly() component ${componentName}`,
+      `the page activates islands from a registry that does not name it, so its empty host never renders in the browser — add ${componentName} to the activateIslands({ … }) registry`,
+    );
+  }
+
+  const notAProp = (at: Locatable, what: string): void => warnDegraded(
+    walkCtx,
+    'BUILD-706',
+    at,
+    `${what} on browserOnly() component ${componentName}`,
+    'it is not among the island\'s server props, so the component never receives it — pass a literal or a'
+    + ' module-level const, or read the value in the browser',
+  );
+
+  const props: Record<string, EvalValue> = {};
+  let declared = 0;
+  const propsArg = node.arguments[0];
+  if (propsArg && (t.isSpreadElement(propsArg) || !t.isObjectExpression(propsArg))) {
+    notAProp(propsArg, 'props passed as something other than an object literal');
+  } else if (propsArg) {
+    for (const prop of propsArg.properties) {
+      if (t.isSpreadElement(prop)) {
+        notAProp(prop, `spread props {...${exprToText(prop.argument)}}`);
+        continue;
+      }
+      const key = prop.computed
+        ? null
+        : t.isIdentifier(prop.key)
+          ? prop.key.name
+          : t.isStringLiteral(prop.key) ? prop.key.value : null;
+      if (key === null) {
+        notAProp(prop, 'a prop whose key the compiler cannot name');
+        continue;
+      }
+      if (t.isObjectMethod(prop)) {
+        notAProp(prop, `method-valued prop '${key}'`);
+        continue;
+      }
+      const value = prop.value as t.Expression;
+      // `undefined`, which esbuild writes as `void 0`: an absent prop.
+      if (isUndefinedIdentifier(value) || (t.isUnaryExpression(value) && value.operator === 'void')) continue;
+      if (isFunctionExpr(value)) {
+        notAProp(value, `function-valued prop '${key}'`);
+        continue;
+      }
+      const evaluated = t.isUnaryExpression(value) && value.operator === '-' && t.isNumericLiteral(value.argument)
+        ? -value.argument.value
+        : evalNode(value, evalEnv(walkCtx));
+      if (evaluated === undefined) {
+        notAProp(value, `prop '${key}' (${describeNode(value)}), which the compiler cannot evaluate,`);
+        continue;
+      }
+      props[key] = evaluated;
+      declared++;
+    }
+  }
+
+  // The host: the empty shell every island root has. trigger 0x01 = Load,
+  // propsMode 0x01 = Inline; no slot ids, so the walker writes no props of
+  // its own beside the static ones.
+  const byteOffset = ctx.opcodeLen();
+  const id = ctx.addIsland(componentName, 0x01, 0x01, [], byteOffset);
+  ctx.emit(OP_ISLAND_START);
+  ctx.emitU16(id);
+  const tagIdx = ctx.addString('div');
+  ctx.emit(OP_OPEN_TAG);
+  ctx.emitU32(tagIdx);
+  if (declared > 0) {
+    const json = JSON.stringify(props);
+    checkLiteralSize(walkCtx, propsArg as Locatable, json, `props of browserOnly() component ${componentName}`);
+    ctx.emitU16(1);
+    ctx.emitU32(ctx.addString('data-forma-props'));
+    ctx.emitU32(ctx.addString(json));
+  } else {
+    ctx.emitU16(0);
+  }
+  ctx.emit(OP_CLOSE_TAG);
+  ctx.emitU32(tagIdx);
   ctx.emit(OP_ISLAND_END);
   ctx.emitU16(id);
 }
