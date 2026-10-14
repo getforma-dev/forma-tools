@@ -774,6 +774,10 @@ class ScriptScan {
       const here = list.filter((b) => b.region === r);
       if (here.length === 0) continue;
       const kind = here[0]!.kind;
+      // Reached by valid code: a region is a function, not a block, so sibling
+      // blocks (`{ const html = trustedHtml(md) } { let html = s }`) put two
+      // bindings of one name in it. Neither is trusted then, or the string one
+      // would pass as the const (round-2 review; dangerouslySetInnerHTML/fail-scope.ts).
       if (here.some((b) => b.kind !== kind)) return 'other';
       return kind;
     }

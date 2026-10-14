@@ -534,7 +534,14 @@ class RustScan {
           if (this.isP(end, ':') && this.isRawType(end + 1)) raw = true;
           let e = end;
           while (e < n && !this.isP(e, '=') && !this.isP(e, ';')) e++;
-          if (this.isP(e, '=') && this.trustedCallAt(e + 1) !== -1) raw = true;
+          // The constructor must be the whole value (or end in as_str(), as_ref(),
+          // deref(), as isRawValue reads it): `RawHtml::trusted(..).to_string() + user`
+          // is a String the user reaches (FORMA-126 review round 2).
+          if (this.isP(e, '=')) {
+            const call = this.trustedCallAt(e + 1);
+            const valueEnd = this.valueEnd(e + 1);
+            if (call !== -1 && (call === valueEnd - 1 || this.isMethodTail(call + 1, valueEnd))) raw = true;
+          }
         }
         for (const k of names) this.bindName(this.toks[k]!.value, k, this.enclosingBrace[i]!, single && raw);
       } else if (t.type === 'id' && t.value === 'fn') {

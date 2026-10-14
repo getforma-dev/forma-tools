@@ -53,3 +53,16 @@ fn closure_shadow(rows: Vec<String>) {
         let c = PageConfig { body_prefix: Some(shell) }; // expect: body_prefix in closure_shadow
     });
 }
+
+// The round-2 review: a let is trusted only when the constructor is its whole
+// value; appended to, it is a String the user's text reaches.
+fn appended(user: &str) {
+    let shell = RawHtml::trusted("<x>").to_string() + user; // expect: RawHtml::trusted in appended
+    let c = PageConfig { body_prefix: Some(&shell) }; // expect: body_prefix in appended
+}
+
+fn tail(markup: &str) {
+    let shell = RawHtml::trusted(markup); // expect: RawHtml::trusted in tail
+    let view = shell.as_str();
+    let c = PageConfig { body_prefix: Some(&shell) };
+}

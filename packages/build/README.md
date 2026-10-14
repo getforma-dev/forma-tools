@@ -463,7 +463,7 @@ Rust:
 | `RawHtml::trusted` | Each `RawHtml::trusted`, path-qualified, as `<RawHtml>::trusted`, as `Self::trusted` in an `impl` for it, or through an alias of it from any file. |
 | `RawHtml-alias` | `RawHtml` under another name: `use … RawHtml as X`, `type X = …RawHtml`, any `= RawHtml` (an associated type, a generic default). |
 | `r#html` | The raw identifier `r#html`, the name of `RawHtml`'s private field. |
-| `body_prefix` | A `body_prefix` other than `None` that is not `Some(&x)` (or `x.as_str()`, `&*x`) where `x`'s last binding in scope is `RawHtml::trusted(..)` or declared `RawHtml`, or `self.x` declared `RawHtml` by the `impl`'s own struct: a string still works in 0.2.x. |
+| `body_prefix` | A `body_prefix` other than `None` that is not `Some(&x)` (or `x.as_str()`, `&*x`) where `x`'s last binding in scope is `RawHtml::trusted(..)` as its whole value or is declared `RawHtml`, or `self.x` declared `RawHtml` by the `impl`'s own struct: a string still works in 0.2.x. |
 | `config_json` | `config_json` set to anything but `None`: data's typed home. |
 | `config_script` | `config_script` other than `None`: deprecated, handler text in a nonced script, removed in 3.0.0. |
 | `into_parts_unchecked` | `PageResponse::into_parts_unchecked`. |
