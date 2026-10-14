@@ -91,13 +91,24 @@ describe('generated service workers', () => {
     await worker.settleWrites(); expect(worker.put).not.toHaveBeenCalled();
   });
 
-  it('on-demand cache and quota failures cannot turn successful network assets into broken pages', async () => {
-    const worker = harness(false, true);
+  // Both production modes. The precache worker once awaited cache.put before
+  // answering, so a quota error turned an asset the network served into a
+  // network error, and every uncached asset was buffered into CacheStorage
+  // before the page saw a byte.
+  it.each([
+    ['on-demand', true],
+    ['precache', false],
+  ])('%s cache and quota failures cannot turn successful network assets into broken pages', async (_mode, onDemand) => {
+    const worker = harness(false, onDemand);
     worker.storage.open.mockRejectedValueOnce(new Error('CacheStorage disabled'));
     expect(await (await worker.request('/_assets/app.hash.js'))!.text()).toBe('before-change');
     worker.put.mockRejectedValueOnce(new Error('QuotaExceededError'));
     expect(await (await worker.request('/_assets/later.hash.js'))!.text()).toBe('before-change');
     await expect(worker.settleWrites()).resolves.toBeUndefined(); expect(worker.fetch).toHaveBeenCalledTimes(2);
+    // Answer first: a write that never settles must not hold the response.
+    worker.put.mockImplementationOnce(() => new Promise(() => {}));
+    expect(await (await worker.request('/_assets/app.hash.js'))!.text()).toBe('before-change');
+    expect(worker.put).toHaveBeenCalledTimes(2); expect(worker.fetch).toHaveBeenCalledTimes(3);
   });
 
   it('development immediately takes control and retires only Forma caches', async () => {
@@ -140,7 +151,7 @@ describe('generated service workers', () => {
     expect([...worker.entries.keys()].sort()).toEqual(['forma-new', 'other-app']);
     expect(await (await worker.request('/_assets/app.hash.css'))!.text()).toBe('before-change');
     expect(await (await worker.request('/_assets/app.hash.js'))!.text()).toBe('before-change');
-    worker.change();
+    await worker.settleWrites(); worker.change();
     expect(await (await worker.request('/_assets/app.hash.js'))!.text()).toBe('before-change');
     expect(worker.fetch).toHaveBeenCalledTimes(2);
   });

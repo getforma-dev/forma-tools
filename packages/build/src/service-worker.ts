@@ -106,20 +106,26 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
-  if (event.request.method !== 'GET' || url.origin !== self.location.origin || !url.pathname.startsWith('/_assets/')) return;
+  const request = event.request;
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || url.origin !== self.location.origin || !url.pathname.startsWith('/_assets/')) return;
 
-  event.respondWith(
-    caches.open(CACHE_NAME).then(async (cache) => {
-      const cached = await cache.match(event.request);
+  event.respondWith((async () => {
+    let cache;
+    try {
+      cache = await caches.open(CACHE_NAME);
+      const cached = await cache.match(request);
       if (cached) return cached;
-      const response = await fetch(event.request);
-      if (response.ok) {
-        await cache.put(event.request, response.clone());
-      }
-      return response;
-    })
-  );
+    } catch { /* Private browsing/quota/storage failure must not break the app. */ }
+    const response = await fetch(request);
+    if (cache && response.ok) {
+      // Answer first and save in the background: a failed write (quota) must
+      // not turn a good network response into a network error.
+      const copy = response.clone();
+      event.waitUntil(Promise.resolve().then(() => cache.put(request, copy)).catch(() => {}));
+    }
+    return response;
+  })());
 });
 `;
 }
