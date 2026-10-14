@@ -50,6 +50,7 @@ import {
 import { isBrowserOnlyCall, type BrowserOnlyDeclaration } from './browser-only.js';
 import {
   enterComponentScope,
+  lookupLiteralRows,
   lookupSignal,
   newSignalRegistry,
   type SignalDefault,
@@ -168,6 +169,18 @@ function warnDegraded(
 /** The way out FORMA-016's constructs name (DR-1, L-1). */
 const BROWSER_ONLY_FIX =
   'declare the component that renders it with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone';
+
+/**
+ * What each of core's control-flow components does to a server-rendered page
+ * after activation, measured in Chromium on a mount() root (FORMA-119's
+ * review): the printed consequence says it.
+ */
+const ADOPTION_OUTCOME: ReadonlyMap<string, string> = new Map([
+  ['createErrorBoundary', 'on a mount() root activation throws (insertBefore), so nothing after it activates'],
+  ['createSwitch', 'on a mount() root activation throws (insertBefore), so nothing after it activates'],
+  ['createPortal', "activation goes on past it, but the portal's content never appears"],
+  ['createSuspense', 'on a mount() root activation throws (insertBefore), so nothing after it activates'],
+]);
 
 /**
  * Core's control-flow components that adoption has no handling for
@@ -1403,7 +1416,8 @@ export function walkCallExpression(
             : `${componentName}(...) in a server-rendered component`,
           componentName === 'browserOnly'
             ? ISLAND_CONSEQUENCE + ' — browserOnly() wraps a component declaration: declare `const X = browserOnly(Impl)` at the top level of a module, render <X/>, and register X in activateIslands'
-            : ISLAND_CONSEQUENCE + ` — adoption has no handling for ${componentName}; ${BROWSER_ONLY_FIX}`,
+            : ISLAND_CONSEQUENCE + ` — adoption has no handling for ${componentName}: `
+              + `${ADOPTION_OUTCOME.get(componentName)}; ${BROWSER_ONLY_FIX}`,
         );
         emitIsland(ctx, componentName);
         return;
@@ -1532,7 +1546,7 @@ export function walkCallExpression(
       'BUILD-701',
       node,
       `plain array child ${describeNode(node)} (a .map() without createList)`,
-      ISLAND_CONSEQUENCE + ' — adoption does not reconcile a plain array; render rows with'
+      ISLAND_CONSEQUENCE + ' — adoption skips a plain array, so the rows never appear after activation; render rows with'
       + ' createList(source, keyFn, (row) => h(...)), unroll a module-level const with ...CONST.map(...),'
       + ` or ${BROWSER_ONLY_FIX}`,
     );
@@ -1771,10 +1785,11 @@ function emitChild(
           isArray
             ? `plain array child ${describeNode(arrowOrFunc)} (a .map() without createList)`
             : `reactive child ${describeNode(arrowOrFunc)}`,
-          'it renders EMPTY server-side and adoption binds it as text — '
+          'it renders EMPTY server-side and adoption binds it as text'
           + (isArray
-            ? 'render rows with createList(source, keyFn, (row) => h(...)), or '
-            : `adoption has no handling for ${describeNode(bodyExpr!)}; `)
+            ? ', so after activation the page shows the elements as text ([object HTMLLIElement]) —'
+              + ' render rows with createList(source, keyFn, (row) => h(...)), or '
+            : ` — adoption has no handling for ${describeNode(bodyExpr!)}; `)
           + BROWSER_ONLY_FIX,
         );
       } else if (evaluated === undefined) {
@@ -2180,6 +2195,25 @@ function emitCreateList(
     ? `#${registry.total}`
     : uniqueName(registry.counts, derivedName);
 
+  // A source signal initialized with literal rows has no slot, so its rows
+  // never reach the list's array slot: the server renders the list empty
+  // unless a handler fills it, where the browser renders the rows (BUILD-303).
+  // Reported only; what is emitted does not change.
+  const sourceName = signalReadName(node.arguments[0]);
+  const literal = sourceName ? lookupLiteralRows(walkCtx.signalScope, sourceName) : undefined;
+  if (literal) {
+    warnDegraded(
+      walkCtx,
+      'BUILD-303',
+      node,
+      `createList(...) over signal '${sourceName}', whose literal default has ${literal.rows} row(s)`,
+      `the server renders the list EMPTY unless the handler fills 'list:${base}:array', while the browser`
+      + ` renders the default's rows — start the signal empty (\`createSignal([])\`) and fill it from the server`
+      + ` (the handler sets 'list:${base}:array'; an island seeds the signal from its props), or unroll a`
+      + ' module-level const with ...CONST.map(...)',
+    );
+  }
+
   // Create slots: array slot (server-sourced) and item slot
   const arraySlotId = ctx.addSlot(`list:${base}:array`, TYPE_ARRAY, SOURCE_SERVER);
   const itemSlotId = ctx.addSlot(`list:${base}:item`, TYPE_OBJECT, SOURCE_SERVER);
@@ -2236,6 +2270,23 @@ function emitCreateList(
   // Back-patch body length
   const bodyLen = ctx.opcodeLen() - bodyStart;
   ctx.patchU32(bodyLenPos, bodyLen);
+}
+
+/**
+ * The signal a list source reads, when it is a plain read: `rows`, `rows()`,
+ * or `() => rows()` (either function form). Null for anything else.
+ */
+function signalReadName(node: t.Node | null | undefined): string | null {
+  if (!node) return null;
+  if (t.isIdentifier(node)) return node.name;
+  if (t.isCallExpression(node) && t.isIdentifier(node.callee) && node.arguments.length === 0) {
+    return node.callee.name;
+  }
+  if (t.isArrowFunctionExpression(node) || t.isFunctionExpression(node)) {
+    const body = getEffectiveBody(node);
+    return body && t.isCallExpression(body) ? signalReadName(body) : null;
+  }
+  return null;
 }
 
 /**
@@ -2858,6 +2909,12 @@ function emitBrowserOnlyIsland(
       }
       if (t.isObjectMethod(prop)) {
         notAProp(prop, `method-valued prop '${key}'`);
+        continue;
+      }
+      // Core strips these from every island's props (DR-21), and `__proto__`
+      // would set this object's prototype rather than a key: never written.
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+        notAProp(prop, `prop '${key}' (a name core strips from island props, DR-21)`);
         continue;
       }
       const value = prop.value as t.Expression;

@@ -10,12 +10,12 @@
  *
  *   BUILD-1xx  a subtree the compiler leaves to the browser (rule 11's islands)
  *   BUILD-2xx  an attribute or prop dropped or left empty
- *   BUILD-3xx  text or a conditional the server renders empty or wrong
+ *   BUILD-3xx  text, a conditional or a list the server renders empty or wrong
  *   BUILD-4xx  a component the compiler does not inline
  *   BUILD-5xx  a signal the compiler cannot name
  *   BUILD-6xx  the page module itself: a placeholder, or a literal too long
  *   BUILD-7xx  a construct adoption does not handle; `browserOnly()` is the way out
- *   BUILD-8xx  the build package
+ *   BUILD-8xx  the build package (reported by @getforma/build, catalogued here)
  *
  * A code never changes meaning. A new construct gets a new code; a retired one
  * stays reserved.
@@ -121,6 +121,9 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
   entry('BUILD-302', 'Conditional the compiler cannot evaluate',
     'The server renders the ELSE branch; if the browser would render the THEN branch, adoption keeps the wrong one until the condition changes value.',
     'Initialize the signals the condition reads with literal defaults.'),
+  entry('BUILD-303', 'List over a signal initialized with literal rows',
+    "The signal's literal rows have no slot, so the server renders the list empty unless a handler fills `list:<name>:array`, while the browser renders the rows.",
+    'Start the signal empty (`createSignal([])`) and fill it from the server (the handler sets `list:<name>:array`; an island seeds the signal from its props), or unroll a module-level const with `...CONST.map(…)`.'),
 
   // ── 4xx: components ──────────────────────────────────────────────────────
   entry('BUILD-401', 'Component imported from a package',
@@ -159,8 +162,8 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
     "Two scopes declare the same signal name, so this one's slot is renamed (`name#2`); a server setting the plain name fills the other one.",
     'Declare the signal once and import it, or set the renamed slot by its exact name.'),
   entry('BUILD-504', 'Signal initialized with an array or object literal (note)',
-    'The signal gets no named slot. DR-1 admits literal arrays and objects, so this is a note, never an error: a binding that reads it outside createList is reported where it is read.',
-    'Nothing, if the signal is read only through createList; otherwise see the diagnostic at the read.',
+    'The signal gets no named slot, so its literal value does not reach the server. DR-1 admits literal arrays and objects, so this is a note, never an error; each read is reported where it is: text, an attribute or a conditional (BUILD-301, 206, 302), and a createList over literal rows (BUILD-303).',
+    'Act on the diagnostic at each read. A createList over `createSignal([])` needs nothing: both sides start empty.',
     false),
 
   // ── 6xx: the page module ─────────────────────────────────────────────────
@@ -185,19 +188,19 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
 
   // ── 7xx: constructs adoption does not handle (FORMA-016) ─────────────────
   entry('BUILD-701', 'Plain array child (`.map()` without createList)',
-    'A `.map()` returning elements is not adopted: the server renders an empty island shell (or empty text), and adoption does not reconcile the rows.',
+    'A `.map()` returning elements is not adopted. As a child, the server renders an empty island shell and the rows never appear after activation; in a reactive child (`() => rows.map(…)`), the server renders empty text and after activation the page shows the elements as text (`[object HTMLLIElement]`).',
     `Render rows with createList(source, keyFn, (row) => h(…)), unroll a module-level const with ...CONST.map(…), ${BROWSER_ONLY_WAY_OUT}.`),
   entry('BUILD-702', 'createErrorBoundary in a server-rendered component',
-    'Adoption has no handling for createErrorBoundary: the server renders an empty shell where it stands.',
+    "Adoption has no handling for createErrorBoundary: the server renders an empty shell where it stands, and on a mount() root activation throws (`insertBefore`: parameter 1 is not of type 'Node'), so nothing after it activates.",
     `Move the boundary out of the server-rendered tree, ${BROWSER_ONLY_WAY_OUT}.`),
   entry('BUILD-703', 'createSwitch in a server-rendered component',
-    'Adoption has no handling for createSwitch: the server renders an empty shell where it stands.',
+    "Adoption has no handling for createSwitch: the server renders an empty shell where it stands, and on a mount() root activation throws (`insertBefore`: parameter 1 is not of type 'Node'), so nothing after it activates.",
     `Use createShow for each case, ${BROWSER_ONLY_WAY_OUT}.`),
   entry('BUILD-704', 'createPortal in a server-rendered component',
-    'Adoption has no handling for createPortal: the server renders an empty shell where it stands.',
+    "Adoption has no handling for createPortal: the server renders an empty shell where it stands; activation goes on past it, but the portal's content never appears.",
     `Create the portal from an effect after activation, ${BROWSER_ONLY_WAY_OUT}.`),
   entry('BUILD-705', 'createSuspense in a server-rendered component',
-    'Adoption has no handling for createSuspense: the server renders an empty shell where it stands.',
+    "Adoption has no handling for createSuspense: the server renders an empty shell where it stands, and on a mount() root activation throws (`insertBefore`: parameter 1 is not of type 'Node'), so nothing after it activates.",
     `Render the loaded state from server data, ${BROWSER_ONLY_WAY_OUT}.`),
   entry('BUILD-706', 'browserOnly() prop the compiler cannot evaluate',
     "A browser-only island's server output is its empty host with its declared props; a prop the compiler cannot evaluate to a string, number, boolean or null (a function, a spread, an array, a run-time value) is not among them, so the component never receives it.",
@@ -213,6 +216,10 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
   entry('BUILD-801', 'SSR build without @getforma/compiler',
     'The build was asked for server-rendered modules but cannot load @getforma/compiler, so it writes none.',
     'Install @getforma/compiler (a peer dependency of @getforma/build), or turn `ssr` off.'),
+  entry('BUILD-802', '`serviceWorker` without `app` (deprecated; note)',
+    "The worker is 0.3.0's: its caches are shared by every Forma application on the origin, and it takes over open tabs at once. From 3.0.0 a worker is written only for a named app. A deprecation, not a construct the server cannot render, so --strict does not fail on it.",
+    "Set `app` to the name the server passes to forma-server's `sw::ServiceWorker::for_app`, for caches per application and build and a waiting upgrade.",
+    false),
 ]);
 
 const BY_CODE: ReadonlyMap<string, DiagnosticEntry> = new Map(

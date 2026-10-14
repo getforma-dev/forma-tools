@@ -31,20 +31,27 @@ The line and column are where the author wrote the construct: in a `.tsx` or
 `.jsx` file, which the compiler reads after esbuild has turned its JSX into
 `h()` calls, the position is mapped back through the transform's source map.
 
-## `--strict`, the JSON report, and the result
+## Strict mode, the JSON report, and the result
 
-- **`--strict`** fails the build on every diagnostic but a note, after every
+- **Strict mode** fails the build on every diagnostic but a note, after every
   page is compiled, with all of them at once: `build({ strict: true })`, or
-  `--strict` on the command line of the script that calls `build()`
-  (`npm run build -- --strict`). `strict: false` in the config ignores the
-  flag. It needs `@getforma/compiler` 0.3.7 or later; with an older compiler
-  the build refuses rather than pass pages it never checked. In watch mode a
-  page with an error keeps its last good module.
-- **JSON**: `build({ diagnosticsJson: 'ssr-diagnostics.json' })`, or
-  `--diagnostics-json=<path>`, writes `{ version, strict, diagnostics }`, one
-  object per diagnostic with its `code`, `severity` (`error`, `warning` or
-  `note`), `page`, `file`, `line`, `column`, `message`, `why`, `fix` and,
-  for BUILD-403, the `chain`. It is written whether or not the build fails.
+  `FORMA_STRICT=1` in the environment when the config leaves `strict`
+  unset. `build()` reads no command-line flag, as for `ssr` and `watch`:
+  a build script that takes `--strict` maps it to the config (the
+  create-forma-app templates do from create-app 0.6.2). It needs
+  `@getforma/compiler` 0.3.7 or later; with an older compiler the build
+  refuses rather than pass pages it never checked. In watch mode a page with
+  an error keeps its last good module.
+- **JSON**: `build({ diagnosticsJson: 'ssr-diagnostics.json' })` writes
+  `{ version, strict, diagnostics }`, one object per diagnostic with its
+  `code`, `severity` (`error`, `warning` or `note`), `page`, `file`,
+  `line`, `column`, `message`, `why`, `fix` and, for BUILD-403, the
+  `chain` (`component`, `file`, `line`, `column` per link). It is written
+  whether or not the build fails, and its path must be outside `outputDir`,
+  which the build replaces whole and serves (one inside is refused before
+  anything is written). `version` is 1: a field may be added without
+  changing it; renaming or removing one, or changing what one means,
+  increments it.
 - **The result**: `build()` returns the same list as `result.diagnostics`.
 - **The plugin**: `formaSsrPlugin({ …, strict, onDiagnostics })` for a build
   that uses esbuild directly; under `strict` each diagnostic is an esbuild
@@ -52,35 +59,36 @@ The line and column are where the author wrote the construct: in a `.tsx` or
 - **The compiler**: `collectDiagnostics(() => generateRealIr(entry))`, and
   `DIAGNOSTIC_CATALOGUE`, are exported.
 
-The default stays a warning: without `--strict`, every existing build behaves
-as at 0.3.6. 3.0.0 makes strict the only mode (DR-1's migration, step 3).
+The default stays a warning: without strict mode, every existing build
+behaves as at 0.3.6. 3.0.0 makes strict the only mode (DR-1's migration,
+step 3).
 
 ## Counting composition depth (L-26)
 
 BUILD-403 names the chain from the page down to the component it refused, as
 `(chain: HomePage > Layout > Card > Panel > Badge)` in the line and as
 `chain` in the JSON, so an application's composition past the inlining limit
-can be counted under `--strict`: the number of BUILD-403 entries.
+can be counted in strict mode: the number of BUILD-403 entries.
 
 ## Notes
 
-A note is printed as every diagnostic is, but `--strict` never fails on it:
-it reports a construct DR-1's published subset admits. There is one,
-BUILD-504.
+A note is printed as every diagnostic is, but strict mode never fails on it.
+There are two: BUILD-504, a construct DR-1's published subset admits (each
+read of such a signal is reported where it is read), and BUILD-802, a
+deprecated build option.
 
 ## Families
 
 | Family | What it reports |
 |---|---|
-
 | BUILD-1xx | A subtree the compiler leaves to the browser (rule 11) |
 | BUILD-2xx | An attribute or prop dropped or left empty |
-| BUILD-3xx | Text or a conditional the server renders empty or wrong |
+| BUILD-3xx | Text, a conditional or a list the server renders empty or wrong |
 | BUILD-4xx | A component the compiler does not inline |
 | BUILD-5xx | A signal the compiler cannot name |
 | BUILD-6xx | The page module: a placeholder, or a literal too long |
 | BUILD-7xx | A construct adoption does not handle; `browserOnly()` is the way out |
-| BUILD-8xx | The build package |
+| BUILD-8xx | The build package (reported by `@getforma/build`) |
 
 ## The codes
 
@@ -92,7 +100,7 @@ BUILD-504.
 
 **Fix.** Write the subtree as h() calls, a component in a relative file, createShow or createList, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-101/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-101/pass/)):
 
@@ -106,7 +114,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Wrap a reactive child in a function (`() => …`), use createShow for a conditional and createList for rows, or fold the value into a module-level const.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-102/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-102/pass/)):
 
@@ -120,7 +128,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Use a literal tag name, or a component the compiler can follow.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-103/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-103/pass/)):
 
@@ -134,7 +142,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Unroll a module-level const array of object literals, or render runtime rows with createList(source, keyFn, (row) => h(…)).
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-104/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-104/pass/)):
 
@@ -148,7 +156,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Declare the table as a literal `const` of object literals in the module it is imported from, with no nested declaration of the same name, or use createList.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-105/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-105/pass/)):
 
@@ -162,7 +170,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Write the branch inline as `() => h(…)`.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-106/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-106/pass/)):
 
@@ -176,7 +184,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Write `createList(source, keyFn, (row) => h(…))` with the map function inline and the row parameter named, reading `row.field`.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-107/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-107/pass/)):
 
@@ -192,7 +200,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Pass the attributes as an object literal on the h('tag', { … }) call.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-201/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-201/pass/)):
 
@@ -206,7 +214,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** List the attributes explicitly on the h() call.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-202/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-202/pass/)):
 
@@ -220,7 +228,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Use a plain identifier or string key.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-203/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-203/pass/)):
 
@@ -234,7 +242,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Write it as an arrow property (`title: () => …`) for a reactive binding.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-204/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-204/pass/)):
 
@@ -248,7 +256,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Render the content as h() children, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-205/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-205/pass/)):
 
@@ -262,7 +270,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Initialize the signals it reads with literal defaults, or fold the value into a module-level const.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-206/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-206/pass/)):
 
@@ -276,7 +284,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Inline the literal, use a module-level const, or wrap the value in a function (`() => …`) for a reactive binding.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-207/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-207/pass/)):
 
@@ -284,7 +292,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 <button title={'Enable ' + lookupName()}>Go</button>
 ```
 
-## BUILD-3xx: Text or a conditional the server renders empty or wrong
+## BUILD-3xx: Text, a conditional or a list the server renders empty or wrong
 
 ### BUILD-301 Text the compiler cannot evaluate
 
@@ -292,7 +300,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Initialize the signals it reads with literal defaults so the server can render them.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-301/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-301/pass/)):
 
@@ -306,12 +314,26 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Initialize the signals the condition reads with literal defaults.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-302/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-302/pass/)):
 
 ```tsx
 <div>{() => isOpen() ? <p>open</p> : <p>closed</p>}</div>
+```
+
+### BUILD-303 List over a signal initialized with literal rows
+
+**Why.** The signal's literal rows have no slot, so the server renders the list empty unless a handler fills `list:<name>:array`, while the browser renders the rows.
+
+**Fix.** Start the signal empty (`createSignal([])`) and fill it from the server (the handler sets `list:<name>:array`; an island seeds the signal from its props), or unroll a module-level const with `...CONST.map(…)`.
+
+**In strict mode.** An error.
+
+Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-303/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-303/pass/)):
+
+```tsx
+<ul>{createList(items, (r) => r.id, (r) => <li>{r.n}</li>)}</ul>
 ```
 
 ## BUILD-4xx: A component the compiler does not inline
@@ -322,7 +344,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Compile the component's source in the application (a relative import), or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-401/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-401/pass/)):
 
@@ -336,7 +358,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Import the component from a relative path, or declare it in the calling file.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-402/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-402/pass/)):
 
@@ -350,7 +372,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Flatten the chain so the component sits at depth 3 or less, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-403/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-403/pass/)):
 
@@ -364,7 +386,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Render the recursion with createList over data, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-404/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-404/pass/)):
 
@@ -378,7 +400,7 @@ return <ul><Tree /></ul>;
 
 **Fix.** Pass literal values (strings, numbers, booleans, null) as props.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-405/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-405/pass/)):
 
@@ -392,7 +414,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Return the h() tree directly from the component (an expression body or a top-level `return h(…)`).
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-406/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-406/pass/)):
 
@@ -406,7 +428,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Pass the content as props, or render it inside the component.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-407/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-407/pass/)):
 
@@ -420,7 +442,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Make the island resolvable (a relative import, returning its h() tree), or declare it with browserOnly() so the empty host is intended.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-408/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-408/pass/)):
 
@@ -436,7 +458,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Initialize it with a string, number, boolean or null literal, or a module-level string const.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-501/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-501/pass/)):
 
@@ -450,7 +472,7 @@ const [rows] = createSignal(loadRows());
 
 **Fix.** Declare the signal once.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-502/fail/app.ts) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-502/pass/)):
 
@@ -464,7 +486,7 @@ const [mode] = createSignal('b');
 
 **Fix.** Declare the signal once and import it, or set the renamed slot by its exact name.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-503/fail/app.ts) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-503/pass/)):
 
@@ -474,11 +496,11 @@ const [count] = createSignal(7);
 
 ### BUILD-504 Signal initialized with an array or object literal (note)
 
-**Why.** The signal gets no named slot. DR-1 admits literal arrays and objects, so this is a note, never an error: a binding that reads it outside createList is reported where it is read.
+**Why.** The signal gets no named slot, so its literal value does not reach the server. DR-1 admits literal arrays and objects, so this is a note, never an error; each read is reported where it is: text, an attribute or a conditional (BUILD-301, 206, 302), and a createList over literal rows (BUILD-303).
 
-**Fix.** Nothing, if the signal is read only through createList; otherwise see the diagnostic at the read.
+**Fix.** Act on the diagnostic at each read. A createList over `createSignal([])` needs nothing: both sides start empty.
 
-**Under `--strict`.** A note: never an error.
+**In strict mode.** A note: never an error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-504/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-504/pass/)):
 
@@ -494,7 +516,7 @@ const [rows] = createSignal([] as Array<{ id: number; name: string }>);
 
 **Fix.** Call mount(() => …, '#app') or activateIslands({ … }) at the top level of the SSR entry, or declare the route `ssr: false`.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-601/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-601/pass/)):
 
@@ -508,7 +530,7 @@ import { h } from '@getforma/core';
 
 **Fix.** Import the page component from a relative path that exports it as a function.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-602/fail/page.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-602/pass/)):
 
@@ -522,7 +544,7 @@ import { h } from '@getforma/core';
 
 **Fix.** Return the page tree as h() calls (or JSX).
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-603/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-603/pass/)):
 
@@ -536,7 +558,7 @@ return 'just text';
 
 **Fix.** Load content that long at run time (a handler-filled slot or a fetch), or split it into smaller literals.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-604/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-604/pass/)):
 
@@ -550,7 +572,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Keep folded constants under 65,535 bytes, or load the content at run time.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-605/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-605/pass/)):
 
@@ -564,7 +586,7 @@ export const D = C + C + C + C + C + C + C;
 
 **Fix.** Report it with the message; until it is fixed, declare the route `ssr: false`.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 No page triggers it on purpose: it is tested by an unwritable output directory and an unreadable entry (`packages/compiler/tests/diagnostics-conformance.test.ts` > "BUILD-606").
 
@@ -572,11 +594,11 @@ No page triggers it on purpose: it is tested by an unwritable output directory a
 
 ### BUILD-701 Plain array child (`.map()` without createList)
 
-**Why.** A `.map()` returning elements is not adopted: the server renders an empty island shell (or empty text), and adoption does not reconcile the rows.
+**Why.** A `.map()` returning elements is not adopted. As a child, the server renders an empty island shell and the rows never appear after activation; in a reactive child (`() => rows.map(…)`), the server renders empty text and after activation the page shows the elements as text (`[object HTMLLIElement]`).
 
 **Fix.** Render rows with createList(source, keyFn, (row) => h(…)), unroll a module-level const with ...CONST.map(…), or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-701/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-701/pass/)):
 
@@ -586,11 +608,11 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 ### BUILD-702 createErrorBoundary in a server-rendered component
 
-**Why.** Adoption has no handling for createErrorBoundary: the server renders an empty shell where it stands.
+**Why.** Adoption has no handling for createErrorBoundary: the server renders an empty shell where it stands, and on a mount() root activation throws (`insertBefore`: parameter 1 is not of type 'Node'), so nothing after it activates.
 
 **Fix.** Move the boundary out of the server-rendered tree, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-702/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-702/pass/)):
 
@@ -600,11 +622,11 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 ### BUILD-703 createSwitch in a server-rendered component
 
-**Why.** Adoption has no handling for createSwitch: the server renders an empty shell where it stands.
+**Why.** Adoption has no handling for createSwitch: the server renders an empty shell where it stands, and on a mount() root activation throws (`insertBefore`: parameter 1 is not of type 'Node'), so nothing after it activates.
 
 **Fix.** Use createShow for each case, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-703/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-703/pass/)):
 
@@ -614,11 +636,11 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 ### BUILD-704 createPortal in a server-rendered component
 
-**Why.** Adoption has no handling for createPortal: the server renders an empty shell where it stands.
+**Why.** Adoption has no handling for createPortal: the server renders an empty shell where it stands; activation goes on past it, but the portal's content never appears.
 
 **Fix.** Create the portal from an effect after activation, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-704/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-704/pass/)):
 
@@ -628,11 +650,11 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 ### BUILD-705 createSuspense in a server-rendered component
 
-**Why.** Adoption has no handling for createSuspense: the server renders an empty shell where it stands.
+**Why.** Adoption has no handling for createSuspense: the server renders an empty shell where it stands, and on a mount() root activation throws (`insertBefore`: parameter 1 is not of type 'Node'), so nothing after it activates.
 
 **Fix.** Render the loaded state from server data, or declare the component with browserOnly() (`const X = browserOnly(Impl)` from @getforma/core) and register it in activateIslands, so it renders in the browser alone.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-705/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-705/pass/)):
 
@@ -646,7 +668,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Pass a literal or a module-level const, or read the value in the browser.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-706/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-706/pass/)):
 
@@ -660,7 +682,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Declare `const X = browserOnly(Impl)` at the top level of a module, render `<X …/>`, and register X in activateIslands.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-707/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-707/pass/)):
 
@@ -674,7 +696,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Add the component to the activateIslands({ … }) registry under the name it is rendered with.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
 Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BUILD-708/fail/app.tsx) (the near miss is [beside it](../packages/compiler/tests/fixtures/conformance/BUILD-708/pass/)):
 
@@ -682,7 +704,7 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 <Chart />
 ```
 
-## BUILD-8xx: The build package
+## BUILD-8xx: The build package (reported by `@getforma/build`)
 
 ### BUILD-801 SSR build without @getforma/compiler
 
@@ -690,6 +712,16 @@ Reported at, in [its fixture](../packages/compiler/tests/fixtures/conformance/BU
 
 **Fix.** Install @getforma/compiler (a peer dependency of @getforma/build), or turn `ssr` off.
 
-**Under `--strict`.** An error.
+**In strict mode.** An error.
 
-Printed by the build itself as `Warning: BUILD-801 @getforma/compiler not available for SSR. Skipping IR emission.` (`packages/build/tests/strict.test.ts` > "BUILD-801").
+Printed by the build itself as `Warning: BUILD-801 @getforma/compiler not available for SSR. Skipping IR emission.` (`packages/build/tests/strict-compiler.test.ts` > "reports SSR without @getforma/compiler with its code, and fails it under --strict").
+
+### BUILD-802 `serviceWorker` without `app` (deprecated; note)
+
+**Why.** The worker is 0.3.0's: its caches are shared by every Forma application on the origin, and it takes over open tabs at once. From 3.0.0 a worker is written only for a named app. A deprecation, not a construct the server cannot render, so --strict does not fail on it.
+
+**Fix.** Set `app` to the name the server passes to forma-server's `sw::ServiceWorker::for_app`, for caches per application and build and a waiting upgrade.
+
+**In strict mode.** A note: never an error.
+
+Printed by the build itself, once per `build()`, as `Warning: BUILD-802 serviceWorker is set without app: …` and in `BuildResult.warnings` (FORMA-130); in the report as a note (`packages/build/tests/strict.test.ts` > "reports BUILD-802 (serviceWorker without app) as a note --strict does not fail on").

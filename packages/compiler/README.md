@@ -166,8 +166,8 @@ construct and what the page loses:
 ```
 
 (One line in the output; wrapped here.) The codes are numbered by family:
-`BUILD-1xx` a subtree left to the browser, `2xx` an attribute, `3xx` text or a
-conditional, `4xx` a component, `5xx` a signal, `6xx` the page module (a
+`BUILD-1xx` a subtree left to the browser, `2xx` an attribute, `3xx` text, a
+conditional or a list, `4xx` a component, `5xx` a signal, `6xx` the page module (a
 placeholder, a literal past 65,535 bytes), `7xx` a construct adoption does not
 handle (a plain `.map()` child, `createErrorBoundary`, `createSwitch`,
 `createPortal`, `createSuspense`), each naming `browserOnly()` as the way out.
@@ -180,10 +180,13 @@ after the file, one per construct; a `.tsx` file's position is the line the
 author wrote, mapped back through the JSX transform. Composition past the
 3-level inlining limit (`BUILD-403`) names the chain from the page down, so it
 can be counted. A signal initialized with a literal array or object
-(`BUILD-504`) is a note, never an error: DR-1 admits it.
+(`BUILD-504`) is a note, never an error: DR-1 admits it, and each read of it
+is reported where it is read, a `createList` over literal rows as `BUILD-303`
+(the server renders that list empty unless a handler fills it).
 
-`@getforma/build`'s `--strict` turns them into errors that fail the build, all
-at once, and writes them as JSON on request (see its README). For a build that
+`@getforma/build`'s strict mode (`strict: true`, or `FORMA_STRICT=1`) turns
+them into errors that fail the build, all at once, and writes them as JSON on
+request (see its README). For a build that
 uses esbuild directly, `formaSsrPlugin({ page, outDir, entryPoint, strict,
 onDiagnostics })` makes each one an esbuild error at its file and line, and
 `collectDiagnostics(() => generateRealIr(entry))` returns them as data.

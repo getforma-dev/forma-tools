@@ -83,6 +83,22 @@ mount(() => (
     ]);
   });
 
+  it('reports a prop core strips from island props, and leaves it out', () => {
+    // `__proto__` would set the props object's prototype rather than a key,
+    // and core strips all three names from every island's props (DR-21).
+    const { diagnostics, ops } = compile({
+      'chart.tsx': CHART,
+      'app.tsx': `${CORE}import { Chart } from './chart';
+activateIslands({ Chart });
+mount(() => <main>{Chart({ title: 'Sales', __proto__: 'p', constructor: 'c' } as never)}</main>, '#app');
+`,
+    });
+    expect(diagnostics.map((d) => d.code)).toEqual(['BUILD-706', 'BUILD-706']);
+    expect(diagnostics[0]!.message).toContain("prop '__proto__' (a name core strips from island props, DR-21)");
+    expect(diagnostics[1]!.message).toContain("prop 'constructor' (a name core strips from island props, DR-21)");
+    expect(ops).toContain(`OPEN_TAG div data-forma-props=${JSON.stringify(JSON.stringify({ title: 'Sales' }))}`);
+  });
+
   it('writes no props attribute for a component given none', () => {
     const { ops } = compile({
       'chart.tsx': CHART,
