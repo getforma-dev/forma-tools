@@ -369,7 +369,6 @@ const SINK_ARGUMENT: ReadonlyMap<string, number> = new Map([
   ['reconcile', 1],
 ]);
 const GLOBAL_OBJECTS = new Set(['window', 'globalThis', 'self']);
-const ASSIGNMENT_OPS = new Set(['=', '+=', '-=', '||=', '&&=', '??=']);
 
 type BindingKind = 'trustedVar' | 'trustedCallee' | 'other';
 
@@ -470,10 +469,6 @@ class ScriptScan {
   private readonly constCandidates: Array<{ binding: Binding; start: number; end: number }> = [];
   /** Consts holding a prop's name (`const K = 'srcdoc'`), file-wide (over-approximated). */
   private readonly keyConsts = new Map<string, KeyKind>();
-  /** Assignments (`x = …`), by name and token; each untrusts the binding it writes. */
-  private readonly assignments: Array<{ name: string; at: number }> = [];
-  /** `name@region` for each binding an assignment writes. */
-  private readonly assigned = new Set<string>();
   /**
    * Export specifiers, by token index, read once every binding is known: a
    * re-export of a sink of core's, or of trustedHtml under another name, is a
@@ -756,9 +751,10 @@ class ScriptScan {
   //
   // Trust is lexical (FORMA-126 review, should-fix 1). A name is trusted
   // markup at a use only when the nearest region declaring it declares it
-  // only as a `const` bound to a trustedHtml() call, and nothing in the file
-  // assigns to it; a parameter, `let`, `var`, function, class, catch clause or
-  // destructured binding of the same name in a nearer region shadows it.
+  // only as a `const` bound to a trustedHtml() call (a `const` cannot be
+  // assigned, so a `let` or `var` is never trusted); a parameter, `let`, `var`,
+  // function, class, catch clause or destructured binding of the same name in a
+  // nearer region shadows it.
   // Bindings are over-approximated (every identifier in a parameter list or a
   // pattern counts), which can only make a name untrusted.
 
@@ -779,7 +775,6 @@ class ScriptScan {
       if (here.length === 0) continue;
       const kind = here[0]!.kind;
       if (here.some((b) => b.kind !== kind)) return 'other';
-      if (kind !== 'other' && this.assigned.has(`${name}@${r}`)) return 'other';
       return kind;
     }
     return 'none';
@@ -834,9 +829,9 @@ class ScriptScan {
   private readonly pendingParams: Array<{ name: string; region: number }> = [];
 
   /**
-   * `const`, `let` and `var` declarators, function and class names, and
-   * assignments. Imports and destructured requires are bound where they are
-   * read (collectBindings).
+   * `const`, `let` and `var` declarators, and function and class names.
+   * Imports and destructured requires are bound where they are read
+   * (collectBindings).
    */
   private collectDeclarations(): void {
     const toks = this.toks;
@@ -884,21 +879,6 @@ class ScriptScan {
           break;
         }
         continue;
-      }
-      // An assignment to a name already declared: `x = …`, `x += …`.
-      const op = toks[i + 1];
-      if (op?.type === 'p' && ASSIGNMENT_OPS.has(op.value) && !this.isId(i - 1, 'const') && !this.isId(i - 1, 'let') && !this.isId(i - 1, 'var')) {
-        this.assignments.push({ name: t.value, at: i });
-      }
-    }
-    // Each assignment writes the nearest binding of its name.
-    for (const a of this.assignments) {
-      const list = this.bindings.get(a.name) ?? [];
-      for (let r = this.regionOf[a.at] ?? 0; r !== -1; r = this.regions[r]!.parent) {
-        if (list.some((b) => b.region === r)) {
-          this.assigned.add(`${a.name}@${r}`);
-          break;
-        }
       }
     }
   }
