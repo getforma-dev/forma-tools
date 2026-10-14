@@ -430,6 +430,7 @@ TypeScript and JavaScript, inline scripts in HTML included:
 | `templateMany` | Core's `templateMany(markup)`, likewise. |
 | `reconcile` | The runtime's `reconcile(el, markup)`, likewise. |
 | `srcdoc` | A `srcdoc` prop, attribute or property (any case) set to a value not traced to `trustedHtml()`: JSX, `h()`, a quoted or computed key, `setAttr`/`setAttribute(…, 'srcdoc', …)` (a template literal or a `const` holding the name included), `.srcdoc =`, `['srcdoc'] =`, `Reflect.set` and `Object.defineProperty`. |
+| `core-reexport` | `export * from '@getforma/core'` (or a subpath, or `export * as x from …`): every raw sink of core's behind the application's own module, where the lint does not follow its importers. A named re-export of a sink (`export { reconcile } from '@getforma/core/runtime'`, or a sink imported from core and exported) is reported under the sink's own exit. |
 
 Markup, in HTML files and in string literals in either language:
 
@@ -488,8 +489,6 @@ What it cannot see, and review must:
   destructuring and aliases of the namespace (`const { template } = F`,
   `const G = F`), and bracket access (`F['template']`). `trustedHtml` is
   matched by name wherever it comes from.
-- A sink reached through the application's own re-export of core
-  (`export * from '@getforma/core'`, then `template()` from that module).
 - Provenance across files or through a function: a sink passes only when its
   argument is a `trustedHtml(…)` call or a `const` bound to one in scope (a
   parameter, `let`, `var` or any nearer binding of the same name shadows it,

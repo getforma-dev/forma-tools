@@ -470,8 +470,14 @@ class ScriptScan {
   private readonly assignments: Array<{ name: string; at: number }> = [];
   /** `name@region` for each binding an assignment writes. */
   private readonly assigned = new Set<string>();
-  /** Export specifiers that rename trustedHtml, by token index, to the new name. */
-  private readonly exportAliases = new Map<number, string>();
+  /**
+   * Export specifiers, by token index, read once every binding is known: a
+   * re-export of a sink of core's, or of trustedHtml under another name, is a
+   * raw entry (FORMA-126 review, should-fix 5).
+   */
+  private readonly exportSpecifiers = new Map<number, { name: string; alias: string; fromCore: boolean; local: boolean }>();
+  /** `export * from <core>`, by the `*`'s token index. */
+  private readonly exportStars = new Set<number>();
   private symbols: Array<string | null> = [];
 
   constructor(code: string, private readonly map: PositionMap) {
@@ -651,24 +657,44 @@ class ScriptScan {
     if (this.isP(i + 1, '*')) {
       let k = i + 1;
       while (k < this.toks.length && !this.isP(k, ';') && this.t(k)?.type !== 'str') k++;
+      if (this.t(k)?.type === 'str' && isFormaModule(this.t(k)!.value)) this.exportStars.add(i + 1);
       for (let s = i; s <= k; s++) this.skip.add(s);
       return k;
     }
     const close = this.pair[i + 1]!;
     if (close === -1) return i;
     const reexport = this.isId(close + 1, 'from');
+    const fromCore = reexport && this.t(close + 2)?.type === 'str' && isFormaModule(this.t(close + 2)!.value);
     for (let s = i + 2; s < close; s++) {
       const nameTok = this.t(s)!;
-      if ((nameTok.type === 'id' || nameTok.type === 'str') && this.isId(s + 1, 'as')) {
-        const alias = this.t(s + 2)!.value;
-        // `export { trustedHtml as x }`, or a local bound to it exported under a third name.
-        const isTrusted = nameTok.value === 'trustedHtml' || (!reexport && this.isTrustedCallee(s));
-        if (isTrusted && alias !== 'trustedHtml') this.exportAliases.set(s, alias);
+      if (nameTok.type !== 'id' && nameTok.type !== 'str') continue;
+      if (this.isP(s - 1, '{') || this.isP(s - 1, ',')) {
+        const alias = this.isId(s + 1, 'as') ? this.t(s + 2)!.value : nameTok.value;
+        this.exportSpecifiers.set(s, { name: nameTok.value, alias, fromCore, local: !reexport });
       }
     }
     const end = reexport ? close + 2 : close;
     for (let s = i; s <= end; s++) this.skip.add(s);
     return end;
+  }
+
+  /** The raw entry an export specifier or `export *` at `i` makes, if any. */
+  private visitExport(i: number): void {
+    if (this.exportStars.has(i)) {
+      this.report(i, 'core-reexport', "core's raw sinks re-exported wholesale: importers call them where the lint does not follow");
+      return;
+    }
+    const spec = this.exportSpecifiers.get(i);
+    if (!spec) return;
+    // `export { trustedHtml as x }`, or a local bound to it exported under a third name.
+    const trusted = spec.name === 'trustedHtml' || (spec.local && this.isTrustedCallee(i));
+    if (trusted) {
+      if (spec.alias !== 'trustedHtml') this.report(i, 'trustedHtml', `trustedHtml exported as ${spec.alias}, which a search for trustedHtml does not find`);
+      return;
+    }
+    // `export { reconcile } from '@getforma/core/runtime'`, or a sink imported from core and exported.
+    const sink = spec.fromCore ? (SINK_ARGUMENT.has(spec.name) ? spec.name : undefined) : spec.local ? this.sinkLocals.get(spec.name) : undefined;
+    if (sink) this.report(i, sink, `${sink} re-exported from core${spec.alias !== spec.name ? ` as ${spec.alias}` : ''}: importers call it where the lint does not follow`);
   }
 
   /**
@@ -986,8 +1012,7 @@ class ScriptScan {
         this.report(i, m.exit, m.message, this.map.inside(tok.start, tok.start + 1 + m.offset));
       }
     }
-    const alias = this.exportAliases.get(i);
-    if (alias !== undefined) this.report(i, 'trustedHtml', `trustedHtml exported as ${alias}, which a search for trustedHtml does not find`);
+    this.visitExport(i);
     if (this.skip.has(i)) return;
     if (tok.type === 'str') this.visitString(i, tok);
     else if (tok.type === 'id') this.visitIdentifier(i, tok);
