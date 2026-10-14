@@ -45,8 +45,10 @@
   `browser-tests/per-application-upgrade.spec.ts`
   (SR28's lifecycle half in Chromium: two tabs, upgrade, rollback and
   upgrade, the new worker waiting while an old tab is open and after reloads,
-  an unrelated cache and a second application's cache surviving, v1's name
-  retired).
+  the old tab reading its build's asset from its own cache with the HTTP
+  cache emptied and no request reaching the server, also while two instances
+  alternate `/sw.js` over six update checks, an unrelated cache and a second
+  application's cache surviving, v1's name retired).
 
 ### Changed
 - **Watch builds with `ssr: true` now give Phase 2 rendering in development.** Without `codeSplitting` (the default) the dev manifest named no `.ir`, so `forma-server` rendered each page client-side (Phase 1); it now names each page's module, and the server renders the page as production does. `forma-server` loads the modules when the application starts, so until it restarts it serves the module it loaded, under the rebuilt bundle: restart it on a change under `outputDir`. FORMA-166 tracks the server half.

@@ -9,7 +9,9 @@
 //
 // What must hold, from the contract in forma-server's `sw` module:
 //  - the new worker waits while any tab of the old one is open, and a reload
-//    alone does not end that; an old tab keeps reading its build's assets;
+//    alone does not end that; an old tab keeps reading its build's assets
+//    from its build's cache (proved with the HTTP cache emptied and the
+//    server's hits counted), also while two instances alternate `/sw.js`;
 //  - when no tab uses the old worker, the new one takes over and deletes the
 //    old build's cache (and Forma's v1 names), never an unrelated cache or a
 //    second application's;
@@ -69,12 +71,19 @@ async function freshTab(context: BrowserContext, origin: string) {
 test('a per-application worker waits for old tabs, then keeps only its own cache, through upgrade, rollback and upgrade', async ({ context }) => {
   test.setTimeout(90_000);
   let deployed: Build = 'A';
+  // Requests per URL, so a test can tell Cache Storage from the server.
+  const hits: Record<string, number> = {};
+  // Two instances behind a round-robin balancer: `/sw.js` alternates A, B, ...
+  let alternate = false;
+  let swServed = 0;
   const server = createServer((request, response) => {
     const url = request.url ?? '/';
     const asset = (Object.keys(BUILDS) as Build[]).find((b) => BUILDS[b].asset === url);
+    hits[url] = (hits[url] ?? 0) + 1;
     if (url === '/sw.js') {
       response.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-cache' });
-      response.end(BUILDS[deployed].worker);
+      const which: Build = alternate ? (swServed++ % 2 === 0 ? 'A' : 'B') : deployed;
+      response.end(BUILDS[which].worker);
     } else if (asset) {
       // Both builds' assets stay available, as on two instances of a deploy.
       response.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'public, max-age=31536000, immutable' });
@@ -131,8 +140,32 @@ test('a per-application worker waits for old tabs, then keeps only its own cache
     expect(s.waiting).toBe(true);
     expect(s.caches).toContain(BUILDS.A.cache);
     expect(s.caches).not.toContain(BUILDS.B.cache);
-    // An old tab still reads its build's asset, from A's cache.
+    // An old tab still reads its build's asset, from A's cache: with the
+    // browser's HTTP cache emptied, only Cache Storage can answer without the
+    // server, and the server sees no request for it.
+    await (await context.newCDPSession(tab2)).send('Network.clearBrowserCache');
+    const before = hits[BUILDS.A.asset] ?? 0;
     expect(await tab2.evaluate((asset) => fetch(asset).then((r) => r.text()), BUILDS.A.asset)).toContain("'build A'");
+    expect(hits[BUILDS.A.asset] ?? 0, 'the old tab read A from its cache, not the server').toBe(before);
+    // The mixed period of a rolling deploy: two instances answer /sw.js in
+    // turn, A, B, A, ... over six update checks. A's cache stays, and the old
+    // tab keeps reading from it.
+    alternate = true;
+    for (let i = 0; i < 6; i++) {
+      await tab1.evaluate(async () => { try { await (await navigator.serviceWorker.getRegistration())!.update(); } catch {} });
+      await tab1.waitForTimeout(150);
+    }
+    alternate = false;
+    s = await state(tab1);
+    expect(s.caches, 'flapping /sw.js leaves A cache in place while A tabs are open').toContain(BUILDS.A.cache);
+    expect(s.caches).toEqual([BUILDS.A.cache, OTHER_APP, UNRELATED].sort());
+    await (await context.newCDPSession(tab2)).send('Network.clearBrowserCache');
+    const before2 = hits[BUILDS.A.asset] ?? 0;
+    expect(await tab2.evaluate((asset) => fetch(asset).then((r) => r.text()), BUILDS.A.asset)).toContain("'build A'");
+    expect(hits[BUILDS.A.asset] ?? 0).toBe(before2);
+    // Make sure B is the newest again before the tabs close.
+    await tab1.evaluate(async () => { await (await navigator.serviceWorker.getRegistration())!.update(); });
+    await until(tab1, (x) => x.waiting, false);
 
     // -- No tab on A: B takes over and keeps only its own cache ------------------
     let tab = await freshTab(context, origin);
