@@ -605,6 +605,156 @@ describe('@getforma/build — functional', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Atomic output: a failed build never leaves half a build (L-21, FORMA-018)
+// ---------------------------------------------------------------------------
+//
+// The application embeds `outputDir` in its binary (rust-embed), so whatever is
+// there when `cargo build` runs ships. The build used to empty `outputDir`
+// first and write into it step by step, so a failure in a late step (here
+// wasm-pack, which runs after the CSS, the fonts and the bundles are written)
+// left the previous good build deleted and half of the new one in its place.
+
+/** Every file under `dir`, by relative path, with its bytes. */
+function snapshot(dir: string): Record<string, string> {
+  const files: Record<string, string> = {};
+  const walk = (at: string, prefix: string) => {
+    for (const entry of readdirSync(at, { withFileTypes: true })) {
+      const path = join(at, entry.name);
+      if (entry.isDirectory()) walk(path, `${prefix}${entry.name}/`);
+      else files[`${prefix}${entry.name}`] = readFileSync(path).toString('base64');
+    }
+  };
+  walk(dir, '');
+  return files;
+}
+
+/**
+ * A wasm-pack on PATH whose build step fails the way a crate that does not
+ * compile does: the version probe succeeds, so the build runs it, after every
+ * earlier step has written its output. Windows gets a `.cmd` shim, the shape
+ * `npm i -g wasm-pack` installs there.
+ */
+function failingWasmPack(binDir: string): void {
+  mkdirSync(binDir, { recursive: true });
+  if (process.platform === 'win32') {
+    writeFileSync(
+      join(binDir, 'wasm-pack.cmd'),
+      [
+        '@echo off',
+        'if "%~1"=="--version" ( echo wasm-pack 0.0.0-test & exit /b 0 )',
+        'echo error: could not compile forma-ir 1>&2',
+        'exit /b 1',
+        '',
+      ].join('\r\n'),
+    );
+  } else {
+    const shim = join(binDir, 'wasm-pack');
+    writeFileSync(
+      shim,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then echo "wasm-pack 0.0.0-test"; exit 0; fi',
+        'echo "error: could not compile forma-ir" >&2',
+        'exit 1',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(shim, 0o755);
+  }
+}
+
+describe('@getforma/build — atomic output (L-21)', () => {
+  let tmpRoot: string;
+  let srcDir: string;
+  let outDir: string;
+  let config: BuildConfig;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'forma-build-atomic-'));
+    srcDir = join(tmpRoot, 'src');
+    outDir = join(tmpRoot, 'dist');
+    mkdirSync(srcDir, { recursive: true });
+    const fontDir = join(tmpRoot, 'fonts');
+    mkdirSync(fontDir);
+    writeFileSync(join(fontDir, 'inter.woff2'), 'fake-woff2-data');
+    writeFileSync(join(srcDir, 'app.ts'), 'export const label = "first good build";\n');
+    writeFileSync(join(srcDir, 'main.css'), '.first { color: red; }\n');
+    config = {
+      entryPoints: [{ entry: join(srcDir, 'app.ts'), outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: ['main'] } },
+      cssEntries: [{ input: join(srcDir, 'main.css'), outfile: 'main.css' }],
+      fontDir,
+      outputDir: outDir,
+    };
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  /** Run a build with a failing wasm-pack first on PATH. */
+  async function failingBuild(): Promise<Error> {
+    const binDir = join(tmpRoot, 'bin');
+    failingWasmPack(binDir);
+    const prevPath = process.env.PATH;
+    process.env.PATH = binDir + delimiter + prevPath;
+    try {
+      const outcome = await build({ ...config, wasm: { crateDir: join(tmpRoot, 'crate') } }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(outcome).toBeInstanceOf(Error);
+      return outcome as Error;
+    } finally {
+      process.env.PATH = prevPath;
+    }
+  }
+
+  it('leaves the previous build byte-identical when a build fails after writing files', async () => {
+    await build(config);
+    const good = snapshot(outDir);
+    expect(Object.keys(good)).toContain('manifest.json');
+    const besideOutput = readdirSync(tmpRoot).sort();
+
+    // The next build changes every input, then fails in its last-but-three
+    // step, after its CSS, font and bundle are written.
+    writeFileSync(join(srcDir, 'app.ts'), 'export const label = "second, failed build";\n');
+    writeFileSync(join(srcDir, 'main.css'), '.second { color: blue; }\n');
+    const error = await failingBuild();
+    expect(error.message).toMatch(/wasm-pack/);
+
+    expect(snapshot(outDir)).toEqual(good);
+    // Nothing is left beside the output either: the staging directory the
+    // failed build wrote into is gone. (`bin` is the test's own wasm-pack.)
+    expect(readdirSync(tmpRoot).sort()).toEqual([...besideOutput, 'bin'].sort());
+  }, 30_000);
+
+  it('a failed first build leaves no output directory and nothing beside it', async () => {
+    const error = await failingBuild();
+    expect(error.message).toMatch(/wasm-pack/);
+
+    expect(existsSync(outDir)).toBe(false);
+    expect(readdirSync(tmpRoot).sort()).toEqual(['bin', 'fonts', 'src']);
+  }, 30_000);
+
+  it('a successful build replaces the previous output whole', async () => {
+    await build(config);
+    // A file the next build does not produce (a stale asset, or one the
+    // developer dropped in by hand) must not survive into the next output.
+    writeFileSync(join(outDir, 'stale.js'), 'stale');
+    writeFileSync(join(srcDir, 'app.ts'), 'export const label = "second good build";\n');
+
+    const result = await build(config);
+
+    const files = readdirSync(outDir);
+    expect(files).not.toContain('stale.js');
+    expect(files).toContain(result.manifest.assets['app.js']);
+    expect(readFileSync(join(outDir, result.manifest.assets['app.js']!), 'utf8')).toContain('second good build');
+    expect(readdirSync(tmpRoot).sort()).toEqual(['dist', 'fonts', 'src']);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
 // SSR builds: the .ir is the only island artifact
 // ---------------------------------------------------------------------------
 
