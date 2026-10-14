@@ -12,12 +12,13 @@
  *
  * What it misses, by construction (each a reason the allowlist is reviewed,
  * not a proof):
- * - A sink reached through the application's own re-export of core
- *   (`export * from '@getforma/core'` in `./forma.ts`, then `template()` from
- *   `./forma`): `template`, `templateMany`, `reconcile` and `setHTMLUnsafe` are
- *   tracked from core's own module names (`@getforma/core`, its subpaths,
- *   `formajs`) and the CDN runtime's `FormaRuntime` global. `trustedHtml` is
- *   matched by name wherever it comes from.
+ * - A sink reached through core's module in a callback
+ *   (`import('@getforma/core').then((m) => m.template(s))`, or with
+ *   `({ template }) =>`): `template`, `templateMany`, `reconcile` and
+ *   `setHTMLUnsafe` are tracked from core's own module names (`@getforma/core`,
+ *   its subpaths, `formajs`) and the CDN runtime's `FormaRuntime` global,
+ *   through imports, `require`, `await import`, destructuring, aliases and
+ *   bracket access. `trustedHtml` is matched by name wherever it comes from.
  * - The registry key built at run time (`'@getforma/core' + '#trusted-types'`)
  *   or found by `Object.getOwnPropertySymbols(globalThis)`.
  * - A value's provenance across files or through a function: a raw sink is
@@ -553,6 +554,7 @@ class ScriptScan {
     let k = i;
     if (this.isId(k) && GLOBAL_OBJECTS.has(this.toks[k]!.value) && this.isP(k + 1, '.')) k += 2;
     if (this.isId(k) && this.namespaces.has(this.toks[k]!.value) && this.isP(k + 1, '.') && this.isId(k + 2, 'trustedHtml')) return k + 3 - i;
+    if (this.isId(k) && this.namespaces.has(this.toks[k]!.value) && this.isP(k + 1, '[') && this.t(k + 2)?.type === 'str' && this.t(k + 2)!.value === 'trustedHtml' && this.isP(k + 3, ']')) return k + 4 - i;
     if (k === i && this.isId(k) && this.isTrustedCallee(k)) return 1;
     return 0;
   }
@@ -669,7 +671,11 @@ class ScriptScan {
     return end;
   }
 
-  /** `const { reconcile } = require('@getforma/core/runtime')`, `= await import(…)`, `= FormaRuntime`. */
+  /**
+   * `const { reconcile } = require('@getforma/core/runtime')`, `= await
+   * import(…)`, `= FormaRuntime`, and a namespace destructured or aliased
+   * (`const { template } = F`, `const G = F`; FORMA-126 review, should-fix 4).
+   */
   private destructuredRequire(i: number): void {
     const pattern = i + 1;
     let eq: number;
@@ -689,9 +695,10 @@ class ScriptScan {
     if ((this.isId(k, 'require') || this.isId(k, 'import')) && this.isP(k + 1, '(') && this.t(k + 2)?.type === 'str' && this.isP(k + 3, ')')) {
       fromCore = isFormaModule(this.t(k + 2)!.value);
     } else {
+      // `= FormaRuntime`, `= window.FormaRuntime`, or `= F` for a namespace F already known.
       let g = k;
       if (this.isId(g) && GLOBAL_OBJECTS.has(this.t(g)!.value) && this.isP(g + 1, '.')) g += 2;
-      fromCore = this.isId(g, 'FormaRuntime') && !this.isP(g + 1, '.') && !this.isP(g + 1, '(');
+      fromCore = this.isId(g) && this.namespaces.has(this.t(g)!.value) && (this.isP(g + 1, ';') || this.isP(g + 1, ',') || g + 1 >= this.toks.length);
     }
     if (!fromCore) return;
     if (this.isId(pattern)) {
@@ -1016,8 +1023,48 @@ class ScriptScan {
   }
 
   private visitString(i: number, tok: Tok): void {
+    // A member of core's namespace by bracket: `F['template'](s)`, `F['trustedHtml'](s)`.
+    if (this.isP(i - 1, '[') && this.isP(i + 1, ']') && this.isNamespaceAt(i - 2)) {
+      if (tok.value === 'trustedHtml') {
+        this.report(i, 'trustedHtml', this.isP(i + 2, '(') ? 'trustedHtml() called' : 'trustedHtml referenced, not called: the lint cannot see what it is given');
+        return;
+      }
+      if (SINK_ARGUMENT.has(tok.value)) {
+        this.checkSinkUse(i, tok.value, i + 2);
+        return;
+      }
+    }
     const kind = keyKind(tok.value);
     if (kind) this.visitKeyName(i, kind);
+  }
+
+  /** A sink of core's at `i`, its name ending before `after`: called with untraced markup, or referenced. */
+  private checkSinkUse(i: number, sink: string, after: number): void {
+    const open = this.isP(after, '(') ? after : this.isP(after, '?.') && this.isP(after + 1, '(') ? after + 1 : -1;
+    if (open === -1) {
+      this.report(i, sink, `${sink} referenced, not called: the lint cannot see what it is given`);
+      return;
+    }
+    const arg = this.argument(open, SINK_ARGUMENT.get(sink)!);
+    if (!arg || !this.isTrusted(arg[0], arg[1])) this.report(i, sink, `${sink}() given markup not traced to trustedHtml()`);
+  }
+
+  /**
+   * Core's module at token `k`, as an object: a namespace import or an alias
+   * of one, `FormaRuntime` (behind `window.` and the like), or the module
+   * itself (`require('@getforma/core')`, `(await import('@getforma/core'))`).
+   */
+  private isNamespaceAt(k: number): boolean {
+    if (this.isId(k)) return this.namespaces.has(this.toks[k]!.value);
+    if (!this.isP(k, ')') || this.pair[k]! < 0) return false;
+    const open = this.pair[k]!;
+    // `require("m")` / `import("m")`, or a parenthesised `await import("m")`.
+    if ((this.isId(open - 1, 'require') || this.isId(open - 1, 'import')) && this.t(open + 1)?.type === 'str' && open + 2 === k) {
+      return isFormaModule(this.t(open + 1)!.value);
+    }
+    let j = open + 1;
+    if (this.isId(j, 'await')) j++;
+    return (this.isId(j, 'require') || this.isId(j, 'import')) && this.isP(j + 1, '(') && this.t(j + 2)?.type === 'str' && this.isP(j + 3, ')') && j + 4 === k && isFormaModule(this.t(j + 2)!.value);
   }
 
   /**
@@ -1045,7 +1092,7 @@ class ScriptScan {
   private visitIdentifier(i: number, tok: Tok): void {
     const name = tok.value;
     const afterDot = this.isP(i - 1, '.') || this.isP(i - 1, '?.');
-    const onNamespace = afterDot && this.isId(i - 2) && this.namespaces.has(this.t(i - 2)!.value);
+    const onNamespace = afterDot && this.isNamespaceAt(i - 2);
 
     // trustedHtml, and any local bound to it.
     if (name === 'trustedHtml' || (!afterDot && this.resolve(name, i) === 'trustedCallee')) {
@@ -1064,13 +1111,7 @@ class ScriptScan {
     // template, templateMany, setHTMLUnsafe, reconcile from core.
     const sink = onNamespace ? (SINK_ARGUMENT.has(name) ? name : undefined) : !afterDot && !this.isKey(i) ? this.sinkLocals.get(name) : undefined;
     if (sink) {
-      const open = this.isP(i + 1, '(') ? i + 1 : this.isP(i + 1, '?.') && this.isP(i + 2, '(') ? i + 2 : -1;
-      if (open === -1) {
-        this.report(i, sink, `${sink} referenced, not called: the lint cannot see what it is given`);
-        return;
-      }
-      const arg = this.argument(open, SINK_ARGUMENT.get(sink)!);
-      if (!arg || !this.isTrusted(arg[0], arg[1])) this.report(i, sink, `${sink}() given markup not traced to trustedHtml()`);
+      this.checkSinkUse(i, sink, i + 1);
       return;
     }
 

@@ -480,11 +480,16 @@ by tag, outside comments; an inline script is parsed as JavaScript.
 
 What it cannot see, and review must:
 
+- A sink reached through core's module inside a callback
+  (`import('@getforma/core').then((m) => m.template(s))`, or
+  `.then(({ template }) => …)`). `template`, `templateMany`, `reconcile` and
+  `setHTMLUnsafe` are followed from core's own module names and `FormaRuntime`:
+  through named, namespace and default imports, `require` and `await import`,
+  destructuring and aliases of the namespace (`const { template } = F`,
+  `const G = F`), and bracket access (`F['template']`). `trustedHtml` is
+  matched by name wherever it comes from.
 - A sink reached through the application's own re-export of core
-  (`export * from '@getforma/core'`, then `template()` from that module):
-  `template`, `templateMany`, `reconcile` and `setHTMLUnsafe` are followed
-  from core's own module names and `FormaRuntime`; `trustedHtml` is matched by
-  name wherever it comes from.
+  (`export * from '@getforma/core'`, then `template()` from that module).
 - Provenance across files or through a function: a sink passes only when its
   argument is a `trustedHtml(…)` call or a `const` bound to one in scope (a
   parameter, `let`, `var` or any nearer binding of the same name shadows it,
