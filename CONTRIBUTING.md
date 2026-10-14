@@ -52,6 +52,14 @@ every symbol the compiler generates imports still exists there. Compiled output
 naming another package's API is a dependency, even though nothing in
 `package.json` records it.
 
+**Skipped checks that are by design.** On a pull request or a push, a CI job
+shows "skipped" only when a job it needs has failed: `fmir-contract` and `e2e`
+need `test`, so a red `test` skips them, and they run once it is green.
+`compat.yml` is a workflow of its own, started by its weekly schedule or by
+`gh workflow run compat.yml --ref <branch>`, so it never shows on a pull
+request, and `release.yml` runs only for a release tag. A job skipped for any
+other reason is a defect in the workflow (FORMA-179).
+
 ## Tests
 
 The standard is
