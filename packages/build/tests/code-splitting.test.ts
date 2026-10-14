@@ -126,7 +126,9 @@ describe('Opt-in ESM code splitting', () => {
       writeFileSync(join(src, 'later.ts'), 'import { singleton } from "./shared"; export const later = singleton; export const label = "RENAMED_MANIFEST";');
       await vi.waitFor(() => expect(listedChunks(manifest()).some(file => !oldChunks.includes(file))).toBe(true), { timeout: 5000 });
       expect(inode()).not.toBe(first);
-      expect(readdirSync(dist).filter(file => file.endsWith('.tmp'))).toEqual([]);
+      // No temporary file is left behind; one may be in flight while a
+      // further rebuild rewrites the manifest, so this waits rather than reads.
+      await vi.waitFor(() => expect(readdirSync(dist).filter(file => file.endsWith('.tmp'))).toEqual([]), { timeout: 5000 });
     });
   }, 15_000);
 });
