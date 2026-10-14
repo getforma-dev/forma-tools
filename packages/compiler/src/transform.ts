@@ -26,6 +26,15 @@ const generate = (typeof _generate === 'function'
   ? _generate
   : (_generate as any).default) as typeof _generate;
 
+/**
+ * The module compiled output imports its runtime helpers (`template`,
+ * `createEffect`) from: the published package. Never the bare `formajs`,
+ * which npm refuses to publish to anyone (too similar to the third-party
+ * `forma-js`), so it resolves only where a build aliases it.
+ * Verified by: packages/compiler/tests/formajs-contract.test.ts > "adds no import of the bare name \"formajs\", even to a module written against it"
+ */
+const CORE_MODULE = '@getforma/core';
+
 // ---------------------------------------------------------------------------
 // SVG tags — fall back to runtime h() for these
 // ---------------------------------------------------------------------------
@@ -915,7 +924,7 @@ export function compileFormaJSX(
   if (needsTemplateImport) {
     const templateImport = t.importDeclaration(
       [t.importSpecifier(t.identifier(compiledTemplateId), t.identifier('template'))],
-      t.stringLiteral('formajs'),
+      t.stringLiteral(CORE_MODULE),
     );
     ast.program.body.unshift(templateImport);
   }
@@ -925,7 +934,7 @@ export function compileFormaJSX(
     // Determine the source for createEffect import
     const effectImport = t.importDeclaration(
       [t.importSpecifier(t.identifier(compiledCreateEffectId), t.identifier('createEffect'))],
-      t.stringLiteral('formajs'),
+      t.stringLiteral(CORE_MODULE),
     );
     ast.program.body.unshift(effectImport);
   }

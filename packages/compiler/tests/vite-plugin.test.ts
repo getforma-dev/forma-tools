@@ -91,6 +91,7 @@ describe('formaCompiler file gating', () => {
     const unrelated = `export const view = h('div', null, 'x');`;
     expect(runTransform(plugin, unrelated, '/proj/src/view.ts')).toBeNull();
   });
+
 });
 
 describe('formaServer file gating', () => {
@@ -105,6 +106,12 @@ describe('formaServer file gating', () => {
   it('transforms a project file with a "use server" directive', () => {
     expect(runTransform(plugin, SERVER_FN, '/proj/src/api.ts'))
       .toContain('$$serverFunction');
+  });
+
+  it('imports the RPC stub from "@getforma/core/server", not "formajs/server"', () => {
+    const out = runTransform(plugin, SERVER_FN, '/proj/src/api.ts');
+    expect(out).toContain('from "@getforma/core/server"');
+    expect(out).not.toMatch(/formajs/);
   });
 
   it('skips node_modules', () => {

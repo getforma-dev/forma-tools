@@ -42,6 +42,10 @@ const _root = _tmpl.cloneNode(true);
 createEffect(() => { _root.querySelector("p").textContent = description(); });
 ```
 
+The compiled module imports `template` and `createEffect` from
+`@getforma/core`, so that package must resolve in your project. Your own
+imports are left as written.
+
 ### Options
 
 ```ts

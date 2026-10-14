@@ -2,22 +2,45 @@
  * Contract tests — verify that every import the compiler generates
  * actually exists in @getforma/core. Catches the exact class of bug
  * where template wasn't exported from the main barrel.
+ *
+ * Compiled output names the published package, `@getforma/core`, never the
+ * bare `formajs`: npm refuses that name to everyone (too similar to the
+ * third-party `forma-js`), so it can only ever resolve through a build alias.
+ * A user's own `formajs` import is left as written; the build's `formaAlias`
+ * still resolves it.
  */
 import { describe, it, expect } from 'vitest';
+import { parse } from '@babel/parser';
 import { compileFormaJSX, transformServerFunctions } from '../src/index';
 
-describe('compiler → formajs import contracts', () => {
-  it('compiled h() generates template import from "formajs"', () => {
+/** Every named or default import in `code`, as imported name → module specifier. */
+function importedFrom(code: string): Record<string, string> {
+  const ast = parse(code, { sourceType: 'module', plugins: ['typescript'] });
+  const map: Record<string, string> = {};
+  for (const node of ast.program.body) {
+    if (node.type !== 'ImportDeclaration') continue;
+    for (const spec of node.specifiers) {
+      const name = spec.type === 'ImportSpecifier'
+        ? (spec.imported.type === 'Identifier' ? spec.imported.name : spec.imported.value)
+        : spec.local.name;
+      map[name] = node.source.value;
+    }
+  }
+  return map;
+}
+
+describe('compiler → @getforma/core import contracts', () => {
+  it('compiled h() generates template import from "@getforma/core"', () => {
     const source = `
       import { h } from 'formajs';
       export const view = h('div', { class: 'card' }, 'hello');
     `;
     const out = compileFormaJSX(source, '/tmp/test.tsx');
     expect(out).not.toBeNull();
-    expect(out!.code).toContain('import { template as _$template } from "formajs"');
+    expect(out!.code).toContain('import { template as _$template } from "@getforma/core"');
   });
 
-  it('compiled h() with dynamic children generates createEffect import from "formajs"', () => {
+  it('compiled h() with dynamic children generates createEffect import from "@getforma/core"', () => {
     const source = `
       import { h, createSignal } from 'formajs';
       const [count, setCount] = createSignal(0);
@@ -25,7 +48,7 @@ describe('compiler → formajs import contracts', () => {
     `;
     const out = compileFormaJSX(source, '/tmp/test.tsx');
     expect(out).not.toBeNull();
-    expect(out!.code).toContain('import { createEffect as _$createEffect } from "formajs"');
+    expect(out!.code).toContain('import { createEffect as _$createEffect } from "@getforma/core"');
   });
 
   it('compiled h() with event handler does not generate unexpected imports', () => {
@@ -36,7 +59,7 @@ describe('compiler → formajs import contracts', () => {
     const out = compileFormaJSX(source, '/tmp/test.tsx');
     expect(out).not.toBeNull();
     // Should have template but NOT createEffect (no reactive children)
-    expect(out!.code).toContain('import { template as _$template } from "formajs"');
+    expect(out!.code).toContain('import { template as _$template } from "@getforma/core"');
     expect(out!.code).not.toContain('createEffect');
   });
 
@@ -50,6 +73,25 @@ describe('compiler → formajs import contracts', () => {
     expect(out).not.toBeNull();
     // User's original imports should remain
     expect(out!.code).toContain("import { h, createSignal, batch } from 'formajs'");
+  });
+
+  it('adds no import of the bare name "formajs", even to a module written against it', () => {
+    // Both compiler-added imports (template for the clone, createEffect for the
+    // reactive attribute and text) must name @getforma/core; the user's own
+    // `formajs` import is theirs and stays, resolved by the build's alias.
+    const source = `
+      import { h, createSignal } from 'formajs';
+      const [count] = createSignal(0);
+      export const view = h('div', { class: () => (count() > 0 ? 'on' : 'off') }, () => count());
+    `;
+    const out = compileFormaJSX(source, '/tmp/test.tsx');
+    expect(out).not.toBeNull();
+    expect(importedFrom(out!.code)).toEqual({
+      template: '@getforma/core',
+      createEffect: '@getforma/core',
+      h: 'formajs',
+      createSignal: 'formajs',
+    });
   });
 
   it('static-only component generates template import but no createEffect', () => {
@@ -68,8 +110,8 @@ describe('compiler → formajs import contracts', () => {
   });
 });
 
-describe('server transform → formajs/server import contracts', () => {
-  it('client mode generates $$serverFunction import from "formajs/server"', () => {
+describe('server transform → @getforma/core/server import contracts', () => {
+  it('client mode generates $$serverFunction import from "@getforma/core/server"', () => {
     const source = `
       async function save(data: string) {
         "use server";
@@ -78,13 +120,14 @@ describe('server transform → formajs/server import contracts', () => {
     `;
     const out = transformServerFunctions(source, '/tmp/s.ts', { mode: 'client' });
     expect(out).not.toBeNull();
-    expect(out!.code).toContain('from "formajs/server"');
+    expect(out!.code).toContain('from "@getforma/core/server"');
     expect(out!.code).toContain('$$serverFunction');
-    // Must NOT import from bare "formajs"
-    expect(out!.code).not.toMatch(/from ["']formajs["'][^/]/);
+    expect(importedFrom(out!.code)).toEqual({ $$serverFunction: '@getforma/core/server' });
+    // Neither the bare name nor any subpath of it
+    expect(out!.code).not.toMatch(/formajs/);
   });
 
-  it('server mode generates registerServerFunction import from "formajs/server"', () => {
+  it('server mode generates registerServerFunction import from "@getforma/core/server"', () => {
     const source = `
       async function create(name: string) {
         "use server";
@@ -93,10 +136,11 @@ describe('server transform → formajs/server import contracts', () => {
     `;
     const out = transformServerFunctions(source, '/tmp/s.ts', { mode: 'server' });
     expect(out).not.toBeNull();
-    expect(out!.code).toContain('from "formajs/server"');
+    expect(out!.code).toContain('from "@getforma/core/server"');
     expect(out!.code).toContain('registerServerFunction');
-    // Must NOT import from bare "formajs"
-    expect(out!.code).not.toMatch(/from ["']formajs["'][^/]/);
+    expect(importedFrom(out!.code)).toEqual({ registerServerFunction: '@getforma/core/server' });
+    // Neither the bare name nor any subpath of it
+    expect(out!.code).not.toMatch(/formajs/);
   });
 
   it('server mode removes "use server" directive', () => {
