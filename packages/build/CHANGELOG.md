@@ -16,7 +16,7 @@
   config error naming it. Without `app`, the workers are 0.3.0's, byte for
   byte; the development (watch) worker is unchanged either way. The contract is
   forma-server's (`forma_server::sw`); `tests/helpers/cache-vectors.ts` copies
-  its shared vectors from forma PR 15 (`3d92f57`). Tests:
+  its shared vectors from forma PR 15 (`d859f03`, after its review added the near misses). Tests:
   `tests/service-worker.test.ts` > "per-application workers (FORMA-130)" (the
   vectors, the waiting upgrade, own-cache reads, 0.3.0's workers byte for byte
   against `tests/fixtures/workers-0.3.0/`, the development worker unchanged);

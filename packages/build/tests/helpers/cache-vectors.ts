@@ -1,8 +1,8 @@
 // The per-application cache-name contract as data, shared with forma-server.
 //
 // COPIED from getforma-dev/forma, `crates/forma-server/tests/js/retiring_worker.mjs`
-// (`CACHE_VECTORS`), at commit 3d92f57 (forma PR 15, FORMA-130's forma-server
-// half). The two repositories cannot import each other's tests, so the table
+// (`CACHE_VECTORS`), at commit d859f03 (forma PR 15, FORMA-130's forma-server
+// half, after its review added the near misses). The two repositories cannot import each other's tests, so the table
 // is copied; a change to the contract changes both copies in paired PRs.
 //
 // [cache name, deleted by an unnamed retiring worker, deleted by "ledger"'s]
@@ -20,7 +20,13 @@ export const CACHE_VECTORS: ReadonlyArray<readonly [string, boolean, boolean]> =
   ['forma:other:0123456789ab', false, false],
   ['forma:ledgers:0123456789ab', false, false], // a prefix of the name is not the name
   ['forma:ledger', false, false], // no build segment: not a cache this contract writes
+  ['x-forma:ledger:0123456789ab', false, false], // the prefix starts the name
   // near misses of the v1 shape: not Forma's v1 names.
+  ['x-forma-dev', false, false], // anchored at the start
+  ['my-forma-0123456789ab', false, false],
+  ['forma_dev', false, false], // the separator is a hyphen, nothing else
+  ['forma.0123456789ab', false, false],
+  ['forma:dev', false, false], // neither a v1 name nor an application's cache
   ['forma-0123456789AB', false, false],
   ['forma-0123456789abc', false, false],
   ['forma-0123456789a', false, false],
