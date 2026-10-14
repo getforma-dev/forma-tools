@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Release and CI install with `npm ci` (DR-32, FORMA-010; the package is unchanged).** `release.yml`, `ci.yml` and `compat.yml` install exactly what `package-lock.json` records instead of running `npm install`; `compat.yml` still installs the newest `@getforma/core` on top, deliberately. Each `uses:` names the commit its tag or branch pointed to on 2026-10-14, with the ref in a comment, and every CI job declares `contents: read`; `release.yml` keeps its workflow-level `contents: read` and `id-token: write`.
+
 ### Corrected
 - The 0.3.1 entry said 0.3.0 "was never published". npm holds `@getforma/compiler` 0.3.0, published on 2026-08-06 from `compiler-v0.3.0` (`778b71f`) with provenance; 0.3.1 carries the fixes made after it. The entry below is amended.
 - Two 0.3.0 entries described the Rust name→id map as last-insert-wins without saying which `forma-ir`. That was true of `forma-ir` 0.1.4 and earlier; since 0.2.0 the first slot in table order wins, everywhere (the rule is stated once, at `forma-ir`'s `IrModule::slot_id_by_name`). The entries below are amended, as are the README's slot-naming paragraph and the comments in `ir-walk.ts`, `tests/helpers/fmir.ts` and the `dynamic-attrs` corpus case that said the same. The README's migration notes, labelled "(unreleased)", shipped in 0.3.0 and now say so.

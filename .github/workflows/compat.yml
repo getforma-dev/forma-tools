@@ -10,8 +10,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The job declares its token (FORMA-010): it only reads this repository.
 jobs:
   verify-compiler-imports:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     # MEASURED: `npm test --workspaces` = 3s locally. The rest is two npm
     # installs and two `node -e` require checks. Realistic worst case ~3m;
@@ -19,13 +22,15 @@ jobs:
     # thing here that can be slow.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
 
-      - run: npm install
+      - run: npm ci
+      # Deliberately not from the lockfile: this job exists to check the newest
+      # published @getforma/core against what the compiler emits.
       - run: npm install @getforma/core@latest
 
       - name: Verify compiler-generated imports exist in @getforma/core
