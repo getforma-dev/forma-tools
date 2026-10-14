@@ -234,15 +234,18 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
     'Remove `wasm` from the config.',
     false),
   // The preview frame's runtime (FORMA-175): `previewFrame: true` copies
-  // core's dist/formajs-frame.global.js as the manifest's forma-runtime.js,
-  // which forma-server's PreviewFrame::load inlines by its hash (FRAME-101 to
-  // FRAME-103). The build fails on either, strict mode or not.
+  // the frame runtime of the core the bundles import as the manifest's
+  // forma-runtime.js, which forma-server's PreviewFrame::load inlines by its
+  // hash (FRAME-101 to FRAME-103). The build fails on each, strict mode or not.
   entry('BUILD-805', 'Preview frame runtime missing from @getforma/core',
-    "`previewFrame` is on, and the @getforma/core the entries import has no dist/formajs-frame.global.js (it ships from core 2.1.0), or none is installed: there is no runtime to copy, and forma-server would refuse to start the frame (FRAME-101).",
-    'Install @getforma/core 2.1.0 or later where the entries import it, or turn `previewFrame` off.'),
+    "`previewFrame` is on, and the @getforma/core the bundles import has no dist/formajs-frame.global.js (it ships from core 2.1.0), or no core is found: there is no runtime to copy, and forma-server would refuse to start the frame (FRAME-101).",
+    'Install @getforma/core 2.1.0 or later where the bundles import it from, or turn `previewFrame` off.'),
   entry('BUILD-806', 'Preview frame runtime that cannot be inlined',
     "Core's dist/formajs-frame.global.js is empty, not UTF-8, or contains `</script`, `<!--`, a carriage return or a NUL: it is inlined as it is into the frame's `<script>` and allowed by its hash, so it would end early or not match its hash, and forma-server would refuse it (FRAME-103).",
     'Reinstall @getforma/core and leave the file as published: no editor, formatter, patch or CRLF checkout may rewrite it.'),
+  entry('BUILD-807', 'Bundles that import more than one @getforma/core',
+    "`previewFrame` is on, and the bundles import more than one @getforma/core, whose frame runtimes differ (entries from packages with their own cores, or a library bundling its own): the frame runs one runtime, so the build would have to pick the core it renders previews with, and the page could mount the module with another.",
+    'Make every entry import one @getforma/core (one version in the workspace, `npm dedupe`, a library taking core as a peer dependency), or turn `previewFrame` off.'),
   // The raw-entry lint, forma-raw-lint (FORMA-126, SR8): reported by @getforma/build's
   // bin, never in a build's report. RAW_LINT_CATALOGUE in packages/build/src/raw-lint.ts
   // holds the same entries (packages/build/tests/raw-lint.test.ts keeps them equal).

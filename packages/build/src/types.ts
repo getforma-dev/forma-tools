@@ -73,16 +73,24 @@ export interface BuildConfig {
    * forma-server's preview frame (`PageResponse::frame`, FORMA-125; FORMA-175).
    * Off by default, where the output is what it was.
    *
-   * On, the build copies core's `dist/formajs-frame.global.js` (core 2.1.0 and
-   * later; never its `dist/forma-runtime.js`, the CDN alias of the
-   * auto-mounting runtime) from the core the entries import, byte for byte,
-   * as `forma-runtime.<hash>.js`, and names it in the manifest under
+   * On, the build copies `dist/formajs-frame.global.js` (core 2.1.0 and later;
+   * never core's `dist/forma-runtime.js`, the CDN alias of the auto-mounting
+   * runtime) from the core the bundles import, byte for byte, as
+   * `forma-runtime.<hash>.js`, and names it in the manifest under
    * `assets["forma-runtime.js"]`, where `PreviewFrame::load` reads it at start
-   * and allows it by its SHA-256 hash. Watch mode writes it unhashed as
-   * `forma-runtime.js`, named the same way in the dev manifest. A core without
-   * it fails the build with BUILD-805, and a runtime forma-server would refuse
-   * to inline (empty, not UTF-8, `</script`, `<!--`, a carriage return or a
-   * NUL) with BUILD-806, before anything is written.
+   * and allows it by its SHA-256 hash. Which core: before anything is
+   * written, each entry is bundled in memory with the bundles' own esbuild
+   * options (so `formaAlias`, resolved from the working directory, and
+   * tsconfig `paths` lead where they lead the bundles), and every file it
+   * loads is mapped to its package; when the bundles import none, the core
+   * installed where the build runs. Watch mode writes it unhashed as
+   * `forma-runtime.js`, named the same way in the dev manifest. It is
+   * inlined, never fetched: no compressed copies, and no place in the
+   * worker's lists. A core without it fails the build with BUILD-805, a
+   * runtime forma-server would refuse to inline (empty, not UTF-8,
+   * `</script`, `<!--`, a carriage return or a NUL) with BUILD-806, and
+   * bundles that import cores whose runtimes differ with BUILD-807, before
+   * anything is written.
    */
   previewFrame?: boolean;
   /** Directory containing .woff2 font files to copy */

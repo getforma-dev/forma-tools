@@ -290,13 +290,17 @@ function hashAssets(
 // Compression
 // ---------------------------------------------------------------------------
 
-function compressAssets(distDir: string): number {
+/**
+ * `skip` names files nothing fetches, which get no compressed copies: the
+ * preview frame's runtime, which forma-server inlines (FORMA-175).
+ */
+function compressAssets(distDir: string, skip: ReadonlySet<string> = new Set()): number {
   const COMPRESSIBLE_EXTS = new Set(['.js', '.css']);
   let compressCount = 0;
 
   for (const file of readdirSync(distDir)) {
     const ext = extname(file);
-    if (!COMPRESSIBLE_EXTS.has(ext)) continue;
+    if (!COMPRESSIBLE_EXTS.has(ext) || skip.has(file)) continue;
 
     const filePath = join(distDir, file);
     if (!statSync(filePath).isFile()) continue;
@@ -422,8 +426,9 @@ function validateConfig(config: BuildConfig): void {
     if (entryNames.has(entry.outfile)) problems.push(`entryPoints: duplicate outfile '${entry.outfile}'`);
     entryNames.add(entry.outfile);
     // The manifest would name the application's bundle where forma-server
-    // reads the frame's runtime, and the two files would be one.
-    if (previewFrame === true && entry.outfile === FRAME_RUNTIME_ASSET) {
+    // reads the frame's runtime, and the two files would be one: compared
+    // without case, as the file systems of macOS and Windows compare names.
+    if (previewFrame === true && entry.outfile.toLowerCase() === FRAME_RUNTIME_ASSET) {
       problems.push(
         `entryPoints: outfile '${entry.outfile}' is the preview frame runtime's name in the manifest (previewFrame): name the entry something else`,
       );
@@ -673,6 +678,30 @@ const WATCH_RESOLUTION: Pick<esbuild.BuildOptions, 'conditions' | 'define'> = {
   define: { 'process.env.NODE_ENV': '"development"' },
 };
 
+/**
+ * The esbuild options every bundle of a build shares. previewFrame's reading
+ * of which core the bundles import (preview-frame.ts) bundles each entry in
+ * memory with these same options, so its answer is the bundles'.
+ */
+function sharedOptions(config: BuildConfig): Partial<esbuild.BuildOptions> {
+  return {
+    bundle: true,
+    format: 'esm',
+    target: 'es2022',
+    alias: config.formaAlias
+      ? { 'formajs': config.formaAlias }
+      : {},
+    minify: !config.watch,
+    sourcemap: config.watch ? 'inline' : false,
+    logLevel: 'info',
+    jsx: 'transform',
+    jsxFactory: 'h',
+    jsxFragment: 'Fragment',
+    // Watch mode is a development build (FORMA-169); production adds nothing.
+    ...(config.watch ? WATCH_RESOLUTION : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Watch Mode: Server-Rendered Pages
 // ---------------------------------------------------------------------------
@@ -821,11 +850,14 @@ export async function build(userConfig: BuildConfig): Promise<BuildResult> {
   for (const line of deprecations) console.warn(`Warning: ${line}`);
   const withDeprecations = (result: BuildResult): BuildResult =>
     deprecations.length > 0 ? { ...result, warnings: [...result.warnings, ...deprecations] } : result;
-  // The preview frame's runtime (FORMA-175), read and checked before anything
-  // is written: a core without it (BUILD-805) or a runtime forma-server would
-  // refuse (BUILD-806) leaves the previous output as it was, in watch mode too.
-  // Off, nothing is read.
-  const frame = config.previewFrame === true ? readFrameRuntime(config, config.strict === true) : undefined;
+  // The preview frame's runtime (FORMA-175), found from the core the bundles
+  // import, read and checked before anything is written: no runtime
+  // (BUILD-805), one forma-server would refuse (BUILD-806) or bundles that
+  // import cores with different runtimes (BUILD-807) leave the previous
+  // output as it was, in watch mode too. Off, nothing is read.
+  const frame = config.previewFrame === true
+    ? await readFrameRuntime(config, sharedOptions(config), config.strict === true)
+    : undefined;
   if (config.watch) return withDeprecations(await buildInto(config, config.outputDir, frame));
 
   const staging = createStagingDirectory(config.outputDir);
@@ -872,28 +904,13 @@ async function buildInto(config: BuildConfig, shownDir: string, frame?: FrameRun
       const target = join(distDir, FRAME_RUNTIME_ASSET);
       if (config.watch) writeFileAtomic(target, frame.bytes);
       else writeFileSync(target, frame.bytes);
-      console.log(`   Preview frame runtime: ${FRAME_RUNTIME_ASSET} from @getforma/core ${frame.version} (${frame.source})`);
+      console.log(`   Preview frame runtime: ${FRAME_RUNTIME_ASSET} from @getforma/core ${frame.version} (${frame.source}), ${frame.found}`);
     }
     // The dev manifest names it as itself, as it names every watched asset.
     const frameAssets: Record<string, string> = frame ? { [FRAME_RUNTIME_ASSET]: FRAME_RUNTIME_ASSET } : {};
 
     // ── esbuild shared config ─────────────────────────────────────────
-    const shared: Partial<esbuild.BuildOptions> = {
-      bundle: true,
-      format: 'esm',
-      target: 'es2022',
-      alias: config.formaAlias
-        ? { 'formajs': config.formaAlias }
-        : {},
-      minify: !config.watch,
-      sourcemap: config.watch ? 'inline' : false,
-      logLevel: 'info',
-      jsx: 'transform',
-      jsxFactory: 'h',
-      jsxFragment: 'Fragment',
-      // Watch mode is a development build (FORMA-169); production adds nothing.
-      ...(config.watch ? WATCH_RESOLUTION : {}),
-    };
+    const shared = sharedOptions(config);
 
     // ── Lazy-load SSR plugin only when needed ─────────────────────────
     let formaSsrPlugin: SsrPluginFactory | undefined;
@@ -1091,7 +1108,11 @@ async function buildInto(config: BuildConfig, shownDir: string, frame?: FrameRun
     console.log(`   ${Object.keys(assets).length} assets hashed`);
 
     // ── Compression ───────────────────────────────────────────────────
-    compressAssets(distDir);
+    // The preview frame's runtime is inlined by forma-server, never fetched:
+    // no compressed copies of it, and no place in the worker's lists.
+    // Verified by: packages/build/tests/preview-frame.test.ts > "the runtime is inlined, never fetched: no compressed copies, and no entry in the on-demand worker's immutable list"
+    const frameFile = frame ? assets[FRAME_RUNTIME_ASSET] : undefined;
+    compressAssets(distDir, new Set(frameFile ? [frameFile] : []));
 
     // ── Manifest generation ───────────────────────────────────────────
     const { manifest, warnings } = generateManifest(config, assets, wasmBuilt, graph?.staticDependencies);
@@ -1105,7 +1126,10 @@ async function buildInto(config: BuildConfig, shownDir: string, frame?: FrameRun
     );
 
     // ── Service worker generation ─────────────────────────────────────
-    generateServiceWorker(config, assets, manifest.build_hash, wasmBuilt);
+    const fetchedAssets = frameFile
+      ? Object.fromEntries(Object.entries(assets).filter(([name]) => name !== FRAME_RUNTIME_ASSET))
+      : assets;
+    generateServiceWorker(config, fetchedAssets, manifest.build_hash, wasmBuilt);
 
     return {
       manifest,
