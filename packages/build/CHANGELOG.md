@@ -22,7 +22,12 @@
   against `tests/fixtures/workers-0.3.0/`, the development worker unchanged);
   `tests/build.test.ts` > "names the worker's cache per application and build,
   and gives it a waiting upgrade", "rejects an application name forma-server
-  cannot take, naming it"; `browser-tests/per-application-upgrade.spec.ts`
+  cannot take, naming it" (every name in `tests/helpers/app-name-vectors.ts`,
+  the accepted and refused names copied from forma-server's tests so the two
+  grammars stay one, the trailing-hyphen and one-character edges included; a
+  refused value is printed escaped, as forma-server's `{:?}` does), "the
+  generator refuses a name or a cache name outside the contract on its own";
+  `browser-tests/per-application-upgrade.spec.ts`
   (SR28's lifecycle half in Chromium: two tabs, upgrade, rollback and
   upgrade, the new worker waiting while an old tab is open and after reloads,
   an unrelated cache and a second application's cache surviving, v1's name

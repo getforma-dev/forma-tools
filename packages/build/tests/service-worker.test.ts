@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
-import { serviceWorkerSource } from '../src/service-worker';
+import { APP_NAME, serviceWorkerSource } from '../src/service-worker';
+import { APP_NAME_VECTORS } from './helpers/app-name-vectors';
 import { CACHE_VECTORS } from './helpers/cache-vectors';
 
 function harness(development: boolean, onDemand = false) {
@@ -274,5 +275,22 @@ describe('per-application workers (FORMA-130)', () => {
     const fixture = readFileSync(new URL('./fixtures/workers-0.3.0/development.js', import.meta.url), 'utf8');
     expect(serviceWorkerSource('forma:ledger:dev', [], true, undefined, 'ledger')).toBe(fixture);
   });
-});
 
+  it('the name grammar is forma-server\'s, edges included', () => {
+    for (const name of APP_NAME_VECTORS.accepted) expect(APP_NAME.test(name), JSON.stringify(name)).toBe(true);
+    for (const name of APP_NAME_VECTORS.refused) expect(APP_NAME.test(name), JSON.stringify(name)).toBe(false);
+  });
+
+  it('the generator refuses a name or a cache name outside the contract on its own', () => {
+    // Defence in depth behind validateConfig: whatever reaches the generator,
+    // no name lands between the colons, or in the script, unchecked.
+    for (const app of APP_NAME_VECTORS.refused) {
+      expect(() => serviceWorkerSource(`forma:${app}:${BUILD}`, [], false, [], app), JSON.stringify(app)).toThrow(/forma:<app>:<build>/);
+    }
+    for (const cacheName of ['forma:other:0123456789ab', 'forma:ledger:01:23', 'forma:ledger', 'forma-0123456789ab', 'x-forma:ledger:0123456789ab']) {
+      expect(() => serviceWorkerSource(cacheName, [], false, [], 'ledger'), cacheName).toThrow(/forma:<app>:<build>/);
+    }
+    // The negative space: a contract name passes, and reaches the script as JSON.
+    expect(serviceWorkerSource(OWN, [], false, [], 'ledger')).toContain('const OWN_PREFIX = "forma:ledger:";');
+  });
+});

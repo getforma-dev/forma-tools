@@ -283,6 +283,19 @@ function compressAssets(distDir: string): number {
 // ---------------------------------------------------------------------------
 
 /**
+ * A config value as an error message shows it: escaped, the way forma-server
+ * prints a refused name (`{:?}`), so a control character or a lookalike stays
+ * visible; never a throw, whatever a JavaScript config holds.
+ */
+function shown(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? typeof value;
+  } catch {
+    return typeof value;
+  }
+}
+
+/**
  * Reject configurations whose output cannot be correct, BEFORE anything is
  * written. The first four checks close a silent failure mode; the fifth
  * turns a crash into a message:
@@ -324,7 +337,7 @@ function validateConfig(config: BuildConfig): void {
   const app: unknown = config.app;
   if (app !== undefined && (typeof app !== 'string' || !APP_NAME.test(app))) {
     problems.push(
-      `app is '${String(app)}': use 1 to 63 of a-z, 0-9 and -, starting with a letter or digit ` +
+      `app is ${shown(app)}: use 1 to 63 of a-z, 0-9 and -, starting with a letter or digit ` +
         `(the name forma-server's sw::ServiceWorker::for_app takes)`,
     );
   }

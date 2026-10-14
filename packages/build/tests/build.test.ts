@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { build } from '../src/build';
 import * as publicApi from '../src/index';
 import type { BuildConfig, AssetManifest } from '../src/types';
+import { APP_NAME_VECTORS } from './helpers/app-name-vectors';
 import {
   mkdtempSync,
   writeFileSync,
@@ -559,18 +560,25 @@ describe('@getforma/build — functional', () => {
       routes: { '/': { js: ['app'], css: [] } },
       outputDir: outDir,
     };
-    for (const app of ['Ledger', '-ledger', 'led:ger', 'led ger', 'led_ger', 'lédger', '', 'a'.repeat(64), 42]) {
+    // The shared table (forma-server's for_app takes the same), plus values a
+    // JavaScript config could hold that are not strings at all.
+    for (const app of [...APP_NAME_VECTORS.refused, 42, null, Object.create(null)]) {
       const error = await rejection({ ...config, app });
-      expect(error.message, String(app)).toContain(`app is '${String(app)}'`);
+      // Printed escaped, as forma-server's {:?} does: control characters and
+      // lookalikes stay visible.
+      const shown = typeof app === 'string' ? JSON.stringify(app) : String(JSON.stringify(app) ?? typeof app);
+      expect(error.message, shown).toContain(`app is ${shown}`);
       expect(error.message).toContain('sw::ServiceWorker::for_app');
       expect(existsSync(outDir)).toBe(false);
     }
-    // Two-sided: the names the grammar allows build.
-    for (const app of ['ledger', 'ksx-studio', '9lives', 'a'.repeat(63)]) {
+    // Two-sided: every name the grammar accepts builds, its trailing-hyphen
+    // and one-character edges included.
+    for (const app of APP_NAME_VECTORS.accepted) {
       await build({ ...config, app });
       expect(readFileSync(join(outDir, 'sw.js'), 'utf8')).toContain(`"forma:${app}:`);
     }
-  }, 30_000);
+  }, 60_000);
+
 
   // ---- Test 12: WASM build through a .cmd-shimmed tool -------------------
   it('runs a .cmd-shimmed wasm-pack (the Windows npm install shape)', async () => {
