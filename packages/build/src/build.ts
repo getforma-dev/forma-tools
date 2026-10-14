@@ -22,7 +22,7 @@ import {
   statSync,
   existsSync,
 } from 'node:fs';
-import { join, extname, basename, dirname } from 'node:path';
+import { join, extname, basename, dirname, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
@@ -513,15 +513,17 @@ function formatBytes(bytes: number): string {
  * bundling pass wrote, by the name it has after hashing and under `shownDir`,
  * the directory the application reads, never the staging directory the
  * pass wrote into (FORMA-180 F3). Sizes are the metafile's, the bytes
- * before compression.
+ * before compression. Forward slashes on every platform, as the manifest
+ * and the URLs name the files, so the line reads the same on Windows.
  * Verified by: packages/build/tests/build.test.ts > "a production build's summary names dist/<entry>.<hash>.js, never the staging directory"
  */
 function printBundleSummary(metafiles: esbuild.Metafile[], assets: Record<string, string>, shownDir: string): void {
   const lines: string[] = [];
+  const dir = shownDir.split(sep).join('/');
   for (const metafile of metafiles) {
     for (const [path, output] of Object.entries(metafile.outputs)) {
       const name = basename(path);
-      lines.push(`   ${shownDir}/${assets[name] ?? name}  ${formatBytes(output.bytes)}`);
+      lines.push(`   ${dir}/${assets[name] ?? name}  ${formatBytes(output.bytes)}`);
     }
   }
   if (lines.length) console.log(`\n${lines.join('\n')}\n`);

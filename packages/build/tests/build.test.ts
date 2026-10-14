@@ -14,7 +14,7 @@ import {
   readdirSync,
   chmodSync,
 } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
@@ -1060,12 +1060,15 @@ describe('@getforma/build — the production build\'s console summary (FORMA-180
     const { manifest, output, stdout } = await buildInChild(config(['app', 'about']), tmpRoot, scratch);
     expect(manifest).toBeDefined();
 
-    // The summary names each bundle as the manifest names it, under outputDir.
+    // The summary names each bundle as the manifest names it, under outputDir,
+    // with forward slashes on every platform (so on Windows too).
+    const shown = outDir.split(sep).join('/');
     for (const name of ['app.js', 'about.js']) {
       const hashed = manifest!.assets[name]!;
       expect(hashed).toMatch(/^(app|about)\.[0-9a-f]{8}\.js$/);
-      expect(stdout).toContain(`${outDir}/${hashed}`);
+      expect(stdout).toContain(`${shown}/${hashed}`);
     }
+    expect(stdout).not.toContain('\\');
     expect(stdout).toMatch(/dist\/app\.[0-9a-f]{8}\.js\s+\d+(\.\d+)?k?b/);
     // Neither stream names the staging directory, by either of its forms.
     expect(output).not.toContain('forma-staging');
@@ -1083,7 +1086,8 @@ describe('@getforma/build — the production build\'s console summary (FORMA-180
     const hashedEntries = ['app.js', 'about.js'].map((name) => manifest!.assets[name]!);
     const chunks = readdirSync(outDir).filter((f) => /^chunk\.[0-9A-Z]+\.js$/.test(f));
     expect(chunks.length).toBeGreaterThan(0);
-    for (const file of [...hashedEntries, ...chunks]) expect(stdout).toContain(`${outDir}/${file}`);
+    const shown = outDir.split(sep).join('/');
+    for (const file of [...hashedEntries, ...chunks]) expect(stdout).toContain(`${shown}/${file}`);
     expect(output).not.toContain('forma-staging');
     expect(output).not.toContain('.dist.forma-');
   }, 30_000);
