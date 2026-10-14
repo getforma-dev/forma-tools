@@ -228,225 +228,96 @@ export function generateRealIr(entryPointPath: string): IrResult | null {
 
 /** {@link generateRealIr}'s work; throws where the page cannot be emitted. */
 function emitRealIr(entryPointPath: string): IrResult | null {
-  {
-    // 1. Read the entry point file. A .tsx/.jsx entry has its JSX turned into
-    // h() calls first, so the Babel AST parser produces CallExpression nodes
-    // (not JSXElement): the IR walker only understands h() call trees.
-    const entrySource = transformJsxSource(readFileSync(entryPointPath, 'utf8'), entryPointPath);
-    const entryDir = dirname(entryPointPath);
+  // 1. Read the entry point file. A .tsx/.jsx entry has its JSX turned into
+  // h() calls first, so the Babel AST parser produces CallExpression nodes
+  // (not JSXElement): the IR walker only understands h() call trees.
+  const entrySource = transformJsxSource(readFileSync(entryPointPath, 'utf8'), entryPointPath);
+  const entryDir = dirname(entryPointPath);
 
-    // 2. Create ComponentAnalyzer and parse entry point
-    const analyzer = new ComponentAnalyzer(entryDir);
-    // IMPORTANT: JSX transform (step 1b) must run BEFORE parseEntryPoint so that
-    // any inlineReturnNode references the transformed AST (h() calls, not JSX nodes).
-    const entryInfo = analyzer.parseEntryPoint(entrySource, entryPointPath);
-    if (!entryInfo) {
-      reportPage('BUILD-601', entryPointPath, (where) => `could not find mount() call in ${where}`);
-      return null;
-    }
+  // 2. Create ComponentAnalyzer and parse entry point
+  const analyzer = new ComponentAnalyzer(entryDir);
+  // IMPORTANT: JSX transform (step 1b) must run BEFORE parseEntryPoint so that
+  // any inlineReturnNode references the transformed AST (h() calls, not JSX nodes).
+  const entryInfo = analyzer.parseEntryPoint(entrySource, entryPointPath);
+  if (!entryInfo) {
+    reportPage('BUILD-601', entryPointPath, (where) => `could not find mount() call in ${where}`);
+    return null;
+  }
 
-    // Follows imports so a signal declared in a store module folds on this
-    // page. One per page — its caches make the expensive work per-module, not
-    // per-importer. The injected reader judges an imported signal by exactly
-    // the rules a local one gets (same collector, same module-const folding)
-    // but QUIETLY: the eager scan reads modules whose signals may never
-    // appear on this page, and a warning about a signal nobody reads is
-    // noise — a read of an unfoldable signal still warns at its use site.
-    const signalImports = createSignalImportResolver(fsModuleLoader, (source, filePath) =>
-      collectSignalDeclarations(
-        (parse(source, PARSE_OPTS) as unknown as t.File).program.body,
-        {
-          filePath,
-          constants: moduleConstantScope(source, filePath, fsModuleLoader).stringConstants,
-          quiet: true,
-        },
-      ),
+  // Follows imports so a signal declared in a store module folds on this
+  // page. One per page — its caches make the expensive work per-module, not
+  // per-importer. The injected reader judges an imported signal by exactly
+  // the rules a local one gets (same collector, same module-const folding)
+  // but QUIETLY: the eager scan reads modules whose signals may never
+  // appear on this page, and a warning about a signal nobody reads is
+  // noise — a read of an unfoldable signal still warns at its use site.
+  const signalImports = createSignalImportResolver(fsModuleLoader, (source, filePath) =>
+    collectSignalDeclarations(
+      (parse(source, PARSE_OPTS) as unknown as t.File).program.body,
+      {
+        filePath,
+        constants: moduleConstantScope(source, filePath, fsModuleLoader).stringConstants,
+        quiet: true,
+      },
+    ),
+  );
+
+  // ── Handle inline return from block-body mount() (Pattern 3) ──
+  if (entryInfo.componentName === '__inline__' && entryInfo.inlineReturnNode) {
+    const ctx = new IrEmitContext();
+    const signalRegistry = newSignalRegistry();
+
+    const { resolveComponent, importOf, findBrowserOnly } = createComponentResolver([
+      { path: entryPointPath, source: entrySource },
+    ]);
+
+    // The entry point's own module scope: its constants, and the resolver
+    // for tables it imports (Rule 9's unroll).
+    const { fileConstants, stringConstants, resolveImportedConstant } =
+      moduleConstantScope(entrySource, entryPointPath, fsModuleLoader);
+
+    // An inline mount has no exported component to look inside: the page's
+    // scope chain is the entry file's module scope, then the mount
+    // callback's own body. Both are real lexical scopes of the tree being
+    // walked, which is why the walk reads them and no separate extractor
+    // has to know this pattern exists.
+    // Verified by: packages/compiler/tests/ssr-emission.test.ts > "names signal slots on an inline-mount entry"
+    const entryAst = parse(entrySource, PARSE_OPTS);
+    let signalScope: SignalScope = enterSignalScope(
+      null,
+      `${entryPointPath}#module`,
+      collectSignalDeclarations(entryAst.program.body, {
+        filePath: entryPointPath,
+        constants: stringConstants,
+      }),
+      ctx,
+      signalRegistry,
     );
-
-    // ── Handle inline return from block-body mount() (Pattern 3) ──
-    if (entryInfo.componentName === '__inline__' && entryInfo.inlineReturnNode) {
-      const ctx = new IrEmitContext();
-      const signalRegistry = newSignalRegistry();
-
-      const { resolveComponent, importOf, findBrowserOnly } = createComponentResolver([
-        { path: entryPointPath, source: entrySource },
-      ]);
-
-      // The entry point's own module scope: its constants, and the resolver
-      // for tables it imports (Rule 9's unroll).
-      const { fileConstants, stringConstants, resolveImportedConstant } =
-        moduleConstantScope(entrySource, entryPointPath, fsModuleLoader);
-
-      // An inline mount has no exported component to look inside: the page's
-      // scope chain is the entry file's module scope, then the mount
-      // callback's own body. Both are real lexical scopes of the tree being
-      // walked, which is why the walk reads them and no separate extractor
-      // has to know this pattern exists.
-      // Verified by: packages/compiler/tests/ssr-emission.test.ts > "names signal slots on an inline-mount entry"
-      const entryAst = parse(entrySource, PARSE_OPTS);
-      let signalScope: SignalScope = enterSignalScope(
-        null,
-        `${entryPointPath}#module`,
-        collectSignalDeclarations(entryAst.program.body, {
+    // An inline-mount page can keep its signals in a store module too — the
+    // module frame gets the same import resolution enterComponentScope does.
+    resolveModuleSignalImports(
+      signalScope,
+      entryAst as unknown as t.File,
+      entryPointPath,
+      signalImports,
+      ctx,
+      signalRegistry,
+    );
+    if (entryInfo.inlineMountBody) {
+      signalScope = enterSignalScope(
+        signalScope,
+        `${entryPointPath}#mount`,
+        collectSignalDeclarations(entryInfo.inlineMountBody, {
           filePath: entryPointPath,
           constants: stringConstants,
         }),
         ctx,
         signalRegistry,
       );
-      // An inline-mount page can keep its signals in a store module too — the
-      // module frame gets the same import resolution enterComponentScope does.
-      resolveModuleSignalImports(
-        signalScope,
-        entryAst as unknown as t.File,
-        entryPointPath,
-        signalImports,
-        ctx,
-        signalRegistry,
-      );
-      if (entryInfo.inlineMountBody) {
-        signalScope = enterSignalScope(
-          signalScope,
-          `${entryPointPath}#mount`,
-          collectSignalDeclarations(entryInfo.inlineMountBody, {
-            filePath: entryPointPath,
-            constants: stringConstants,
-          }),
-          ctx,
-          signalRegistry,
-        );
-      }
-
-      const walkCtx: WalkContext = {
-        sourceFile: entryPointPath,
-        fileConstants,
-        stringConstants,
-        resolveImportedConstant,
-        signalScope,
-        signalRegistry,
-        signalImports,
-        resolveComponent,
-        importOf,
-        findBrowserOnly,
-        chain: [rootLink('mount()', entryPointPath, entryInfo.inlineReturnNode)],
-        loadModule: fsModuleLoader,
-        visited: new Set(),
-        depth: 0,
-        islandNames: entryInfo.islandNames,
-        // Per-page slot-name registries MUST be created on the root context
-        // (not lazily inside a spread-copied nested context) so every list,
-        // show, dynamic attribute and dynamic text child on the page dedups
-        // against one shared namespace.
-        // Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes a dynamic attr inside an island against one on the page"
-        listNames: { counts: new Map(), total: 0 },
-        showNames: { counts: new Map(), total: 0 },
-        attrNames: new Map(),
-        textNames: new Map(),
-      };
-
-      const returnNode = entryInfo.inlineReturnNode;
-
-      if (t.isCallExpression(returnNode) && t.isIdentifier(returnNode.callee) && returnNode.callee.name === 'h') {
-        walkHTree(returnNode, 'h', ctx, walkCtx);
-      } else if (t.isCallExpression(returnNode)) {
-        walkCallExpression(returnNode, 'h', ctx, walkCtx);
-      } else {
-        reportPage(
-          'BUILD-603',
-          entryPointPath,
-          (where) => `inline return node is not a call expression (${where})`,
-          returnNode,
-        );
-        return null;
-      }
-
-      const binary = ctx.toBinary();
-      const islands = ctx.getIslands();
-
-      return { binary, islands };
     }
 
-    // ── Original code continues for Pattern 1 & 2 (named component) ──
-
-    // 3. Resolve the component file path
-    const componentPath = resolveFilePath(entryDir, entryInfo.importPath);
-    if (!componentPath) {
-      reportPage(
-        'BUILD-602',
-        entryPointPath,
-        (where) => `could not resolve component '${entryInfo.importPath}' from ${entryDir} (${where})`,
-      );
-      return null;
-    }
-
-    // 4. Read and parse the component file (transform JSX if needed)
-    const componentSource = loadComponentSource(componentPath);
-    if (componentSource === null) {
-      reportPage('BUILD-602', componentPath, (where) => `could not read component file ${where}`);
-      return null;
-    }
-
-    // 4b. The entry's import binding names what the component module exports
-    // it under: `import { PageImpl as Page }` must be looked up as 'PageImpl'.
-    const exportedName =
-      entryInfo.importBindings?.get(entryInfo.componentName)?.imported
-      ?? entryInfo.componentName;
-
-    // 5. Find the root component's h() tree. The function may be DECLARED in
-    // another file (a barrel forwarded the export), and everything scoped to
-    // the module — constants, imports, diagnostics — has to follow it there.
-    const componentInfo = analyzer.parseComponentFile(
-      componentSource,
-      componentPath,
-      exportedName,
-      {
-        loadModule: fsModuleLoader,
-        onUnresolved: (detail) => reportPage(
-          'BUILD-602',
-          componentPath,
-          (where) => `${detail} — the page falls back to placeholder IR, so it server-renders as an empty <div id="app"> and shows nothing at all until the client bundle hydrates (${where})`,
-        ),
-      },
-    );
-    if (!componentInfo) return null;
-
-    const rootPath = componentInfo.filePath;
-    const rootSource = componentInfo.source;
-
-    // 6. The root page module's constant scope: the tables it declares (for
-    // Rule 9's static unroll), the strings it declares (for static attribute
-    // resolution), and the resolver for tables it IMPORTS.
-    const { fileConstants, stringConstants, resolveImportedConstant } =
-      moduleConstantScope(rootSource, rootPath, fsModuleLoader);
-
-    // 7. Create IrEmitContext and open the root page's scope chain: the page
-    // FILE's module scope, then the page COMPONENT's own body. Island and
-    // sub-component scopes are NOT gathered here — the walk pushes each one as
-    // it inlines that component, which is what makes a scope the walk learns
-    // to inline later work without a matching extractor being written for it.
-    const ctx = new IrEmitContext();
-    const signalRegistry = newSignalRegistry();
-    const signalScope = enterComponentScope({
-      ast: componentInfo.ast,
-      fn: componentInfo.fn,
-      fnName: exportedName,
-      filePath: rootPath,
-      constants: stringConstants,
-      ctx,
-      registry: signalRegistry,
-      imports: signalImports,
-    });
-
-    // 8. Build resolve callback for sub-components
-    const { resolveComponent, importOf, findBrowserOnly } = createComponentResolver([
-      { path: entryPointPath, source: entrySource },
-      { path: componentPath, source: componentSource },
-      { path: rootPath, source: rootSource },
-    ]);
-
-    // 9. Build WalkContext and walk the h() tree
     const walkCtx: WalkContext = {
-      sourceFile: rootPath,
+      sourceFile: entryPointPath,
       fileConstants,
       stringConstants,
       resolveImportedConstant,
@@ -456,21 +327,23 @@ function emitRealIr(entryPointPath: string): IrResult | null {
       resolveComponent,
       importOf,
       findBrowserOnly,
-      chain: [rootLink(entryInfo.componentName, rootPath, componentInfo.fn)],
+      chain: [rootLink('mount()', entryPointPath, entryInfo.inlineReturnNode)],
       loadModule: fsModuleLoader,
       visited: new Set(),
       depth: 0,
       islandNames: entryInfo.islandNames,
       // Per-page slot-name registries MUST be created on the root context
-      // (not lazily inside a spread-copied nested context) so every list
-      // and show on the page dedups against one shared namespace.
+      // (not lazily inside a spread-copied nested context) so every list,
+      // show, dynamic attribute and dynamic text child on the page dedups
+      // against one shared namespace.
+      // Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes a dynamic attr inside an island against one on the page"
       listNames: { counts: new Map(), total: 0 },
       showNames: { counts: new Map(), total: 0 },
       attrNames: new Map(),
       textNames: new Map(),
     };
 
-    const returnNode = componentInfo.returnNode;
+    const returnNode = entryInfo.inlineReturnNode;
 
     if (t.isCallExpression(returnNode) && t.isIdentifier(returnNode.callee) && returnNode.callee.name === 'h') {
       walkHTree(returnNode, 'h', ctx, walkCtx);
@@ -479,19 +352,144 @@ function emitRealIr(entryPointPath: string): IrResult | null {
     } else {
       reportPage(
         'BUILD-603',
-        rootPath,
-        (where) => `return node is not a call expression in ${entryInfo.componentName} (${where})`,
+        entryPointPath,
+        (where) => `inline return node is not a call expression (${where})`,
         returnNode,
       );
       return null;
     }
 
-    // 10. Return the binary and island metadata
-    return {
-      binary: ctx.toBinary(),
-      islands: ctx.getIslands(),
-    };
+    const binary = ctx.toBinary();
+    const islands = ctx.getIslands();
+
+    return { binary, islands };
   }
+
+  // ── Original code continues for Pattern 1 & 2 (named component) ──
+
+  // 3. Resolve the component file path
+  const componentPath = resolveFilePath(entryDir, entryInfo.importPath);
+  if (!componentPath) {
+    reportPage(
+      'BUILD-602',
+      entryPointPath,
+      (where) => `could not resolve component '${entryInfo.importPath}' from ${entryDir} (${where})`,
+    );
+    return null;
+  }
+
+  // 4. Read and parse the component file (transform JSX if needed)
+  const componentSource = loadComponentSource(componentPath);
+  if (componentSource === null) {
+    reportPage('BUILD-602', componentPath, (where) => `could not read component file ${where}`);
+    return null;
+  }
+
+  // 4b. The entry's import binding names what the component module exports
+  // it under: `import { PageImpl as Page }` must be looked up as 'PageImpl'.
+  const exportedName =
+    entryInfo.importBindings?.get(entryInfo.componentName)?.imported
+    ?? entryInfo.componentName;
+
+  // 5. Find the root component's h() tree. The function may be DECLARED in
+  // another file (a barrel forwarded the export), and everything scoped to
+  // the module — constants, imports, diagnostics — has to follow it there.
+  const componentInfo = analyzer.parseComponentFile(
+    componentSource,
+    componentPath,
+    exportedName,
+    {
+      loadModule: fsModuleLoader,
+      onUnresolved: (detail) => reportPage(
+        'BUILD-602',
+        componentPath,
+        (where) => `${detail} — the page falls back to placeholder IR, so it server-renders as an empty <div id="app"> and shows nothing at all until the client bundle hydrates (${where})`,
+      ),
+    },
+  );
+  if (!componentInfo) return null;
+
+  const rootPath = componentInfo.filePath;
+  const rootSource = componentInfo.source;
+
+  // 6. The root page module's constant scope: the tables it declares (for
+  // Rule 9's static unroll), the strings it declares (for static attribute
+  // resolution), and the resolver for tables it IMPORTS.
+  const { fileConstants, stringConstants, resolveImportedConstant } =
+    moduleConstantScope(rootSource, rootPath, fsModuleLoader);
+
+  // 7. Create IrEmitContext and open the root page's scope chain: the page
+  // FILE's module scope, then the page COMPONENT's own body. Island and
+  // sub-component scopes are NOT gathered here — the walk pushes each one as
+  // it inlines that component, which is what makes a scope the walk learns
+  // to inline later work without a matching extractor being written for it.
+  const ctx = new IrEmitContext();
+  const signalRegistry = newSignalRegistry();
+  const signalScope = enterComponentScope({
+    ast: componentInfo.ast,
+    fn: componentInfo.fn,
+    fnName: exportedName,
+    filePath: rootPath,
+    constants: stringConstants,
+    ctx,
+    registry: signalRegistry,
+    imports: signalImports,
+  });
+
+  // 8. Build resolve callback for sub-components
+  const { resolveComponent, importOf, findBrowserOnly } = createComponentResolver([
+    { path: entryPointPath, source: entrySource },
+    { path: componentPath, source: componentSource },
+    { path: rootPath, source: rootSource },
+  ]);
+
+  // 9. Build WalkContext and walk the h() tree
+  const walkCtx: WalkContext = {
+    sourceFile: rootPath,
+    fileConstants,
+    stringConstants,
+    resolveImportedConstant,
+    signalScope,
+    signalRegistry,
+    signalImports,
+    resolveComponent,
+    importOf,
+    findBrowserOnly,
+    chain: [rootLink(entryInfo.componentName, rootPath, componentInfo.fn)],
+    loadModule: fsModuleLoader,
+    visited: new Set(),
+    depth: 0,
+    islandNames: entryInfo.islandNames,
+    // Per-page slot-name registries MUST be created on the root context
+    // (not lazily inside a spread-copied nested context) so every list
+    // and show on the page dedups against one shared namespace.
+    listNames: { counts: new Map(), total: 0 },
+    showNames: { counts: new Map(), total: 0 },
+    attrNames: new Map(),
+    textNames: new Map(),
+  };
+
+  const returnNode = componentInfo.returnNode;
+
+  if (t.isCallExpression(returnNode) && t.isIdentifier(returnNode.callee) && returnNode.callee.name === 'h') {
+    walkHTree(returnNode, 'h', ctx, walkCtx);
+  } else if (t.isCallExpression(returnNode)) {
+    walkCallExpression(returnNode, 'h', ctx, walkCtx);
+  } else {
+    reportPage(
+      'BUILD-603',
+      rootPath,
+      (where) => `return node is not a call expression in ${entryInfo.componentName} (${where})`,
+      returnNode,
+    );
+    return null;
+  }
+
+  // 10. Return the binary and island metadata
+  return {
+    binary: ctx.toBinary(),
+    islands: ctx.getIslands(),
+  };
 }
 
 // ---------------------------------------------------------------------------
