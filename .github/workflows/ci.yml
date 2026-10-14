@@ -199,6 +199,9 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - run: npx playwright install chromium --with-deps
 
+      - name: Build package browser test (worker upgrade)
+        run: npm run test:browser -w packages/build
+
       - name: Run E2E tests
         run: npm run test:e2e:ci
 

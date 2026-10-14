@@ -94,7 +94,30 @@ describe('@getforma/build — functional', () => {
     // Result object should agree with disk manifest
     expect(result.manifest.build_hash).toBe(manifest.build_hash);
     expect(result.warnings).toEqual([]);
+    expect(readFileSync(join(outDir, 'sw.js'), 'utf8')).toContain(
+      `const CACHE_NAME = "forma-${manifest.build_hash.slice(0, 12)}";`,
+    );
   }, 15_000);
+
+  it('watch output wires the network-only worker to its unhashed dev manifest', async () => {
+    const cssFile = join(srcDir, 'app.css');
+    writeFileSync(cssFile, 'main { color: red; }');
+    // A CSS-only route exercises real watch-mode orchestration without leaving
+    // an esbuild watcher alive after the test finishes.
+    const result = await build({
+      entryPoints: [],
+      routes: { '/': { js: [], css: ['app'] } },
+      cssEntries: [{ input: cssFile, outfile: 'app.css' }],
+      outputDir: outDir,
+      watch: true,
+    });
+    expect(result.manifest.build_hash).toBe('dev');
+    expect(result.manifest.routes['/'].css).toEqual(['app.css']);
+    const worker = readFileSync(join(outDir, 'sw.js'), 'utf8');
+    expect(worker).toContain("fetch(event.request, { cache: 'no-store' })");
+    expect(worker).toContain("name.startsWith('forma-')");
+    expect(worker).not.toContain('caches.open');
+  });
 
   // ---- Test 2: Content-hashed filenames exist on disk --------------------
   it('content-hashed filenames actually exist on disk', async () => {
@@ -407,6 +430,106 @@ describe('@getforma/build — functional', () => {
     };
 
     await expect(build(config)).rejects.toThrow(/contains a path separator/);
+  }, 15_000);
+
+  it('rejects two entryPoints that share an outfile', async () => {
+    const first = join(srcDir, 'first.ts');
+    const second = join(srcDir, 'second.ts');
+    writeFileSync(first, 'export const first = 1;\n');
+    writeFileSync(second, 'export const second = 2;\n');
+
+    const config: BuildConfig = {
+      // Both bundles would be written to dist/app.js, and the route would
+      // serve whichever build finished last.
+      entryPoints: [
+        { entry: first, outfile: 'app.js' },
+        { entry: second, outfile: 'app.js' },
+      ],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+
+    await expect(build(config)).rejects.toThrow(
+      "entryPoints: duplicate outfile 'app.js'",
+    );
+    expect(existsSync(outDir)).toBe(false);
+  }, 15_000);
+
+  // A JavaScript config (or a TypeScript one run through tsx, which strips
+  // types without checking them) can omit a route's `css` or `js`. Validation
+  // used to iterate both unguarded and threw `TypeError: mapping.css is not
+  // iterable`, which names neither the route nor the key.
+  async function rejection(config: unknown): Promise<Error> {
+    const outcome = await build(config as BuildConfig).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(outcome).toBeInstanceOf(Error);
+    expect(outcome).not.toBeInstanceOf(TypeError);
+    return outcome as Error;
+  }
+
+  it('rejects a route without css, naming the route', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+
+    const error = await rejection({
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'] } },
+      outputDir: outDir,
+    });
+
+    expect(error.message).toContain('@getforma/build: invalid config');
+    expect(error.message).toContain(
+      "routes['/'].css is missing: list the route's CSS base names, or [] for none",
+    );
+    expect(existsSync(outDir)).toBe(false);
+  }, 15_000);
+
+  it('rejects a route whose js is missing or not an array, naming each route', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+
+    const error = await rejection({
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      // A string is iterable, so `js: 'app'` used to be read letter by letter
+      // ("names 'a', but no entryPoint produces 'a.js'").
+      routes: { '/': { css: [] }, '/admin': { js: 'app', css: [] } },
+      outputDir: outDir,
+    });
+
+    expect(error.message).toContain(
+      "routes['/'].js is missing: list the route's JS base names, or [] for none",
+    );
+    expect(error.message).toContain(
+      "routes['/admin'].js is not an array: list the route's JS base names, or [] for none",
+    );
+    expect(error.message).not.toContain("names 'a'");
+    expect(existsSync(outDir)).toBe(false);
+  }, 15_000);
+
+  it('rejects an unknown serviceWorker value, naming it', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+
+    // A JavaScript config with a near miss used to get the precache worker
+    // silently.
+    const error = await rejection({ ...config, serviceWorker: 'ondemand' });
+    expect(error.message).toContain(
+      "serviceWorker is 'ondemand': use 'precache' (the default) or 'on-demand'",
+    );
+    expect(existsSync(outDir)).toBe(false);
+
+    // Two-sided: both documented values still build.
+    for (const serviceWorker of ['precache', 'on-demand'] as const) {
+      await build({ ...config, serviceWorker });
+      expect(existsSync(join(outDir, 'sw.js'))).toBe(true);
+    }
   }, 15_000);
 
   // ---- Test 12: WASM build through a .cmd-shimmed tool -------------------

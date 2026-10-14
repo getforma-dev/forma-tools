@@ -24,6 +24,8 @@ import { join, extname, basename, dirname } from 'node:path';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { serviceWorkerSource } from './service-worker.js';
+import { splitGraph, type SplitGraph } from './split-graph.js';
 
 import type {
   BuildConfig,
@@ -198,13 +200,16 @@ function buildWasm(
 
 function hashAssets(
   config: BuildConfig,
+  preserved: Record<string, string> = {},
 ): Record<string, string> {
   const distDir = config.outputDir;
   const files = readdirSync(distDir);
-  const assets: Record<string, string> = {};
+  const assets: Record<string, string> = { ...preserved };
+  const graphFiles = new Set(Object.values(preserved));
   const serverInlinedSet = new Set(config.serverInlined ?? []);
 
   for (const file of files) {
+    if (graphFiles.has(file) || Object.hasOwn(preserved, file)) continue;
     const ext = extname(file);
     // Only hash .js, .css, .wasm, .ir files; skip manifest.json, .woff2, etc.
     if (ext !== '.js' && ext !== '.css' && ext !== '.wasm' && ext !== '.ir')
@@ -276,21 +281,43 @@ function compressAssets(distDir: string): number {
 
 /**
  * Reject configurations whose output cannot be correct, BEFORE anything is
- * written. Both checks close a silent failure mode:
+ * written. The first four checks close a silent failure mode; the fifth
+ * turns a crash into a message:
  *
+ *  - An unknown `serviceWorker` value (a near miss such as 'ondemand' in a
+ *    JavaScript config) silently produced the precache worker.
+ *  - Two entries sharing an `outfile` write one file, and the route serves
+ *    whichever build finished last.
  *  - An `outfile` containing a path separator lands esbuild's output in a
  *    subdirectory, which the (non-recursive) hashing pass never sees. The asset
  *    was silently absent from the manifest and its route fell back to an
  *    unhashed name that 404s in production.
  *  - A route naming a JS/CSS base that no entry produces is a typo that
  *    manifests as a missing script tag on a deployed page, not at build time.
+ *  - A route whose `js` or `css` is missing (a JavaScript config is not type
+ *    checked) threw `TypeError: mapping.css is not iterable`, naming neither
+ *    the route nor the key; a string there was read letter by letter.
  *
+ * Verified by: packages/build/tests/build.test.ts > "rejects an unknown serviceWorker value, naming it"
+ * Verified by: packages/build/tests/build.test.ts > "rejects two entryPoints that share an outfile"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route that names an asset no entry produces"
+ * Verified by: packages/build/tests/build.test.ts > "rejects a route without css, naming the route"
+ * Verified by: packages/build/tests/build.test.ts > "rejects a route whose js is missing or not an array, naming each route"
  */
 function validateConfig(config: BuildConfig): void {
   const problems: string[] = [];
+  const entryNames = new Set<string>();
+
+  const serviceWorker: unknown = config.serviceWorker;
+  if (serviceWorker !== undefined && serviceWorker !== 'precache' && serviceWorker !== 'on-demand') {
+    problems.push(
+      `serviceWorker is '${String(serviceWorker)}': use 'precache' (the default) or 'on-demand'`,
+    );
+  }
 
   for (const entry of config.entryPoints) {
+    if (entryNames.has(entry.outfile)) problems.push(`entryPoints: duplicate outfile '${entry.outfile}'`);
+    entryNames.add(entry.outfile);
     if (/[\\/]/.test(entry.outfile)) {
       problems.push(
         `entryPoints: outfile '${entry.outfile}' contains a path separator — outfile is a bare filename inside outputDir`,
@@ -310,15 +337,23 @@ function validateConfig(config: BuildConfig): void {
     (config.cssEntries ?? []).map((e) => basename(e.outfile, '.css')),
   );
 
+  const baseNames = (route: string, key: 'js' | 'css', value: unknown): string[] => {
+    if (Array.isArray(value)) return value;
+    problems.push(
+      `routes['${route}'].${key} is ${value === undefined ? 'missing' : 'not an array'}: list the route's ${key.toUpperCase()} base names, or [] for none`,
+    );
+    return [];
+  };
+
   for (const [route, mapping] of Object.entries(config.routes)) {
-    for (const name of mapping.js) {
+    for (const name of baseNames(route, 'js', mapping?.js)) {
       if (!jsBases.has(name)) {
         problems.push(
           `routes['${route}'].js names '${name}', but no entryPoint produces '${name}.js'`,
         );
       }
     }
-    for (const name of mapping.css) {
+    for (const name of baseNames(route, 'css', mapping?.css)) {
       if (!cssBases.has(name)) {
         problems.push(
           `routes['${route}'].css names '${name}', but no cssEntry produces '${name}.css'`,
@@ -342,6 +377,7 @@ function generateManifest(
   config: BuildConfig,
   assets: Record<string, string>,
   wasmBuilt: boolean,
+  staticDependencies: Record<string, string[]> = {},
 ): { manifest: AssetManifest; warnings: string[] } {
   const distDir = config.outputDir;
   const BUDGET_THRESHOLD = config.budgetThreshold ?? 200_000;
@@ -367,13 +403,14 @@ function generateManifest(
     const cssFiles = mapping.css.map(
       (name) => assets[`${name}.css`] ?? `${name}.css`,
     );
+    const modulepreload = [...new Set(jsFiles.flatMap(file => staticDependencies[file] ?? []))].filter(file => !jsFiles.includes(file));
 
     // Use route-level fonts if specified, otherwise all fonts
     const routeFonts = mapping.fonts ?? fonts;
 
     // Calculate total size using brotli sizes when available
     let totalSize = 0;
-    for (const f of [...jsFiles, ...cssFiles]) {
+    for (const f of new Set([...jsFiles, ...modulepreload, ...cssFiles])) {
       const brPath = join(distDir, `${f}.br`);
       const origPath = join(distDir, f);
       if (existsSync(brPath)) {
@@ -392,6 +429,7 @@ function generateManifest(
 
     const routeEntry: RouteManifest = {
       js: jsFiles,
+      ...(modulepreload.length ? { modulepreload } : {}),
       css: cssFiles,
       fonts: routeFonts,
       total_size_br: totalSize,
@@ -449,7 +487,8 @@ function generateServiceWorker(
   wasmBuilt: boolean,
 ): void {
   const distDir = config.outputDir;
-  const swCacheName = `forma-${buildHash.slice(0, 12)}`;
+  const onDemand = config.serviceWorker === 'on-demand';
+  const swCacheName = `forma-${buildHash.slice(0, 12)}${onDemand ? '-on-demand-v1' : ''}`;
   const fonts = readdirSync(distDir)
     .filter((f) => f.endsWith('.woff2'))
     .sort();
@@ -468,49 +507,13 @@ function generateServiceWorker(
     precacheUrls.push(`/_assets/${assets['forma_ir_bg.wasm']}`);
   }
 
-  const swContent = `// Generated by @getforma/build — do not edit
-const CACHE_NAME = '${swCacheName}';
-const PRECACHE_URLS = ${JSON.stringify(precacheUrls, null, 2)};
-
-self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
-      .then(() => self.skipWaiting())
-  );
-});
-
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((names) => Promise.all(
-        names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
-      ))
-      .then(() => self.clients.claim())
-  );
-});
-
-self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
-  if (!url.pathname.startsWith('/_assets/')) return;
-
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      });
-    })
-  );
-});
-`;
+  const immutableUrls = onDemand ? [...new Set(Object.values(assets))]
+    .filter(file => !file.includes('..') && /^[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]{8}\.(?:js|css|wasm)$/.test(file))
+    .sort().map(file => `/_assets/${file}`) : undefined;
+  const swContent = serviceWorkerSource(swCacheName, precacheUrls, config.watch === true, immutableUrls);
 
   writeFileSync(join(distDir, 'sw.js'), swContent);
-  console.log(`   SW generated: dist/sw.js (cache: ${swCacheName})`);
+  console.log(`   SW generated: dist/sw.js (${config.watch ? 'network-only development' : `cache: ${swCacheName}`})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -581,10 +584,55 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
       }
     }
 
+    let graph: SplitGraph | undefined;
+    const splitOptions: esbuild.BuildOptions = {
+      ...shared,
+      entryPoints: config.entryPoints.map(entry => ({ in: entry.entry, out: basename(entry.outfile, '.js') })),
+      outdir: distDir,
+      splitting: true,
+      metafile: true,
+      entryNames: config.watch ? '[name]' : '[name].[hash]',
+      chunkNames: 'chunk.[hash]',
+      assetNames: 'asset.[hash]',
+      plugins: config.ssr && formaSsrPlugin ? config.entryPoints.filter(entry => entry.ssr !== false).map(entry => formaSsrPlugin!({
+        page: basename(entry.outfile, '.js'),
+        outDir: distDir,
+        entryPoint: config.ssrEntryPoints?.[basename(entry.outfile, '.js')] ?? entry.entry,
+      })) : [],
+    };
+
     // ── Build entries ─────────────────────────────────────────────────
     if (config.watch) {
       // Watch mode
-      for (const entry of config.entryPoints) {
+      if (config.codeSplitting && config.entryPoints.length) {
+        let previousFiles = new Set<string>();
+        const ctx = await esbuild.context({
+          ...splitOptions,
+          plugins: [...(splitOptions.plugins ?? []), {
+            name: 'forma-split-manifest',
+            setup(builder) {
+              builder.onEnd(result => {
+                if (result.errors.length || !result.metafile) return;
+                graph = splitGraph(result.metafile, config.entryPoints, distDir);
+                if (config.ssr) for (const entry of config.entryPoints) {
+                  const ir = `${basename(entry.outfile, '.js')}.ir`;
+                  if (entry.ssr !== false && existsSync(join(distDir, ir))) graph.assets[ir] = ir;
+                }
+                // Only remove outputs belonging to the previous successful
+                // graph. CSS/fonts/IR and failed-build diagnostics stay intact.
+                for (const file of previousFiles) if (!graph.files.has(file)) rmSync(join(distDir, file), { force: true });
+                previousFiles = graph.files;
+                const { manifest } = generateManifest(config, graph.assets, false, graph.staticDependencies);
+                manifest.build_hash = 'dev';
+                writeFileSync(join(distDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+              });
+            },
+          }],
+        });
+        // Ensure the first complete graph exists before returning a dev manifest.
+        await ctx.rebuild();
+        await ctx.watch();
+      } else for (const entry of config.entryPoints) {
         const ctx = await esbuild.context({
           ...shared,
           entryPoints: [entry.entry],
@@ -595,7 +643,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
 
       // Generate a dev manifest with identity mappings (unhashed filenames)
       // so the server can boot without a production build
-      const { manifest, warnings } = generateManifest(config, {}, false);
+      const { manifest, warnings } = generateManifest(config, graph?.assets ?? {}, false, graph?.staticDependencies);
       manifest.build_hash = 'dev';
 
       writeFileSync(
@@ -615,7 +663,14 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
     }
 
     // ── Parallel production builds ────────────────────────────────────
-    await Promise.all(
+    if (config.codeSplitting && config.entryPoints.length) {
+      const result = await esbuild.build(splitOptions);
+      if (!result.metafile) throw new Error('Split build did not return its module graph.');
+      graph = splitGraph(result.metafile, config.entryPoints, distDir);
+      for (const entry of config.entryPoints) {
+        if (config.serverInlined?.includes(entry.outfile)) cpSync(join(distDir, graph.assets[entry.outfile]), join(distDir, entry.outfile));
+      }
+    } else await Promise.all(
       config.entryPoints.map((entry) => {
         const buildOptions: esbuild.BuildOptions = {
           ...shared,
@@ -623,7 +678,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
           outfile: join(distDir, entry.outfile),
         };
 
-        if (config.ssr && formaSsrPlugin) {
+        if (config.ssr && entry.ssr !== false && formaSsrPlugin) {
           const pageName = basename(entry.outfile, '.js');
           const ssrEntryPoint =
             config.ssrEntryPoints?.[pageName] ?? entry.entry;
@@ -645,14 +700,14 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
     const wasmBuilt = buildWasm(config);
 
     // ── Content hashing ───────────────────────────────────────────────
-    const assets = hashAssets(config);
+    const assets = hashAssets(config, graph?.assets);
     console.log(`   ${Object.keys(assets).length} assets hashed`);
 
     // ── Compression ───────────────────────────────────────────────────
     compressAssets(distDir);
 
     // ── Manifest generation ───────────────────────────────────────────
-    const { manifest, warnings } = generateManifest(config, assets, wasmBuilt);
+    const { manifest, warnings } = generateManifest(config, assets, wasmBuilt, graph?.staticDependencies);
 
     writeFileSync(
       join(distDir, 'manifest.json'),

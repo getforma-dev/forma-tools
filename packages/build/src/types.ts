@@ -13,6 +13,8 @@ export interface BuildEntry {
   entry: string;
   /** Output file path (relative to outputDir) */
   outfile: string;
+  /** Disable SSR for this entry in an otherwise SSR-enabled application. */
+  ssr?: boolean;
 }
 
 export interface CssEntry {
@@ -44,6 +46,11 @@ export interface BuildConfig {
   outputDir: string;
   /** Package name to resolve 'formajs' imports to (e.g. '@getforma/core') */
   formaAlias?: string;
+  /** Bundle one shared ESM graph, preserving import() as separately loaded chunks. */
+  codeSplitting?: boolean;
+  /** Production worker policy; default precaches CSS/fonts. On-demand caches
+   * only requested manifest-listed immutable code/style/WASM assets. */
+  serviceWorker?: 'precache' | 'on-demand';
   /** Directory containing .woff2 font files to copy */
   fontDir?: string;
   /** Enable SSR IR emission */
@@ -66,6 +73,8 @@ export interface BuildConfig {
 
 export interface RouteManifest {
   js: string[];
+  /** Static ESM dependencies only; dynamic import() chunks are intentionally excluded. */
+  modulepreload?: string[];
   css: string[];
   fonts: string[];
   total_size_br: number;
