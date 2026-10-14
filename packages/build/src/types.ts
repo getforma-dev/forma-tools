@@ -51,6 +51,23 @@ export interface BuildConfig {
   /** Production worker policy; default precaches CSS/fonts. On-demand caches
    * only requested manifest-listed immutable code/style/WASM assets. */
   serviceWorker?: 'precache' | 'on-demand';
+  /**
+   * The application's name, for its service worker (DR-25, FORMA-130). The
+   * same string the server passes to forma-server's
+   * `sw::ServiceWorker::for_app`: 1 to 63 of `a-z`, `0-9` and `-`, starting
+   * with a letter or digit.
+   *
+   * With it, the production worker names its cache `forma:<app>:<build>`,
+   * deletes on activation only v1's cache names and this application's older
+   * caches (never another application's), and waits for the previous build's
+   * worker to control no tab instead of taking over (no `skipWaiting()`, no
+   * `clients.claim()`). forma-server 0.2.2 serves it only to an application
+   * that enables its worker; otherwise `/sw.js` is forma-server's retiring
+   * worker, which deletes these same caches. Without it, the worker is
+   * 0.3.0's, kept for a server not yet on forma-server 0.2.2. The development
+   * (watch) worker ignores it.
+   */
+  app?: string;
   /** Directory containing .woff2 font files to copy */
   fontDir?: string;
   /** Enable SSR IR emission */

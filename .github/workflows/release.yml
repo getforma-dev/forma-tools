@@ -1,14 +1,12 @@
 name: Release
 
+# The release tags are the only trigger (SR43, FORMA-134): no branch push, pull
+# request or dispatch starts this workflow, so none of them reaches `publish`.
 on:
   push:
     tags:
       - 'compiler-v*'
       - 'build-v*'
-
-permissions:
-  contents: read
-  id-token: write  # Required for npm trusted publishing (OIDC)
 
 # cancel-in-progress is deliberately FALSE. A publish is never superseded, and
 # cancelling `npm publish` between the tarball upload and the registry commit
@@ -18,38 +16,175 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# How a tag becomes a release (SR43; decision brief L-34, L-42; FORMA-134).
+# A `compiler-v*` tag releases @getforma/compiler from packages/compiler, a
+# `build-v*` tag @getforma/build from packages/build. Only `publish` holds
+# `id-token: write`, the permission that lets a job mint the OIDC token npm
+# exchanges for a publish credential. Everything that runs the dependency tree
+# runs in a job without it:
+#   test     builds both packages and runs both suites
+#   pack     checks the version against the tag, builds, packs the tagged
+#            package's tarball and writes its SHA-256 record; restores no cache,
+#            since the bytes it packs are the bytes that publish
+#   publish  restores no cache and installs nothing; downloads this run's packed
+#            artefact, checks every file against the record whose own hash
+#            `pack` passed as a job output, and publishes that tarball with
+#            --ignore-scripts, so it runs no package script either
+# CI's `release-workflow` job runs scripts/check-release-workflow.rb, which
+# fails if this shape is lost, and seeds each violation to prove it can fail.
+# Verified by: scripts/check-release-workflow.rb > "id-token: write on the pack job"
+# A file altered after `pack`, by any job of this run, fails publish's check
+# before `npm publish` runs, so nothing ships.
+# Verified by: scripts/test-release-artifacts.sh > "a tarball altered by one byte fails"
+# Verified by: scripts/test-release-artifacts.sh > "a replaced tarball with a rewritten record fails"
 jobs:
-  publish-compiler:
-    if: startsWith(github.ref_name, 'compiler-v')
+  test:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
-    # MEASURED: on 2026-08-06 run #18 this job executed npm install, build and
-    # test and reached `npm publish` in well under 4 minutes of runner time;
-    # the same workflow published 0.2.0 in 30 seconds on 2026-08-05.
-    # `npm test -w packages/compiler` is 3s locally. 20 is ~5x a 4m run and
-    # bounds a slow registry without ever cutting a publish short.
-    timeout-minutes: 20
+    # MEASURED locally: `npm test --workspaces` 3s, the two builds ~45s on a
+    # runner, `npm ci` ~1m (ci.yml's test job). 15 is ci.yml's bound for it.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  pack:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    # MEASURED locally: the two builds ~5s, npm pack 1s; on a runner `npm ci`
+    # without a cache ~1m and the builds ~45s. 10 is ~5x.
+    timeout-minutes: 10
+    outputs:
+      record-sha256: ${{ steps.record.outputs.record-sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # No cache in this job: a poisoned cache restored here could change the
+      # bytes that publish. setup-node v4 caches only when `cache:` is set and
+      # has no `package-manager-cache` input (it warns "Unexpected input"); the
+      # line is there so that a move to v5, which caches on its own when
+      # package.json names a packageManager, keeps the cache off. The lint
+      # requires it.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Name the package the tag releases
+        id: pkg
+        run: |
+          case "$GITHUB_REF_NAME" in
+            compiler-v*) DIR=compiler; TAG_VERSION="${GITHUB_REF_NAME#compiler-v}" ;;
+            build-v*) DIR=build; TAG_VERSION="${GITHUB_REF_NAME#build-v}" ;;
+            *) echo "::error::$GITHUB_REF_NAME is not a release tag"; exit 1 ;;
+          esac
+          { echo "dir=$DIR"; echo "tag-version=$TAG_VERSION"; } >> "$GITHUB_OUTPUT"
+
+      - name: Verify version matches tag
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+          TAG_VERSION: ${{ steps.pkg.outputs.tag-version }}
+        run: |
+          PKG_VERSION=$(node -p "require('./packages/$DIR/package.json').version")
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::$DIR package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+
+      - run: npm ci
+      # The build package marks @getforma/compiler external, and both builds
+      # run so the workspace is in the state the tests saw.
+      - run: npm run build
+
+      # @getforma/build depends on @getforma/compiler from the registry, not
+      # from this workspace. Publishing build against a compiler version that
+      # is not on npm yet ships a package nobody can install. Diagnostic only —
+      # it never blocks, but it makes the ordering visible in the log.
+      - name: Report the @getforma/compiler version npm can see
+        if: steps.pkg.outputs.dir == 'build'
+        continue-on-error: true
+        run: |
+          echo "this repo's packages/build requires:"
+          node -p "JSON.stringify(require('./packages/build/package.json').dependencies, null, 2)"
+          echo "npm currently serves @getforma/compiler: $(npm view @getforma/compiler version || echo unknown)"
+
+      # --ignore-scripts: no prepack or prepare script rebuilds dist after the
+      # build above, so the tarball holds exactly those bytes.
+      - name: Pack the tarball
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          mkdir release
+          npm pack -w "packages/$DIR" --ignore-scripts --pack-destination release
+          ls -l release
+
+      - name: Record the SHA-256 of each packed file
+        id: record
+        run: |
+          RECORD_SHA256=$(bash scripts/release-artifacts.sh record release)
+          cat release/SHA256SUMS
+          echo "record-sha256=$RECORD_SHA256" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-packed
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    needs: [test, pack]
+    # The trigger already admits only the two tag patterns; this repeats it
+    # where the credential is, so a trigger added by mistake cannot publish.
+    if: startsWith(github.ref, 'refs/tags/compiler-v') || startsWith(github.ref, 'refs/tags/build-v')
+    runs-on: ubuntu-latest
+    # A download, a hash check and one `npm publish`: about a minute; the old
+    # job published 0.2.0 in 30 seconds on 2026-08-05. 10 bounds a slow
+    # registry without cutting a publish short.
+    timeout-minutes: 10
+    # No `environment:` yet: the npm trusted-publisher entries name none, and a
+    # job that names an environment GitHub does not have creates it unprotected.
+    # Once the environment exists, limited to the release tags, the entries and
+    # this job name it together.
+    permissions:
+      contents: read
+      id-token: write  # npm trusted publishing (OIDC) and provenance; this job only
+    steps:
+      # Only the verifier, from the tagged commit: no package.json, no lockfile,
+      # nothing to install, so no dependency code reaches this job.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/release-artifacts.sh
+          sparse-checkout-cone-mode: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           # npm >= 11.5.1 is required for OIDC trusted publishing; Node 24
           # ships it. Do not lower this.
           node-version: 24
-          cache: npm
           registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-packed
+          path: release
+          digest-mismatch: error
 
-      - run: npm ci
-      - run: npm run build -w packages/compiler
-      - run: npm test -w packages/compiler
-
-      - name: Verify version matches tag
-        run: |
-          PKG_VERSION=$(node -p "require('./packages/compiler/package.json').version")
-          TAG_VERSION="${GITHUB_REF_NAME#compiler-v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::compiler package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
-            exit 1
-          fi
+      # The record's hash comes from `pack`'s job output, not from the
+      # artefact, so a tarball replaced together with its record fails too.
+      - name: Check every packed file against pack's record
+        env:
+          RECORD_SHA256: ${{ needs.pack.outputs.record-sha256 }}
+        run: bash scripts/release-artifacts.sh verify release "$RECORD_SHA256"
 
       # Recorded for the failure explainer below: an OIDC publish that fails
       # because npm is too old looks identical to one that fails on auth.
@@ -57,86 +192,40 @@ jobs:
         run: |
           echo "node $(node -v) / npm $(npm -v) — OIDC trusted publishing needs npm >= 11.5.1"
 
-      # Trusted publishing: uses OIDC, no npm token needed.
-      # Configure at: npmjs.com/package/@getforma/compiler → Settings → Trusted Publisher
-      - run: npm publish --access public -w packages/compiler
+      # Trusted publishing: OIDC for auth, no npm token; --provenance signs the
+      # statement linking the tarball to this run.
+      # Configure at: npmjs.com/package/@getforma/<compiler|build> → Settings → Trusted Publisher
+      # The tarball is the one `pack` built and the checked record lists; npm
+      # uploads a tarball as it is, and --ignore-scripts runs none of its scripts.
+      - name: Publish the verified tarball
+        run: |
+          TARBALLS=$(awk '$2 ~ /\.tgz$/ { print $2 }' release/SHA256SUMS)
+          if [ "$(printf '%s\n' "$TARBALLS" | grep -c .)" != 1 ]; then
+            echo "::error::the record must list exactly one tarball, found: $TARBALLS"
+            exit 1
+          fi
+          npm publish "./release/$TARBALLS" --provenance --access public --ignore-scripts
 
-      # run #18 failed here with nothing on the run page but "failure". These
-      # three causes need three different responses and only one of them is
-      # fixed by re-running.
+      # run #18 failed at publish with nothing on the run page but "failure".
+      # These causes need different responses and only one of them is fixed by
+      # re-running.
       - name: Explain a publish failure
         if: failure()
         run: |
-          echo "::error title=@getforma/compiler publish failed::Read the npm error above, then match it here."
+          echo "::error title=$GITHUB_REF_NAME publish failed::Read the error above, then match it here."
+          echo "'differs from the packed file' / 'is not the record the pack job wrote' / 'is not in the record'"
+          echo "  -> The packed artefact changed between pack and publish. NOTHING WAS PUBLISHED."
+          echo "     Do not re-run until you know what wrote to this run's artefacts."
           echo "5xx / ETIMEDOUT / 'Unable to get OIDC token' / 'Service Unavailable'"
           echo "  -> GitHub Actions or npm incident. The Actions API mints the OIDC token that"
           echo "     npm exchanges for a credential, so an Actions outage breaks publish auth."
-          echo "     RE-RUN THIS RUN. Do not re-tag; the tag is fine."
+          echo "     RE-RUN THE FAILED JOBS. Do not re-tag; the tag is fine."
           echo "ENEEDAUTH / E403 / 'Unable to authenticate, need: Basic realm=npm'"
-          echo "  -> Trusted publishing is NOT configured for @getforma/compiler."
-          echo "     Set it at npmjs.com/package/@getforma/compiler -> Settings -> Trusted Publisher:"
+          echo "  -> Trusted publishing is NOT configured for this package. Set it at"
+          echo "     npmjs.com/package/@getforma/<compiler|build> -> Settings -> Trusted Publisher:"
           echo "     repository getforma-dev/forma-tools, workflow .github/workflows/release.yml,"
           echo "     environment (leave EMPTY — this job declares none)."
           echo "     No number of re-runs fixes this; it is a human step on npmjs.com."
           echo "E409 / 'cannot publish over the previously published versions'"
           echo "  -> This version already shipped. Bump the version and re-tag."
-
-  publish-build:
-    if: startsWith(github.ref_name, 'build-v')
-    runs-on: ubuntu-latest
-    # Same shape as publish-compiler plus one extra workspace build. On
-    # 2026-08-06 run #19 never executed a step — it died in "Set up job" with
-    # "Service Unavailable" / "Failed to resolve action download info", which
-    # is GitHub failing to fetch actions/checkout, not this repo failing.
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
-          cache: npm
-          registry-url: https://registry.npmjs.org
-
-      - run: npm ci
-      - run: npm run build -w packages/compiler
-      - run: npm run build -w packages/build
-      - run: npm test -w packages/build
-
-      - name: Verify version matches tag
-        run: |
-          PKG_VERSION=$(node -p "require('./packages/build/package.json').version")
-          TAG_VERSION="${GITHUB_REF_NAME#build-v}"
-          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::build package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
-            exit 1
-          fi
-
-      # @getforma/build depends on @getforma/compiler from the registry, not
-      # from this workspace. Publishing build against a compiler version that
-      # is not on npm yet ships a package nobody can install. Diagnostic only —
-      # it never blocks, but it makes the ordering visible in the log.
-      - name: Report the @getforma/compiler version npm can see
-        continue-on-error: true
-        run: |
-          echo "this repo's packages/build requires:"
-          node -p "JSON.stringify(require('./packages/build/package.json').dependencies, null, 2)"
-          echo "npm currently serves @getforma/compiler: $(npm view @getforma/compiler version || echo unknown)"
-
-      - name: Record toolchain
-        run: |
-          echo "node $(node -v) / npm $(npm -v) — OIDC trusted publishing needs npm >= 11.5.1"
-
-      # Trusted publishing: uses OIDC, no npm token needed.
-      # Configure at: npmjs.com/package/@getforma/build → Settings → Trusted Publisher
-      - run: npm publish --access public -w packages/build
-
-      - name: Explain a publish failure
-        if: failure()
-        run: |
-          echo "::error title=@getforma/build publish failed::Read the npm error above, then match it here."
-          echo "5xx / ETIMEDOUT / 'Unable to get OIDC token' -> Actions/npm incident. RE-RUN, do not re-tag."
-          echo "ENEEDAUTH / E403 -> no Trusted Publisher for @getforma/build on npmjs.com."
-          echo "  Set repository getforma-dev/forma-tools, workflow .github/workflows/release.yml,"
-          echo "  environment EMPTY. Human step; re-running will not fix it."
-          echo "E409 -> version already published. Bump and re-tag."
-          echo "ETARGET on @getforma/compiler -> publish the compiler-v* tag first, then re-run this run."
+          echo "ETARGET on @getforma/compiler -> publish the compiler-v* tag first, then re-run all jobs."
