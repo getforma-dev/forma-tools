@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-14
+
 Consolidated from the local, unpublished builds Ledger vendors as `0.2.1-ledger.1`, `0.2.2-ledger.1` and `0.2.2-ledger.2` (checkpoint `205b612`), plus the fixes made while preparing this release. None of those labels was published; the version is set at release.
 
 ### Changed
