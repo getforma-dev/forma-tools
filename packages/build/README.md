@@ -508,7 +508,7 @@ TypeScript and JavaScript, inline scripts in HTML included:
 | `templateMany` | Core's `templateMany(markup)`, likewise. |
 | `reconcile` | The runtime's `reconcile(el, markup)`, likewise. |
 | `mountMarkup` | The runtime's `mountMarkup(root, markup, options)` (core 2.1.0's tiered mount), likewise: a string still works in 2.x. |
-| `MountHandle.update` | `update(markup)` on the handle `mountMarkup()` returns, given markup not traced to `trustedHtml()`: on a variable, field or property assigned the handle (by name), chained on the call (`mountMarkup(…).update(…)`), or destructured from it (`const { update } = mountMarkup(…)`). |
+| `MountHandle.update` | `update(markup)` on the handle `mountMarkup()` returns, given markup not traced to `trustedHtml()`: on a variable, field or property assigned the handle (`=`, `??=`, `\|\|=`, `&&=`, or an arm of a ternary), by dot or by bracket (`w.update(…)`, `w['update'](…)`), chained on the call (`mountMarkup(…).update(…)`), or destructured from it (`const { update } = mountMarkup(…)`, `{ update: up }`). The follow is by name, file-wide: a second object held under a handle's name, or another `update` destructured in the same file, is reported too, and an entry on the list says so. |
 | `srcdoc` | A `srcdoc` prop, attribute or property (any case) set to a value not traced to `trustedHtml()`: JSX, `h()`, a quoted or computed key, `setAttr`/`setAttribute(…, 'srcdoc', …)` (a template literal or a `const` holding the name included), `.srcdoc =`, `['srcdoc'] =`, `Reflect.set` and `Object.defineProperty`. |
 | `core-reexport` | `export * from '@getforma/core'` (or a subpath, or `export * as x from …`): every raw sink of core's behind the application's own module, where the lint does not follow its importers. A named re-export of a sink (`export { reconcile } from '@getforma/core/runtime'`, or a sink imported from core and exported) is reported under the sink's own exit. |
 | `h('script')` | A `script` element built by core's `h()`: `h('script', …)` (any case), under a name `h` is imported as, on core's namespace, or JSX `<script>`. Its `src` runs under `'strict-dynamic'`; it warns in development and 3.0.0 refuses it (FORMA-109). |
@@ -595,9 +595,16 @@ What it cannot see, and review must:
   a key assembled from variables): the lint reads the names written in the
   source.
 - `h()` given a tag only known at run time (`h(tag, …)`).
-- `update()` on a mount handle the file does not see made: one passed in as a
-  parameter, or kept under a name the file never assigns a `mountMarkup()`
-  call to.
+- `update()` on a mount handle the file does not see made or does not hold
+  under a plain name: one passed in as a parameter or reached in a callback
+  (`Promise.resolve(mountMarkup(…)).then((h) => h.update(s))`); one kept in a
+  collection or a property (`[mountMarkup(…)][0].update(s)`,
+  `map.get('w').update(s)`, `{ w: mountMarkup(…) }.w.update(s)`,
+  `const [w] = [mountMarkup(…)]`); one returned by a wrapper in the same file
+  (`function mount(r, s) { return mountMarkup(r, trustedHtml(s), …) }`, then
+  `const w = mount(r, s); w.update(s)` or `mount(r, s).update(s)`: the wrapper's
+  own call is listed once, and every `update` after it is unseen); and
+  `Reflect.get(w, 'update')(s)` or a key held in a variable (`w[k](s)`).
 - The browser's own sinks (`innerHTML`, `insertAdjacentHTML`, `document.write`,
   `Element.setHTMLUnsafe`, `document.createElement('script')`): not Forma's
   exits, and what Trusted Types refuses in the browser (DR-20).

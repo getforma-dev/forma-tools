@@ -9,3 +9,7 @@ export function other(next: string) {
   update(next);
   return new Map<string, string>().set('update', next);
 }
+export function renamed(next: string) {
+  const { update: up } = createStore();
+  up(next);
+}
