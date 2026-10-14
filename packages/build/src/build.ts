@@ -137,6 +137,39 @@ function copyFonts(config: BuildConfig): void {
 }
 
 // ---------------------------------------------------------------------------
+// Deprecations: the WASM walker (FORMA-131; DR-23)
+// ---------------------------------------------------------------------------
+
+/**
+ * BUILD-803 (deprecated in 0.3.1): the config sets `wasm`. The key goes in
+ * 3.0.0 with the WASM walker: forma-ir's `wasm` feature and
+ * `@getforma/core/wasm` are deprecated in the same release. Said once per
+ * `build()` call, production and watch alike, on the console and in
+ * `BuildResult.warnings`, as BUILD-802 is.
+ *
+ * Verified by: packages/build/tests/wasm-deprecation.test.ts > "a config that sets wasm warns BUILD-803 once per build, naming 3.0.0"
+ */
+function wasmKey(config: BuildConfig): string | undefined {
+  if (config.wasm === undefined) return undefined;
+  return (
+    "BUILD-803 the wasm key is deprecated and is removed in 3.0.0 with the WASM walker (forma-ir's " +
+    '`wasm` feature and @getforma/core/wasm). Remove it from the config: islands re-render in the ' +
+    'browser with h(), and forma-server renders pages.'
+  );
+}
+
+/**
+ * BUILD-804 (deprecated in 0.3.1): the wasm-pack step ran, in a production
+ * build whose config sets `wasm` with `wasm-pack` on `PATH`. Said when the
+ * step starts, on the console, and in that build's `BuildResult.warnings`.
+ *
+ * Verified by: packages/build/tests/wasm-deprecation.test.ts > "the wasm-pack step warns BUILD-804 when it runs, and still ships the walker"
+ */
+const WASM_PACK_DEPRECATION =
+  'BUILD-804 the wasm-pack step is deprecated and is removed in 3.0.0: forma_ir.js, ' +
+  "forma_ir_bg.wasm and the manifest's wasm entry go with the WASM walker.";
+
+// ---------------------------------------------------------------------------
 // WASM Build
 // ---------------------------------------------------------------------------
 
@@ -182,6 +215,7 @@ function buildWasm(
     return false;
   }
 
+  console.warn(`Warning: ${WASM_PACK_DEPRECATION}`);
   console.log('   Building WASM walker...');
   spawnTool(
     'wasm-pack',
@@ -729,11 +763,15 @@ export async function build(userConfig: BuildConfig): Promise<BuildResult> {
   validateConfig(userConfig);
   // `strict` from the config, else FORMA_STRICT (FORMA-119).
   const config: BuildConfig = { ...userConfig, ...resolveDiagnosticOptions(userConfig) };
-  const deprecation = workerWithoutApp(config);
-  if (deprecation) console.warn(`Warning: ${deprecation}`);
-  const withDeprecation = (result: BuildResult): BuildResult =>
-    deprecation ? { ...result, warnings: [...result.warnings, deprecation] } : result;
-  if (config.watch) return withDeprecation(await buildInto(config, config.outputDir));
+  // What the config itself deprecates, each said once per build() call,
+  // production and watch alike, on the console and in BuildResult.warnings.
+  const deprecations = [workerWithoutApp(config), wasmKey(config)].filter(
+    (line): line is string => line !== undefined,
+  );
+  for (const line of deprecations) console.warn(`Warning: ${line}`);
+  const withDeprecations = (result: BuildResult): BuildResult =>
+    deprecations.length > 0 ? { ...result, warnings: [...result.warnings, ...deprecations] } : result;
+  if (config.watch) return withDeprecations(await buildInto(config, config.outputDir));
 
   const staging = createStagingDirectory(config.outputDir);
   let result: BuildResult;
@@ -745,7 +783,7 @@ export async function build(userConfig: BuildConfig): Promise<BuildResult> {
   }
   // Throws with the previous output restored if the swap itself fails.
   replaceDirectory(staging, config.outputDir);
-  return withDeprecation(result);
+  return withDeprecations(result);
 }
 
 /**
@@ -994,7 +1032,7 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
     return {
       manifest,
       buildHash: manifest.build_hash,
-      warnings,
+      warnings: wasmBuilt ? [...warnings, WASM_PACK_DEPRECATION] : warnings,
       diagnostics,
     };
   } catch (err) {

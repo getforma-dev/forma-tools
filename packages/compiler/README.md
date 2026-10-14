@@ -92,7 +92,8 @@ imports from `formajs` / `forma/`.
 
 > **Deprecated: removed in 3.0.0, together with server functions.** No
 > application of the Forma stack uses them. The plugin logs this once when it
-> is created.
+> is created. `transformServerFunctions`, the transform it runs (also exported),
+> logs `BUILD-901` on its first call in a process.
 
 Transforms functions with the `"use server"` directive into RPC stubs (client build) or registered endpoints (server build).
 

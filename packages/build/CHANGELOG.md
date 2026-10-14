@@ -25,6 +25,23 @@
   diagnostic catalogue (`docs/DIAGNOSTICS.md`, BUILD-8xx) when that lands.
   The build's `app` and the server's `for_app` meet by convention: FORMA-168
   records `app` in the manifest so the server can check it.
+- **The `wasm` key and the wasm-pack step** (BUILD-803, BUILD-804;
+  FORMA-131, DR-23). Both go in 3.0.0 with the WASM walker: forma-ir's `wasm`
+  feature and `@getforma/core/wasm` are deprecated in the same release, and
+  islands re-render in the browser with `h()`. A config that sets `wasm` gets
+  `Warning: BUILD-803 the wasm key is deprecated ...` once per `build()` call,
+  in watch mode and in production alike, on the console and in
+  `BuildResult.warnings`, as BUILD-802 is. When the wasm-pack step runs (a
+  production build with `wasm-pack` on `PATH`), it says
+  `Warning: BUILD-804 the wasm-pack step is deprecated ...` as it starts, and
+  that build's `BuildResult.warnings` lists it. Nothing else changes: the
+  step still runs, and the manifest's `wasm` entry and the worker still name
+  its outputs. `BuildConfig.wasm` and `AssetManifest.wasm` are `@deprecated`
+  in the types. Tests: `tests/wasm-deprecation.test.ts` > "a config that sets
+  wasm warns BUILD-803 once per build, naming 3.0.0", "the wasm-pack step
+  warns BUILD-804 when it runs, and still ships the walker" and "a config
+  without wasm warns neither". Both codes join FORMA-119's catalogue
+  (`docs/DIAGNOSTICS.md`, BUILD-8xx) with BUILD-802 when that lands.
 
 ### Added
 - **Per-application, per-build service-worker caches with a waiting upgrade:

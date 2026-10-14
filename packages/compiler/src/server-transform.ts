@@ -64,14 +64,39 @@ function hashEndpoint(name: string, source: string): string {
 }
 
 /**
+ * The line `transformServerFunctions` logs on its first call. Server functions
+ * are removed in 3.0.0 (FORMA-131; DR-22), with `@getforma/core/server` and
+ * `formaServer`. BUILD-901 opens a family for the compiler's own deprecated
+ * entry points, BUILD-9xx, not yet in docs/DIAGNOSTICS.md (FORMA-119's
+ * catalogue, in review, numbers the constructs 1xx to 7xx and the build 8xx).
+ */
+const DEPRECATION =
+  '[@getforma/compiler] BUILD-901 transformServerFunctions, the "use server" transform, is deprecated ' +
+  'and will be removed in 3.0.0, together with server functions and @getforma/core/server. ' +
+  "Serve the call from a route in the application's Rust server.";
+
+let deprecationLogged = false;
+
+/**
  * Transform source code to handle "use server" directives.
  * Returns null if no server functions were found.
+ *
+ * Logs BUILD-901 on its first call in a process, whatever the code holds.
+ * Verified by: packages/compiler/tests/server-transform-deprecation.test.ts > "transformServerFunctions logs BUILD-901 once, naming 3.0.0"
+ *
+ * @deprecated Removed in 3.0.0 with server functions (DR-22): serve the call
+ * from a route in the application's Rust server.
  */
 export function transformServerFunctions(
   code: string,
   id: string,
   options: ServerTransformOptions,
 ): { code: string; map: any } | null {
+  if (!deprecationLogged) {
+    deprecationLogged = true;
+    console.warn(DEPRECATION);
+  }
+
   // Quick bail: if no "use server" in the code, skip
   if (!code.includes('"use server"') && !code.includes("'use server'")) return null;
 
