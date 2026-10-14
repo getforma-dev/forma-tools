@@ -1,6 +1,8 @@
+import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { serviceWorkerSource } from '../src/service-worker';
+import { CACHE_VECTORS } from './helpers/cache-vectors';
 
 function harness(development: boolean, onDemand = false) {
   const listeners = new Map<string, (event: any) => void>();
@@ -164,3 +166,113 @@ describe('generated service workers', () => {
     expect(worker.fetch).not.toHaveBeenCalled();
   });
 });
+
+// -- Per-application workers (FORMA-130, DR-25, SR28) -------------------------
+
+const BUILD = '0123456789ab';
+const OWN = `forma:ledger:${BUILD}`;
+const MODES = ['precache', 'on-demand'] as const;
+
+/** Ledger's production worker for build BUILD, over caches named `seeded`. */
+function appWorker(mode: (typeof MODES)[number], seeded: readonly string[]) {
+  const listeners = new Map<string, (event: any) => void>();
+  const entries = new Map<string, Map<string, Response>>(seeded.map(name => [name, new Map()]));
+  const fetch = vi.fn(async () => new Response('network', { headers: { 'Content-Type': 'application/javascript', 'Cache-Control': 'public, max-age=31536000, immutable' } }));
+  const pendingWrites: Promise<unknown>[] = [];
+  const storage = {
+    keys: async () => [...entries.keys()],
+    delete: async (name: string) => entries.delete(name),
+    open: vi.fn(async (name: string) => {
+      if (!entries.has(name)) entries.set(name, new Map());
+      const cache = entries.get(name)!;
+      return {
+        addAll: async (urls: string[]) => { for (const url of urls) cache.set(url, await fetch()); },
+        match: async (request: Request) => cache.get(new URL(request.url).pathname)?.clone(),
+        put: async (request: Request, response: Response) => { cache.set(new URL(request.url).pathname, response); },
+      };
+    }),
+  };
+  const self = {
+    location: { origin: 'https://forma.test' },
+    addEventListener: (type: string, callback: (event: any) => void) => { listeners.set(type, callback); },
+    skipWaiting: vi.fn(async () => {}),
+    clients: { claim: vi.fn(async () => {}) },
+  };
+  const source = serviceWorkerSource(OWN, ['/_assets/app.hash.css'], false,
+    mode === 'on-demand' ? ['/_assets/app.hash.js'] : undefined, 'ledger');
+  runInNewContext(source, { self, caches: storage, fetch, URL, Headers, Response });
+  return {
+    source, entries, fetch, storage, self, listeners,
+    settleWrites: async () => { await Promise.all(pendingWrites.splice(0)); },
+    lifecycle: async (type: 'install' | 'activate') => {
+      let pending: Promise<unknown> | undefined;
+      listeners.get(type)?.({ waitUntil: (promise: Promise<unknown>) => { pending = promise; } });
+      await pending;
+    },
+    request: (path: string) => {
+      let response: Promise<Response> | undefined;
+      listeners.get('fetch')!({
+        request: new Request(new URL(path, self.location.origin)),
+        respondWith: (value: Promise<Response>) => { response = value; },
+        waitUntil: (promise: Promise<unknown>) => { pendingWrites.push(promise); },
+      });
+      return response;
+    },
+  };
+}
+
+describe('per-application workers (FORMA-130)', () => {
+  it.each(MODES)('%s: activation deletes v1\'s names and its own older caches, never another application\'s', async (mode) => {
+    const worker = appWorker(mode, CACHE_VECTORS.map(([name]) => name));
+    await worker.lifecycle('install');
+    await worker.lifecycle('activate');
+    // The contract's "ledger" column, less the worker's own current cache.
+    const deleted = CACHE_VECTORS.filter(([name, , ledger]) => ledger && name !== OWN).map(([name]) => name);
+    const kept = CACHE_VECTORS.map(([name]) => name).filter((name) => !deleted.includes(name));
+    expect([...worker.entries.keys()].sort()).toEqual([...kept].sort());
+    expect(worker.entries.has(OWN)).toBe(true);
+  });
+
+  it.each(MODES)('%s: a new worker waits, calling neither skipWaiting nor clients.claim', async (mode) => {
+    const worker = appWorker(mode, []);
+    await worker.lifecycle('install');
+    await worker.lifecycle('activate');
+    expect(worker.self.skipWaiting).not.toHaveBeenCalled();
+    expect(worker.self.clients.claim).not.toHaveBeenCalled();
+    expect(worker.source).not.toContain('skipWaiting');
+    expect(worker.source).not.toContain('clients.claim');
+    // Two-sided: it is the per-application worker, under its own name.
+    expect(worker.source).toContain(`const CACHE_NAME = "${OWN}";`);
+  });
+
+  it('precache: installs its own cache, under its own name', async () => {
+    const worker = appWorker('precache', []);
+    await worker.lifecycle('install');
+    expect([...worker.entries.keys()]).toEqual([OWN]);
+    expect(worker.entries.get(OWN)!.has('/_assets/app.hash.css')).toBe(true);
+  });
+
+  it.each(MODES)('%s: reads only its own cache, not an older build\'s', async (mode) => {
+    const older = 'forma:ledger:fedcba987654';
+    const worker = appWorker(mode, [older]);
+    worker.entries.get(older)!.set('/_assets/app.hash.js', new Response('older build'));
+    expect(await (await worker.request('/_assets/app.hash.js'))!.text()).toBe('network');
+    await worker.settleWrites();
+    expect(worker.entries.get(OWN)?.has('/_assets/app.hash.js')).toBe(true);
+    expect(await (await worker.request('/_assets/app.hash.js'))!.text()).toBe('network');
+    expect(worker.fetch).toHaveBeenCalledOnce();
+  });
+
+  it('without an application, the workers are 0.3.0\'s byte for byte', () => {
+    const fixture = (name: string) => readFileSync(new URL(`./fixtures/workers-0.3.0/${name}.js`, import.meta.url), 'utf8');
+    expect(serviceWorkerSource('forma-0123456789ab', ['/_assets/app.a1b2c3d4.css', '/_assets/font.woff2'], false)).toBe(fixture('precache'));
+    expect(serviceWorkerSource('forma-0123456789ab-on-demand-v1', [], false, ['/_assets/app.a1b2c3d4.js', '/_assets/app.a1b2c3d4.css'])).toBe(fixture('on-demand'));
+    expect(serviceWorkerSource('forma-dev', [], true)).toBe(fixture('development'));
+  });
+
+  it('the development worker ignores the application and stays as it was', () => {
+    const fixture = readFileSync(new URL('./fixtures/workers-0.3.0/development.js', import.meta.url), 'utf8');
+    expect(serviceWorkerSource('forma:ledger:dev', [], true, undefined, 'ledger')).toBe(fixture);
+  });
+});
+

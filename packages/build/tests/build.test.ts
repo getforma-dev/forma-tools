@@ -532,6 +532,46 @@ describe('@getforma/build — functional', () => {
     }
   }, 15_000);
 
+  it('names the worker\'s cache per application and build, and gives it a waiting upgrade', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+      app: 'ledger',
+    };
+    for (const serviceWorker of ['precache', 'on-demand'] as const) {
+      const { manifest } = await build({ ...config, serviceWorker });
+      const worker = readFileSync(join(outDir, 'sw.js'), 'utf8');
+      // The name forma-server's sw::ServiceWorker::for_app("ledger") retires.
+      expect(worker).toContain(`const CACHE_NAME = "forma:ledger:${manifest.build_hash.slice(0, 12)}";`);
+      expect(worker).not.toContain('skipWaiting');
+      expect(worker).not.toContain('clients.claim');
+    }
+  }, 15_000);
+
+  it('rejects an application name forma-server cannot take, naming it', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+    for (const app of ['Ledger', '-ledger', 'led:ger', 'led ger', 'led_ger', 'lédger', '', 'a'.repeat(64), 42]) {
+      const error = await rejection({ ...config, app });
+      expect(error.message, String(app)).toContain(`app is '${String(app)}'`);
+      expect(error.message).toContain('sw::ServiceWorker::for_app');
+      expect(existsSync(outDir)).toBe(false);
+    }
+    // Two-sided: the names the grammar allows build.
+    for (const app of ['ledger', 'ksx-studio', '9lives', 'a'.repeat(63)]) {
+      await build({ ...config, app });
+      expect(readFileSync(join(outDir, 'sw.js'), 'utf8')).toContain(`"forma:${app}:`);
+    }
+  }, 30_000);
+
   // ---- Test 12: WASM build through a .cmd-shimmed tool -------------------
   it('runs a .cmd-shimmed wasm-pack (the Windows npm install shape)', async () => {
     const entryFile = join(srcDir, 'app.ts');

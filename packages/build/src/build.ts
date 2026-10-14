@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { serviceWorkerSource } from './service-worker.js';
+import { APP_NAME, appCacheName, serviceWorkerSource } from './service-worker.js';
 import { splitGraph, type SplitGraph } from './split-graph.js';
 import { createStagingDirectory, replaceDirectory, writeFileAtomic } from './output.js';
 
@@ -302,6 +302,7 @@ function compressAssets(distDir: string): number {
  *    the route nor the key; a string there was read letter by letter.
  *
  * Verified by: packages/build/tests/build.test.ts > "rejects an unknown serviceWorker value, naming it"
+ * Verified by: packages/build/tests/build.test.ts > "rejects an application name forma-server cannot take, naming it"
  * Verified by: packages/build/tests/build.test.ts > "rejects two entryPoints that share an outfile"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route that names an asset no entry produces"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route without css, naming the route"
@@ -315,6 +316,16 @@ function validateConfig(config: BuildConfig): void {
   if (serviceWorker !== undefined && serviceWorker !== 'precache' && serviceWorker !== 'on-demand') {
     problems.push(
       `serviceWorker is '${String(serviceWorker)}': use 'precache' (the default) or 'on-demand'`,
+    );
+  }
+
+  // The worker's cache names carry it between colons, and the server must
+  // name the same application to retire them (FORMA-130).
+  const app: unknown = config.app;
+  if (app !== undefined && (typeof app !== 'string' || !APP_NAME.test(app))) {
+    problems.push(
+      `app is '${String(app)}': use 1 to 63 of a-z, 0-9 and -, starting with a letter or digit ` +
+        `(the name forma-server's sw::ServiceWorker::for_app takes)`,
     );
   }
 
@@ -491,7 +502,11 @@ function generateServiceWorker(
 ): void {
   const distDir = config.outputDir;
   const onDemand = config.serviceWorker === 'on-demand';
-  const swCacheName = `forma-${buildHash.slice(0, 12)}${onDemand ? '-on-demand-v1' : ''}`;
+  // Per application and build when the config names the application
+  // (FORMA-130); otherwise 0.3.0's shared `forma-` name.
+  const swCacheName = config.app !== undefined
+    ? appCacheName(config.app, buildHash)
+    : `forma-${buildHash.slice(0, 12)}${onDemand ? '-on-demand-v1' : ''}`;
   const fonts = readdirSync(distDir)
     .filter((f) => f.endsWith('.woff2'))
     .sort();
@@ -513,7 +528,7 @@ function generateServiceWorker(
   const immutableUrls = onDemand ? [...new Set(Object.values(assets))]
     .filter(file => !file.includes('..') && /^[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]{8}\.(?:js|css|wasm)$/.test(file))
     .sort().map(file => `/_assets/${file}`) : undefined;
-  const swContent = serviceWorkerSource(swCacheName, precacheUrls, config.watch === true, immutableUrls);
+  const swContent = serviceWorkerSource(swCacheName, precacheUrls, config.watch === true, immutableUrls, config.app);
 
   writeFileAtomic(join(distDir, 'sw.js'), swContent);
   console.log(`   SW generated: dist/sw.js (${config.watch ? 'network-only development' : `cache: ${swCacheName}`})`);

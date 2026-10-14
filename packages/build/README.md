@@ -73,11 +73,43 @@ it automatically. Unhashed fonts use the browser HTTP cache. The default remains
 `serviceWorker: 'precache'`, and watch mode always uses the network-only worker.
 Any other `serviceWorker` value is a config error.
 
+### Per-application workers (`app`)
+
+Name the application, with the same string its server passes to forma-server
+0.2.2's `sw::ServiceWorker::for_app`:
+
+```ts
+await build({ ...config, app: 'ledger', serviceWorker: 'on-demand' });
+```
+
+```rust
+forma_server::sw::configure(forma_server::sw::ServiceWorker::for_app("ledger")?.enabled())?;
+```
+
+With `app`, the production worker (either mode) follows forma-server's
+cache-name contract (FORMA-130, DR-25):
+
+- its cache is `forma:<app>:<build>`, `<build>` being the first 12 hex digits of
+  the build hash, so each application and each build has its own;
+- on activation it deletes only Forma's v1 cache names (`forma-dev`, `forma-`
+  and 12 hex, either with `-on-demand-v1`) and its own application's older
+  caches, never another application's (`forma:<other>:…`) or anything else;
+- it never skips waiting and claims no page: a new build's worker waits until
+  no tab uses the previous build's (a reload alone does not end that), so an
+  open tab keeps its cache; it then deletes the previous build's cache.
+
+`app` is 1 to 63 of `a-z`, `0-9` and `-`, starting with a letter or digit;
+anything else is a config error naming it. forma-server serves this worker only
+to an application that enables it; otherwise `/sw.js` is forma-server's
+retiring worker, which deletes the same caches and unregisters. Without `app`,
+the worker is 0.3.0's (shared `forma-` names, immediate takeover), kept for a
+server not yet on forma-server 0.2.2. The development worker ignores `app`.
+
 ## What It Does
 
 | Step | What happens |
 |------|-------------|
-| **Validate** | Rejects an unknown `serviceWorker` value, two entries sharing an `outfile`, an `outfile` that is a path, a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir` |
+| **Validate** | Rejects an unknown `serviceWorker` value, an `app` name forma-server cannot take, two entries sharing an `outfile`, an `outfile` that is a path, a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir` |
 | **Bundle** | esbuild bundles each entry point with JSX transform (`jsxFactory: "h"`) |
 | **CSS** | Runs Tailwind CLI or concatenates CSS files |
 | **Hash** | SHA-256 content hash appended to filenames (`app.a1b2c3d4.js`) |
@@ -206,9 +238,11 @@ Production builds keep content-hashed assets cache-first in the worker's own
 cache. If CacheStorage fails they answer from the network, and a failed cache
 write (a quota error, say) never fails the response.
 
-Every worker mode deletes all `forma-*` caches except its own. Forma
-applications that share an origin share that prefix, so each deletes the
-other's caches; per-application cache names are not implemented.
+Without `app`, every worker mode deletes all `forma-*` caches except its own,
+so Forma applications that share an origin delete each other's caches. With
+`app`, the production worker's caches are named per application and build
+(`forma:<app>:<build>`) and it deletes only its own application's (see
+"Per-application workers" above).
 
 When upgrading a running development app from the old cache-first worker,
 rebuild the frontend, restart any server that embeds build output, then reload
@@ -217,8 +251,9 @@ first navigation started under the old controller. No cache-clearing workaround
 is needed for subsequent rebuilds. A server must actually serve the new asset
 bytes; this worker change does not restart Rust or watch CSS on its behalf.
 
-Run the controlled-page regression with `npm run test:browser -w packages/build`
-from the workspace root. It uses installed Chrome when bundled Chromium is
+Run the controlled-page regressions with `npm run test:browser -w packages/build`
+from the workspace root: the development worker's takeover, and a
+per-application worker through upgrade, rollback and upgrade with two tabs open. It uses installed Chrome when bundled Chromium is
 unavailable, or the explicit `FORMA_BROWSER_CHANNEL` override.
 
 ## When Do You Need This?

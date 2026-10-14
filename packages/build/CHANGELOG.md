@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+- **Per-application, per-build service-worker caches with a waiting upgrade:
+  `BuildConfig.app`** (FORMA-130, the build half; DR-25, SR28). Set it to the
+  string the server passes to forma-server 0.2.2's
+  `sw::ServiceWorker::for_app`. The production worker, in either mode, then
+  names its cache `forma:<app>:<build>` (the build hash's first 12 hex), deletes
+  on activation only Forma's v1 names
+  (`^forma-(?:dev|[0-9a-f]{12})(?:-on-demand-v1)?$`) and its own application's
+  older caches, never another application's or anything else, and neither
+  skips waiting nor claims pages: a new build's worker waits until no tab uses
+  the previous one, which a reload alone does not end. An invalid name is a
+  config error naming it. Without `app`, the workers are 0.3.0's, byte for
+  byte; the development (watch) worker is unchanged either way. The contract is
+  forma-server's (`forma_server::sw`); `tests/helpers/cache-vectors.ts` copies
+  its shared vectors from forma PR 15 (`3d92f57`). Tests:
+  `tests/service-worker.test.ts` > "per-application workers (FORMA-130)" (the
+  vectors, the waiting upgrade, own-cache reads, 0.3.0's workers byte for byte
+  against `tests/fixtures/workers-0.3.0/`, the development worker unchanged);
+  `tests/build.test.ts` > "names the worker's cache per application and build,
+  and gives it a waiting upgrade", "rejects an application name forma-server
+  cannot take, naming it"; `browser-tests/per-application-upgrade.spec.ts`
+  (SR28's lifecycle half in Chromium: two tabs, upgrade, rollback and
+  upgrade, the new worker waiting while an old tab is open and after reloads,
+  an unrelated cache and a second application's cache surviving, v1's name
+  retired).
+
 ### Changed
 - **Watch builds with `ssr: true` now give Phase 2 rendering in development.** Without `codeSplitting` (the default) the dev manifest named no `.ir`, so `forma-server` rendered each page client-side (Phase 1); it now names each page's module, and the server renders the page as production does. `forma-server` loads the modules when the application starts, so until it restarts it serves the module it loaded, under the rebuilt bundle: restart it on a change under `outputDir`. FORMA-166 tracks the server half.
 - **Release and CI install with `npm ci` (DR-32, FORMA-010; the package is unchanged).** `release.yml`, `ci.yml` and `compat.yml` install exactly what `package-lock.json` records instead of running `npm install`; `compat.yml` still installs the newest `@getforma/core` on top, deliberately. Each `uses:` names the commit its tag or branch pointed to on 2026-10-14, with the ref in a comment, and every CI job declares `contents: read`; `release.yml` keeps its workflow-level `contents: read` and `id-token: write`.

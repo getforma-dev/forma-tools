@@ -1,9 +1,95 @@
-/** Generate the worker source independently of filesystem/build orchestration. */
+/**
+ * Forma's cache names before per-application names (every build up to 0.3.0):
+ * `forma-dev`, `forma-` and 12 lowercase hex digits, and either with
+ * `-on-demand-v1`. They cannot be traced to an application, so every
+ * per-application worker, and forma-server's retiring worker, deletes them.
+ * The cache-name contract is forma-server's (`forma_server::sw`, FORMA-130).
+ */
+export const V1_CACHE_NAMES = /^forma-(?:dev|[0-9a-f]{12})(?:-on-demand-v1)?$/;
+
+/**
+ * An application name: what `BuildConfig.app` and forma-server's
+ * `sw::ServiceWorker::for_app` both accept. 1 to 63 of `a-z`, `0-9` and `-`,
+ * starting with a letter or digit, so it can sit between the colons of a
+ * cache name.
+ */
+export const APP_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/** The cache a per-application worker writes: `forma:<app>:<build>`. */
+export function appCacheName(app: string, buildHash: string): string {
+  return `forma:${app}:${buildHash.slice(0, 12)}`;
+}
+
+// The two production fetch handlers, shared by 0.3.0's workers and the
+// per-application ones. Each reads only CACHE_NAME.
+const ON_DEMAND_FETCH = `self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || request.mode === 'navigate' || request.cache === 'no-store' || request.cache === 'reload'
+      || url.origin !== self.location.origin || url.search || !ASSET_URLS.has(url.pathname)) return;
+  event.respondWith((async () => {
+    let cache;
+    try {
+      cache = await caches.open(CACHE_NAME);
+      const cached = await cache.match(request);
+      if (cached) return cached;
+    } catch { /* Private browsing/quota/storage failure must not break the app. */ }
+    const response = await fetch(request);
+    const control = response.headers.get('Cache-Control') || '';
+    const type = response.headers.get('Content-Type') || '';
+    if (cache && response.ok && !response.redirected
+        && /(?:^|,)\\s*immutable\\s*(?:,|$)/i.test(control) && !/(?:^|,)\\s*(?:no-store|private)\\b/i.test(control)
+        && /^(?:application\\/(?:javascript|wasm)|text\\/(?:javascript|css))(?:;|$)/i.test(type)) {
+      const copy = response.clone();
+      event.waitUntil(Promise.resolve().then(() => cache.put(request, copy)).catch(() => {}));
+    }
+    return response;
+  })());
+});
+`;
+
+const PRECACHE_FETCH = `self.addEventListener('fetch', (event) => {
+  const request = event.request;
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || url.origin !== self.location.origin || !url.pathname.startsWith('/_assets/')) return;
+
+  event.respondWith((async () => {
+    let cache;
+    try {
+      cache = await caches.open(CACHE_NAME);
+      const cached = await cache.match(request);
+      if (cached) return cached;
+    } catch { /* Private browsing/quota/storage failure must not break the app. */ }
+    const response = await fetch(request);
+    if (cache && response.ok) {
+      // Answer first and save in the background: a failed write (quota) must
+      // not turn a good network response into a network error.
+      const copy = response.clone();
+      event.waitUntil(Promise.resolve().then(() => cache.put(request, copy)).catch(() => {}));
+    }
+    return response;
+  })());
+});
+`;
+
+/** Generate the worker source independently of filesystem/build orchestration.
+ *
+ * With `app`, a production worker follows the per-application contract
+ * (FORMA-130, DR-25): its cache is `cacheName`, which must be
+ * `forma:<app>:<build>`; on activation it deletes v1's names and its own
+ * application's other caches, never another application's; and it calls
+ * neither `skipWaiting()` nor `clients.claim()`, so a new build's worker waits
+ * until no tab uses the previous one. Without `app`, the workers are 0.3.0's,
+ * byte for byte. The development worker ignores `app`.
+ *
+ * Verified by: packages/build/tests/service-worker.test.ts > "per-application workers (FORMA-130)"
+ */
 export function serviceWorkerSource(
   cacheName: string,
   precacheUrls: string[],
   development: boolean,
   onDemandUrls?: string[],
+  app?: string,
 ): string {
   if (development) {
     // Stable development URLs must not use either CacheStorage or the browser's
@@ -42,6 +128,45 @@ self.addEventListener('fetch', (event) => {
 `;
   }
 
+  if (app !== undefined) {
+    if (!APP_NAME.test(app) || !cacheName.startsWith(`forma:${app}:`) || cacheName.split(':').length !== 3) {
+      throw new Error(`a per-application worker needs a cache named forma:<app>:<build>, got app '${app}' and '${cacheName}'`);
+    }
+    const names = `const CACHE_NAME = ${JSON.stringify(cacheName)};
+const OWN_PREFIX = ${JSON.stringify(`forma:${app}:`)};
+const V1_CACHE_NAMES = ${V1_CACHE_NAMES.toString()};`;
+    const activate = `self.addEventListener('activate', (event) => {
+  // v1's names and this application's older caches, never another
+  // application's or anything else. It claims no page: a page keeps the
+  // worker it loaded with.
+  event.waitUntil(caches.keys().then((names) => Promise.all(names
+    .filter((name) => name !== CACHE_NAME && (V1_CACHE_NAMES.test(name) || name.startsWith(OWN_PREFIX)))
+    .map((name) => caches.delete(name)))).catch(() => {}));
+});
+`;
+    if (onDemandUrls) {
+      return `// Generated by @getforma/build — on-demand immutable assets only, per application
+${names}
+const ASSET_URLS = new Set(${JSON.stringify(onDemandUrls)});
+
+// No install work, and it never skips waiting: this build's worker waits until
+// no tab uses the previous build's, so an open tab keeps its cache.
+${activate}${ON_DEMAND_FETCH}`;
+    }
+    return `// Generated by @getforma/build — do not edit; per application
+${names}
+const PRECACHE_URLS = ${JSON.stringify(precacheUrls, null, 2)};
+
+// It never skips waiting: this build's worker waits until no tab uses the
+// previous build's, so an open tab keeps its cache.
+self.addEventListener('install', (event) => {
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE_URLS)));
+});
+
+${activate}
+${PRECACHE_FETCH}`;
+  }
+
   if (onDemandUrls) {
     return `// Generated by @getforma/build — on-demand immutable assets only
 const CACHE_NAME = ${JSON.stringify(cacheName)};
@@ -56,31 +181,7 @@ self.addEventListener('activate', (event) => {
     names.filter((name) => name.startsWith('forma-') && name !== CACHE_NAME).map((name) => caches.delete(name))
   )).catch(() => {}).then(() => self.clients.claim()));
 });
-self.addEventListener('fetch', (event) => {
-  const request = event.request;
-  const url = new URL(request.url);
-  if (request.method !== 'GET' || request.mode === 'navigate' || request.cache === 'no-store' || request.cache === 'reload'
-      || url.origin !== self.location.origin || url.search || !ASSET_URLS.has(url.pathname)) return;
-  event.respondWith((async () => {
-    let cache;
-    try {
-      cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(request);
-      if (cached) return cached;
-    } catch { /* Private browsing/quota/storage failure must not break the app. */ }
-    const response = await fetch(request);
-    const control = response.headers.get('Cache-Control') || '';
-    const type = response.headers.get('Content-Type') || '';
-    if (cache && response.ok && !response.redirected
-        && /(?:^|,)\\s*immutable\\s*(?:,|$)/i.test(control) && !/(?:^|,)\\s*(?:no-store|private)\\b/i.test(control)
-        && /^(?:application\\/(?:javascript|wasm)|text\\/(?:javascript|css))(?:;|$)/i.test(type)) {
-      const copy = response.clone();
-      event.waitUntil(Promise.resolve().then(() => cache.put(request, copy)).catch(() => {}));
-    }
-    return response;
-  })());
-});
-`;
+${ON_DEMAND_FETCH}`;
   }
 
   return `// Generated by @getforma/build — do not edit
@@ -105,27 +206,5 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-self.addEventListener('fetch', (event) => {
-  const request = event.request;
-  const url = new URL(request.url);
-  if (request.method !== 'GET' || url.origin !== self.location.origin || !url.pathname.startsWith('/_assets/')) return;
-
-  event.respondWith((async () => {
-    let cache;
-    try {
-      cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(request);
-      if (cached) return cached;
-    } catch { /* Private browsing/quota/storage failure must not break the app. */ }
-    const response = await fetch(request);
-    if (cache && response.ok) {
-      // Answer first and save in the background: a failed write (quota) must
-      // not turn a good network response into a network error.
-      const copy = response.clone();
-      event.waitUntil(Promise.resolve().then(() => cache.put(request, copy)).catch(() => {}));
-    }
-    return response;
-  })());
-});
-`;
+${PRECACHE_FETCH}`;
 }
