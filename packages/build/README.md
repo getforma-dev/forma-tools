@@ -213,6 +213,17 @@ The manifest maps source filenames to content-hashed filenames:
 
 The Rust server (`forma-server`) reads this manifest to serve assets with correct cache headers and resolve hashed filenames.
 
+### Watch mode is a development build
+
+Watch mode resolves each package's `development` export condition, as Vite's
+dev server does: it passes esbuild `conditions: ['development', 'module']`
+(`module` because listing any condition drops esbuild's automatic one) and
+defines `process.env.NODE_ENV` as `"development"`. `@getforma/core` points the
+condition at a build that keeps its development warnings (hydration
+mismatches, dropped props, the `FORMA_W_DEPRECATED_` codes), so they reach
+the browser console while you develop. A production build passes neither: it
+resolves the files it always did and logs none of them.
+
 ### Watch mode and server-rendered pages
 
 With `ssr: true`, watch mode keeps each page's FMIR module current, so a page

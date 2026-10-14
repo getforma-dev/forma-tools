@@ -626,6 +626,36 @@ function generateServiceWorker(
 }
 
 // ---------------------------------------------------------------------------
+// Watch Mode: a Development Build
+// ---------------------------------------------------------------------------
+
+/**
+ * What watch mode adds to esbuild's options; a production build adds nothing,
+ * so its options, and the bytes it writes, are what they were (FORMA-169).
+ *
+ * - `conditions`: watch mode resolves each package's `development` export
+ *   condition. `@getforma/core` points it at a build of every entry that
+ *   keeps its development warnings (hydration mismatches, dropped props, the
+ *   deprecations' codes); a production build resolves the files it always
+ *   did. esbuild adds the `module` condition by itself only while no custom
+ *   conditions are configured, so the list names it too: with it, the list
+ *   is what esbuild would have used plus `development`. (`browser`, `import`
+ *   or `require`, and `default` esbuild adds whatever the list says.)
+ * - `process.env.NODE_ENV`: esbuild already defines it as `"development"` in a
+ *   browser build that is not minified, as watch mode's is; stated here so a
+ *   development build says so whatever its minify setting. It does not reach
+ *   core's own source check, which tests `typeof process` first and finds no
+ *   `process` in a browser, and core's development build needs no define.
+ *
+ * Verified by: packages/build/tests/development-condition.test.ts > "watch mode resolves the development condition and keeps module and browser, with and without code splitting"
+ * Verified by: packages/build/tests/development-condition.test.ts > "a production build resolves the production files, with module and browser, as it did"
+ */
+const WATCH_RESOLUTION: Pick<esbuild.BuildOptions, 'conditions' | 'define'> = {
+  conditions: ['development', 'module'],
+  define: { 'process.env.NODE_ENV': '"development"' },
+};
+
+// ---------------------------------------------------------------------------
 // Watch Mode: Server-Rendered Pages
 // ---------------------------------------------------------------------------
 
@@ -822,6 +852,8 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
       jsx: 'transform',
       jsxFactory: 'h',
       jsxFragment: 'Fragment',
+      // Watch mode is a development build (FORMA-169); production adds nothing.
+      ...(config.watch ? WATCH_RESOLUTION : {}),
     };
 
     // ── Lazy-load SSR plugin only when needed ─────────────────────────
