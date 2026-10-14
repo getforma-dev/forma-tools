@@ -71,10 +71,15 @@ jobs:
         with:
           persist-credentials: false
       # No cache in this job: a poisoned cache restored here could change the
-      # bytes that publish. (setup-node v4 caches only when `cache:` is set.)
+      # bytes that publish. setup-node v4 caches only when `cache:` is set and
+      # has no `package-manager-cache` input (it warns "Unexpected input"); the
+      # line is there so that a move to v5, which caches on its own when
+      # package.json names a packageManager, keeps the cache off. The lint
+      # requires it.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+          package-manager-cache: false
 
       - name: Name the package the tag releases
         id: pkg
