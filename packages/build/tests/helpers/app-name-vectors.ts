@@ -1,7 +1,7 @@
 // The application-name grammar as data, shared with forma-server.
 //
 // COPIED from getforma-dev/forma, `crates/forma-server/tests/js/app_name_vectors.json`,
-// added with FORMA-130's review follow-up. The build's `app` and forma-server's
+// at commit bcb66a5 (forma PR 16, FORMA-130's review follow-up). The build's `app` and forma-server's
 // `sw::ServiceWorker::for_app` must accept exactly the same names (one string
 // in both places), so both test the same table; a change to the grammar
 // changes both copies in paired PRs. JSON escapes keep the hostile names
