@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **A production build prints its own summary, under `outputDir`** (A2 audit
+  F3, FORMA-180). 0.3.1's bundling pass ran esbuild at `logLevel: 'info'`
+  with the staging directory as its `outdir`, so its summary named
+  `.dist.forma-staging-<pid>-<hex>/home.js`, a path nothing reads. The pass
+  now runs at `logLevel: 'warning'`, and once the files have their hashed
+  names the build prints one line per bundle from esbuild's metafile, as the
+  manifest names it (`dist/home.<hash>.js  12.3kb`), before `N assets
+  hashed`. esbuild's warnings and errors print as before. Watch mode writes
+  in place and keeps esbuild's summary. A script that parses the output
+  should be checked against it.
+
 ## [0.3.1] - 2026-10-14
 
 Release A2, the bridge to 3.0.0: additive, with deprecations. Released with

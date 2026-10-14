@@ -1,6 +1,6 @@
 # Handoff — the compiler cannot resolve imported signal defaults
 
-**Repo:** `getforma-dev/forma-tools`, package `@getforma/compiler` (currently 0.3.1)
+**Repo:** `getforma-dev/forma-tools`, package `@getforma/compiler`
 **Written:** 2026-08-07, from a gatewasm SSR migration that stalled on this.
 **Status:** ✅ SHIPPED in 0.3.2 (2026-08-07). Implemented as specified — see the
 0.3.2 CHANGELOG entry for what landed, including one cause this document did

@@ -13,8 +13,10 @@
 # code and no third-party action beyond the ones it needs, waits for every other
 # job, downloads only this run's packed artefact, checks it against the pack
 # job's record before it publishes, and cannot go on to publish after a failed
-# step or job; and unless the pack job uploads that artefact with
-# `overwrite: true`, so re-running all jobs after a failure replaces it. Ruby's standard library parses the YAML, so the check adds nothing
+# step or job; unless the pack job uploads that artefact with
+# `overwrite: true`, so re-running all jobs after a failure replaces it; and
+# unless every `npm ci` in the workflow is followed by `npm audit signatures`
+# (FORMA-180 F11). Ruby's standard library parses the YAML, so the check adds nothing
 # to the supply chain it guards. The repository-specific part is CONFIG.
 require 'yaml'
 
@@ -385,6 +387,29 @@ def check_pack_job(doc, config, out)
   end
 end
 
+# Every install in the workflow is checked: the next command after `npm ci`,
+# in the same step or the step after it, is `npm audit signatures`, which
+# fails the job when a package's registry signature or attestation does not
+# verify (FORMA-180 F11). The test job installs the tree the suites run and
+# the pack job the tree that produces the bytes that publish.
+def check_signatures(doc, out)
+  jobs_of(doc).each do |name, job|
+    steps = steps_of(job)
+    steps.each_with_index do |step, i|
+      lines = run_of(step).lines.map(&:strip).reject { |l| l.empty? || l.start_with?('#') }
+      lines.each_with_index do |line, j|
+        next unless line =~ /\bnpm\s+ci\b/
+
+        following = lines[j + 1]
+        following ||= steps[i + 1].is_a?(Hash) ? run_of(steps[i + 1]).lines.map(&:strip).reject { |l| l.empty? || l.start_with?('#') }.first : nil
+        next if following.to_s =~ /\Anpm\s+audit\s+signatures\b/
+
+        out << "S1 job `#{name}` step #{i + 1} runs `npm ci` without `npm audit signatures` as the next command; every install must be checked, found #{following.inspect}"
+      end
+    end
+  end
+end
+
 def violations(doc, config = CONFIG)
   out = []
   return ['W0 the workflow is not a mapping'] unless doc.is_a?(Hash)
@@ -397,6 +422,7 @@ def violations(doc, config = CONFIG)
   check_cache_free(doc, config[:pack_job], out, setup_node_off_required: true)
   check_runtime(doc, config[:publish_job], out)
   check_runtime(doc, config[:pack_job], out)
+  check_signatures(doc, out)
   out
 end
 
@@ -518,6 +544,13 @@ SEEDS = [
   ['no record-sha256 output on the pack job', 'K1', ->(d) { pack_job(d)['outputs'].delete('record-sha256') }],
   ['no record written by the pack job', 'K2', ->(d) { pack_job(d)['steps'].reject! { |s| run_of(s) =~ /release-artifacts\.sh record/ } }],
   ['no artefact uploaded by the pack job', 'K3', ->(d) { pack_job(d)['steps'].reject! { |s| action_of(s) == 'actions/upload-artifact' } }],
+  ['the pack job\'s npm ci without npm audit signatures after it', 'S1', ->(d) { pack_job(d)['steps'].reject! { |s| run_of(s) =~ /npm audit signatures/ } }],
+  ['the test job\'s npm ci with its signature check moved after the build', 'S1', lambda do |d|
+    steps = d['jobs']['test']['steps']
+    audit = steps.delete_at(steps.index { |s| run_of(s) =~ /npm audit signatures/ })
+    steps.insert(steps.index { |s| run_of(s) =~ /npm run build/ } + 1, audit)
+  end],
+  ['an npm ci added to the publish job without its signature check', 'S1', ->(d) { publish_steps(d).insert(1, 'run' => "npm ci\nnpm run build\n") }],
 ].freeze
 
 NPM_SEEDS = [

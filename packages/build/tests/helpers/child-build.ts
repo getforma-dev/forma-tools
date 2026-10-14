@@ -20,8 +20,12 @@ export interface ChildBuild {
   manifest?: AssetManifest;
   message?: string;
   diagnostics?: BuildDiagnostic[];
-  /** Everything the child printed. */
+  /** Everything the child printed, both streams in arrival order. */
   output: string;
+  /** What the child printed on stdout: the build's own lines. */
+  stdout: string;
+  /** What the child printed on stderr: esbuild's warnings and errors. */
+  stderr: string;
 }
 
 export async function buildInChild(config: BuildConfig, cwd: string, scratch: string): Promise<ChildBuild> {
@@ -41,9 +45,11 @@ export async function buildInChild(config: BuildConfig, cwd: string, scratch: st
   ].join('\n');
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
   let output = '';
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { output += chunk; });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', chunk => { output += chunk; stdout += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; stderr += chunk; });
   await once(child, 'exit');
   if (!existsSync(result)) throw new Error(`the child build wrote no result:\n${output}`);
-  return { ...JSON.parse(readFileSync(result, 'utf8')), output };
+  return { ...JSON.parse(readFileSync(result, 'utf8')), output, stdout, stderr };
 }
