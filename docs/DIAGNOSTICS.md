@@ -789,7 +789,7 @@ Printed as `BUILD-810 error body_prefix in src/server/mod.rs:772:9 (in index_han
 
 **Fix.** Remove the raw entry and its allowlist entry, or, with its owner, set a new until and say why in reason.
 
-**In the lint.** An error: the run exits 1. `until` is the last day the entry is valid; the day after, it fails, whether or not it still lists anything.
+**In the lint.** An error: the run exits 1. `until` is the last day the entry is valid, in UTC; the day after, it fails, whether or not it still lists anything.
 
 Printed once per entry (`packages/build/tests/raw-lint.test.ts` > "SR8: a seeded body_prefix outside the allowlist fails, and so does an entry past its end date").
 
@@ -819,7 +819,7 @@ Printed once per entry (`packages/build/tests/raw-lint.test.ts` > "BUILD-813: an
 
 **Fix.** Fix the syntax error the message names, or leave the file out with --exclude if it is not source.
 
-**In the lint.** An error: the run exits 1. esbuild parses TypeScript and JavaScript (a `.js` file is also tried as JSX and TypeScript), and an HTML file's inline scripts; a Rust file is tokenized, which does not fail.
+**In the lint.** An error: the run exits 1. esbuild parses TypeScript and JavaScript (a `.js` file is also tried as JSX and TypeScript), and an HTML file's inline scripts (the rest of the HTML file is still read); a Rust file is tokenized, which does not fail. A path that cannot be read, or a symbolic link that leads nowhere or loops, is one too, unless its name says it is not source; `--exclude` and the skipped names are applied before anything is read.
 
 Printed with esbuild's message and position (`packages/build/tests/raw-lint.test.ts` > "BUILD-814: a file esbuild cannot parse fails the run at its line, and so does an inline script").
 
