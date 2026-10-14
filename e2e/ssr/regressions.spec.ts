@@ -16,7 +16,8 @@
  * before the defect assertion. So a broken harness fails the test for real
  * (a precondition fails before the marker); only the named defect is an
  * expected failure; and when the fix lands, the unexpected pass turns CI red
- * until that one line is removed.
+ * until that one line is removed. FORMA-002 and FORMA-003 have flipped theirs
+ * (each now says "Fixed by"); generic-state is still expected to fail.
  *
  * The table "every case is server-rendered and activates" adds the shared
  * controls (the walker's HTML, activation, Phase 1, no console errors), and
@@ -220,11 +221,9 @@ test.describe('root-fragment', () => {
     await expect(page.locator('#note')).toHaveText('hello');
     await page.click('#go');
 
-    // Expected to fail until FORMA-003 adopts a Fragment as the range of its
-    // children (DR-7 a). Today h(Fragment) builds a real DocumentFragment
-    // while hydrating, adoption treats it as nothing to adopt, removes
-    // data-forma-ssr, and binds no handler.
-    test.fail();
+    // Fixed by FORMA-003 (DR-7 a): a Fragment is adopted as the range of its
+    // children. Before it, adoption treated h(Fragment)'s DocumentFragment as
+    // nothing to adopt, removed data-forma-ssr, and bound no handler.
     await expect(page.locator('#note')).toHaveText('bye', SETTLE);
   });
 });
@@ -240,10 +239,9 @@ test.describe('textarea-child', () => {
     await noJs.close();
     expect(value, "the server's value is in the textarea").toContain('hello');
 
-    // Expected to fail until FORMA-002 stops the walker writing f: markers
-    // inside RCDATA parents (DR-7 b). Today the value, and what the form
-    // submits, is `<!--f:t0-->hello<!--/f:t0-->`.
-    test.fail();
+    // Fixed by FORMA-002 (DR-7 b): no f: markers inside RCDATA parents.
+    // Before it, the value, and what the form submitted, was
+    // `<!--f:t0-->hello<!--/f:t0-->`.
     expect({ value, submitted: sent }).toEqual({ value: 'hello', submitted: ['hello'] });
   });
 
@@ -271,10 +269,9 @@ test.describe('textarea-value', () => {
     const sent = await submitted(noJs.page, 'ta');
     await noJs.close();
 
-    // Expected to fail until FORMA-002 writes a textarea's value binding as its
-    // text (DR-7 c). Today the server writes value="hello", which a textarea
-    // ignores, so it is empty and submits "".
-    test.fail();
+    // Fixed by FORMA-002 (DR-7 c): a textarea's value binding is written as its
+    // text. Before it, the server wrote value="hello", which a textarea
+    // ignores, so it was empty and submitted "".
     expect({ value, submitted: sent }).toEqual({ value: 'hello', submitted: ['hello'] });
   });
 
@@ -283,10 +280,9 @@ test.describe('textarea-value', () => {
     await expect(page.locator('form#f textarea#ta')).toHaveCount(1);
     await expect(page.locator('#update')).toBeVisible();
 
-    // Expected to fail until FORMA-003 writes `value` as the live property
-    // (042e353's writer, kept for writes after activation). Today only the
-    // attribute is written, which a textarea ignores.
-    test.fail();
+    // Fixed by FORMA-003: `value` is written as the live property (042e353's
+    // writer, kept for writes after activation). Before it, only the
+    // attribute was written, which a textarea ignores.
     await expect(page.locator('#ta')).toHaveValue('hello', SETTLE);
     await page.click('#update');
     await expect(page.locator('#ta')).toHaveValue('updated', SETTLE);
@@ -297,9 +293,7 @@ test.describe('textarea-value', () => {
     await expect(page.locator('form#f textarea#ta')).toHaveCount(1);
     await expect(page.locator('#update')).toBeVisible();
 
-    // Expected to fail until FORMA-003, as above: the client-rendered path
-    // writes the same attribute.
-    test.fail();
+    // Fixed by FORMA-003, as above, on the client-rendered path.
     await expect(page.locator('#ta')).toHaveValue('hello', SETTLE);
     await page.click('#update');
     await expect(page.locator('#ta')).toHaveValue('updated', SETTLE);
@@ -314,10 +308,8 @@ test.describe('title', () => {
     await noJs.close();
     expect(text, "the server's value is in the element").toContain('hello');
 
-    // Expected to fail until FORMA-002 stops the walker writing f: markers
-    // inside RCDATA parents (DR-7 b). Today the element's text is the marker
-    // text, `<!--f:t0-->hello<!--/f:t0-->`.
-    test.fail();
+    // Fixed by FORMA-002 (DR-7 b): no f: markers inside RCDATA parents.
+    // Before it, the element's text was `<!--f:t0-->hello<!--/f:t0-->`.
     expect(text).toBe('hello');
   });
 
@@ -343,10 +335,9 @@ test.describe('select', () => {
     const sent = await submitted(noJs.page, 'choice');
     await noJs.close();
 
-    // Expected to fail until FORMA-002 writes `selected` on the matching option
-    // (DR-7 c). Today the server writes value="b" on the select, which HTML
-    // ignores, so the first option is selected and submitted.
-    test.fail();
+    // Fixed by FORMA-002 (DR-7 c): `selected` is written on the matching
+    // option. Before it, the server wrote value="b" on the select, which HTML
+    // ignores, so the first option was selected and submitted.
     expect({ ...state, submitted: sent }).toEqual({ value: 'b', index: 1, submitted: ['b'] });
   });
 
@@ -355,10 +346,9 @@ test.describe('select', () => {
     await expect(page.locator('form#f select#choice option')).toHaveText(['A', 'B', 'C']);
     await expect(page.locator('#pick-c')).toBeVisible();
 
-    // Expected to fail until FORMA-003 writes a select's value as the live
-    // property after its options exist (042e353's writer). Today only the
-    // attribute is written, and the first option stays selected.
-    test.fail();
+    // Fixed by FORMA-003: a select's value is written as the live property
+    // after its options exist (042e353's writer). Before it, only the
+    // attribute was written, and the first option stayed selected.
     expect(await selectState(page, '#choice')).toEqual({ value: 'b', index: 1 });
     await page.click('#pick-c');
     await expect(page.locator('#choice')).toHaveValue('c', SETTLE);
@@ -370,8 +360,7 @@ test.describe('select', () => {
     await expect(page.locator('form#f select#choice option')).toHaveText(['A', 'B', 'C']);
     await expect(page.locator('#pick-c')).toBeVisible();
 
-    // Expected to fail until FORMA-003, as above, on the client-rendered path.
-    test.fail();
+    // Fixed by FORMA-003, as above, on the client-rendered path.
     expect(await selectState(page, '#choice')).toEqual({ value: 'b', index: 1 });
     await page.click('#pick-c');
     await expect(page.locator('#choice')).toHaveValue('c', SETTLE);
