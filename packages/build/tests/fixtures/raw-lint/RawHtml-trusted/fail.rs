@@ -1,6 +1,6 @@
 use forma_server::{AssetManifest, PageConfig, RawHtml};
 
-// GateWASM's shape: a tenant logo the handler escapes before vouching for it.
+// fAuth's shape: a tenant logo the handler escapes before vouching for it.
 pub fn logo(url: &str) -> RawHtml {
     RawHtml::trusted(format!("<img src=\"{url}\" alt=\"\">")) // expect: RawHtml::trusted in logo
 }

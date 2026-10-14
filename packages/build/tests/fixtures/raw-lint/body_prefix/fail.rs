@@ -11,7 +11,7 @@ pub fn index(manifest: &AssetManifest) {
     };
 }
 
-// GateWASM's shape: a logo escaped by hand.
+// fAuth's shape: a logo escaped by hand.
 pub fn login(logo_html: String) {
     let config = PageConfig {
         body_prefix: if logo_html.is_empty() { None } else { Some(&logo_html) }, // expect: body_prefix in login

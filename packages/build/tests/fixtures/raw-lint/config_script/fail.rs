@@ -1,4 +1,4 @@
-// GateWASM's shape: handler text in the deprecated script field.
+// fAuth's shape: handler text in the deprecated script field.
 pub fn page(script: &str) {
     #[allow(deprecated)]
     let config = PageConfig {
