@@ -696,9 +696,11 @@ function inlinedWalkContext(
  * MUST run at the walk entry points BEFORE any nested walk spread-copies the
  * context ({ ...walkCtx, ... }): a registry first created lazily on a COPY
  * dies with that copy, and a later sibling construct would recreate it and
- * mint DUPLICATE slot names (e.g. two `list:todos:array` slots), which
- * collapse in the Rust name→id map (last-insert-wins). Covers hand-built
- * test contexts as well as the root contexts built by the SSR plugin.
+ * mint DUPLICATE slot names (e.g. two `list:todos:array` slots); `forma-ir`
+ * resolves a name to the first slot in table order (the rule is stated once,
+ * at its `IrModule::slot_id_by_name`), so the later twin is unreachable by
+ * name. Covers hand-built test contexts as well as the root contexts built by
+ * the SSR plugin.
  * Every slot-name family that can collide page-wide is registered here —
  * list, show, attr and text.
  * Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes a dynamic attr inside an island against one on the page"
@@ -1826,9 +1828,10 @@ function deriveBindingName(node: t.Node | null | undefined): string | null {
  * Dynamic attributes (`attr:<key>`) and dynamic text children
  * (`text:<childIndex>`) run the SAME occurrence scheme over their own
  * page-wide registries — see attrSlotName / textSlotName. Every slot name a
- * page emits is therefore unique, which the Rust name→id map requires: it
- * inserts each name into one HashMap, so a duplicate silently makes the
- * earlier slot unreachable for server-side SlotData injection.
+ * page emits is therefore unique, which `forma-ir` requires: it resolves a
+ * name to the first slot in table order (`IrModule::slot_id_by_name`), so a
+ * duplicate silently makes the later slot unreachable for server-side
+ * SlotData injection.
  * Verified by: packages/compiler/tests/ir-walk.test.ts > "dedupes two dynamic attrs sharing a key on sibling elements"
  *
  * Binary format:
