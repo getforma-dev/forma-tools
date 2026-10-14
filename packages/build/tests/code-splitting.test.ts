@@ -10,7 +10,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from '../src/build';
 
 const temporary: string[] = [];
-afterEach(() => temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
+// A watched build's esbuild service can still be writing for a moment after
+// its process is killed, so removal retries ENOTEMPTY.
+afterEach(() => temporary.splice(0).forEach(path => rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })));
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'forma-split-')); temporary.push(root);
   const src = join(root, 'src'); const dist = join(root, 'dist'); mkdirSync(src);
