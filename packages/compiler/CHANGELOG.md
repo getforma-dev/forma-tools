@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Release and CI install with `npm ci` (DR-32, FORMA-010; the package is unchanged).** `release.yml`, `ci.yml` and `compat.yml` install exactly what `package-lock.json` records instead of running `npm install`; `compat.yml` still installs the newest `@getforma/core` on top, deliberately. Each `uses:` names the commit its tag or branch pointed to on 2026-10-14, with the ref in a comment, and every CI job declares `contents: read`; `release.yml` keeps its workflow-level `contents: read` and `id-token: write`.
+
 ### Deprecated
 - **The Vite plugins `formaCompiler` and `formaServer` are deprecated, and are removed in 3.0.0 (L-23).** Each logs a deprecation naming 3.0.0, once per process, when it is created.
   - `formaCompiler`'s compiled output does not behave like runtime `h()`. Probes against core 2.0.1 in FORMA-007's review found that an island hydrated over server markup gets no handlers or updates, a signal getter as a child renders as source text, style objects are dropped, and more. The README now says the path is unsupported and why.
