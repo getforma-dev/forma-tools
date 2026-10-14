@@ -15,6 +15,31 @@ npm install -D @getforma/compiler
 
 ## Vite Plugin — `formaCompiler`
 
+> **Deprecated: unsupported, and removed in 3.0.0.** Its compiled output does
+> not behave like runtime `h()`, which is what FormaJS documents and tests.
+> Probes against `@getforma/core` 2.0.1 found that:
+>
+> - an island hydrated over server-rendered markup gets no handlers or updates, with no error;
+> - a signal getter passed as a child renders as its source text;
+> - `style` objects are dropped;
+> - `null` and `false` values render as text;
+> - some sibling text children make the compiled code throw.
+>
+> None of the stack's applications uses it. Remove the plugin, since FormaJS
+> runs without it. To build an application, use `@getforma/build`, which keeps
+> runtime `h()`. The plugin logs this once when it is created.
+>
+> Until 3.0.0 the plugin does not bypass core's attribute guard. An element
+> carrying any of the following is left to runtime `h()`, which checks it on
+> the first render and on every update:
+>
+> - a URL attribute (`href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `background`, `data`) whose value is not a literal;
+> - such an attribute whose literal value has a scheme (`javascript:`, `https:`);
+> - an `on…` attribute that is not an `onX` listener (`ONCLICK`, `onclick`).
+> - a tag or attribute name that is not well formed (`'href '`, `'x onclick'`), which runtime `h()` rejects.
+>
+> Literal relative URLs (`/about`, `#top`) still compile into the template.
+
 Transforms `h()` calls into `template()` + `cloneNode()` at build time. Instead of creating DOM elements one by one at runtime, the browser clones a pre-built template — significantly faster for complex component trees.
 
 ```ts
@@ -64,6 +89,10 @@ transformed only if it matches an include pattern, no exclude pattern, and
 imports from `formajs` / `forma/`.
 
 ## Server Functions — `formaServer`
+
+> **Deprecated: removed in 3.0.0, together with server functions.** No
+> application of the Forma stack uses them. The plugin logs this once when it
+> is created.
 
 Transforms functions with the `"use server"` directive into RPC stubs (client build) or registered endpoints (server build).
 
@@ -418,8 +447,8 @@ whole pipeline (analyzer + walker + emitter) and returns `{ binary, islands }`.
 | Scenario | Need compiler? |
 |----------|---------------|
 | Learning FormaJS, building prototypes | No |
-| Production app with Vite | Optional — adds faster rendering |
-| `"use server"` functions (RPC) | Yes — transforms the directive |
+| Production app with Vite | No: the Vite plugins are deprecated and unsupported (removed in 3.0.0); FormaJS runs without them |
+| `"use server"` functions (RPC) | Deprecated: removed in 3.0.0 with `formaServer` |
 | Rust SSR with `forma-server` | Yes — emits FMIR binary |
 | HTML Runtime (`data-*` directives) | No — runtime handles everything |
 

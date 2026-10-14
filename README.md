@@ -39,7 +39,7 @@ Build tooling for [FormaJS](https://github.com/getforma-dev/formajs) — the rea
 
 | Package | npm | What it does |
 |---------|-----|-------------|
-| [`@getforma/compiler`](packages/compiler) | [![npm](https://img.shields.io/npm/v/@getforma/compiler)](https://www.npmjs.com/package/@getforma/compiler) | Vite plugin that compiles `h()` → `template()` + `cloneNode()`. Server function transforms. esbuild SSR plugin for FMIR emission. |
+| [`@getforma/compiler`](packages/compiler) | [![npm](https://img.shields.io/npm/v/@getforma/compiler)](https://www.npmjs.com/package/@getforma/compiler) | esbuild SSR plugin for FMIR emission. The Vite plugins (`formaCompiler`, `formaServer`) are deprecated and removed in 3.0.0. |
 | [`@getforma/build`](packages/build) | [![npm](https://img.shields.io/npm/v/@getforma/build)](https://www.npmjs.com/package/@getforma/build) | Production build pipeline — esbuild bundling, content hashing, Brotli/gzip compression, asset manifest, SSR IR emission. |
 
 ## When Do You Need These?
@@ -47,8 +47,7 @@ Build tooling for [FormaJS](https://github.com/getforma-dev/formajs) — the rea
 | You want to... | Install |
 |----------------|---------|
 | Use FormaJS with Vite (no compilation) | Nothing — just `@getforma/core` |
-| Faster rendering via compiled templates | `npm install -D @getforma/compiler` |
-| `"use server"` RPC functions | `npm install -D @getforma/compiler` |
+| Compiled templates or `"use server"` functions in Vite | Deprecated: the Vite plugins are unsupported and removed in 3.0.0 ([why](packages/compiler/README.md#vite-plugin--formacompiler)) |
 | Production build with hashing + compression | `npm install -D @getforma/build` |
 | Rust SSR with `forma-server` | `npm install -D @getforma/build` |
 
@@ -56,7 +55,11 @@ Build tooling for [FormaJS](https://github.com/getforma-dev/formajs) — the rea
 
 ## Quick Start
 
-### With Vite (compiler only)
+### With Vite (compiler only): deprecated
+
+Unsupported, and removed in 3.0.0: the compiled output does not behave like
+runtime `h()` ([why](packages/compiler/README.md#vite-plugin--formacompiler)).
+FormaJS runs in Vite without it.
 
 ```ts
 // vite.config.ts

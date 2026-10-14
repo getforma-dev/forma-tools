@@ -10,9 +10,17 @@
  * `vendor/x.ts`. Windows ids — backslash-separated — matched no pattern at all.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Plugin } from 'vite';
 import { formaCompiler, formaServer } from '../src/index';
+
+// These tests create the Vite plugins, which log their deprecation once
+// (pinned in vite-plugin-deprecation.test.ts). Keep that line out of this
+// file's output; every other warning still prints.
+const consoleWarn = console.warn;
+vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+  if (!String(args[0]).startsWith('[@getforma/compiler]')) consoleWarn(...args);
+});
 
 /** Invoke a plugin's transform hook the way Vite does. */
 function runTransform(plugin: Plugin, code: string, id: string): string | null {

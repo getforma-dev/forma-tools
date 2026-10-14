@@ -4,6 +4,9 @@
  * A Vite plugin that transforms `h()` hyperscript calls into optimized
  * `template()` + `cloneNode(true)` code at build time.
  *
+ * Deprecated, with `formaServer` below: both are removed in 3.0.0 (L-23).
+ * `@getforma/build`, which keeps runtime `h()`, is the one supported build.
+ *
  * Usage:
  * ```ts
  * // vite.config.ts
@@ -18,6 +21,35 @@
 import type { Plugin } from 'vite';
 import { compileFormaJSX } from './transform.js';
 import { transformServerFunctions, type ServerTransformOptions } from './server-transform.js';
+
+/**
+ * Why each Vite plugin is going. The compiled template path's output does not
+ * behave like runtime `h()` (FORMA-007's review, probes against core 2.0.1),
+ * and none of the stack's applications uses either plugin.
+ */
+const DEPRECATIONS = {
+  formaCompiler:
+    'formaCompiler is deprecated and will be removed in 3.0.0, together with the compiled template path. ' +
+    'Its output does not behave like runtime h(): an island hydrated over server-rendered markup gets no handlers or updates, ' +
+    'a signal getter as a child renders as source text, and style objects are dropped. ' +
+    'Remove the plugin (FormaJS runs without it); @getforma/build is the supported build.',
+  formaServer:
+    'formaServer is deprecated and will be removed in 3.0.0, together with server functions ("use server"). ' +
+    'No application of the Forma stack uses them.',
+} as const;
+
+const warned = new Set<keyof typeof DEPRECATIONS>();
+
+/**
+ * Log a plugin's deprecation once per process, however many times its factory
+ * runs (Vite may evaluate its config more than once).
+ * Verified by: packages/compiler/tests/vite-plugin-deprecation.test.ts > "formaCompiler logs its deprecation once, naming 3.0.0"
+ */
+function deprecated(name: keyof typeof DEPRECATIONS): void {
+  if (warned.has(name)) return;
+  warned.add(name);
+  console.warn(`[@getforma/compiler] ${DEPRECATIONS[name]}`);
+}
 
 export interface FormaCompilerOptions {
   /** Glob patterns for files to include. Defaults to `['**\/*.ts', '**\/*.tsx']`. */
@@ -71,7 +103,12 @@ function normalizeId(id: string): string {
   return withoutQuery.replace(/\\/g, '/');
 }
 
+/**
+ * @deprecated Removed in 3.0.0 (L-23): the compiled template path differs from
+ * runtime `h()`. Use `@getforma/build`, or no plugin at all.
+ */
 export function formaCompiler(options?: FormaCompilerOptions): Plugin {
+  deprecated('formaCompiler');
   const includePatterns = (options?.include ?? ['**/*.ts', '**/*.tsx']).map(globToRegExp);
   const excludePatterns = (options?.exclude ?? ['**/node_modules/**']).map(globToRegExp);
 
@@ -126,8 +163,11 @@ export interface FormaServerOptions {
  *   plugins: [formaServer({ mode: 'client' })],
  * });
  * ```
+ *
+ * @deprecated Removed in 3.0.0 with server functions (L-23, DR-22).
  */
 export function formaServer(options?: FormaServerOptions): Plugin {
+  deprecated('formaServer');
   const mode = options?.mode ?? 'client';
 
   return {
