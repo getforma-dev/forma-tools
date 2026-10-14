@@ -67,8 +67,8 @@ function hashEndpoint(name: string, source: string): string {
  * The line `transformServerFunctions` logs on its first call. Server functions
  * are removed in 3.0.0 (FORMA-131; DR-22), with `@getforma/core/server` and
  * `formaServer`. BUILD-901 opens a family for the compiler's own deprecated
- * entry points, BUILD-9xx, not yet in docs/DIAGNOSTICS.md (FORMA-119's
- * catalogue, in review, numbers the constructs 1xx to 7xx and the build 8xx).
+ * entry points, BUILD-9xx, in docs/DIAGNOSTICS.md beside the constructs
+ * (1xx to 7xx) and the build's codes (8xx).
  */
 const DEPRECATION =
   '[@getforma/compiler] BUILD-901 transformServerFunctions, the "use server" transform, is deprecated ' +

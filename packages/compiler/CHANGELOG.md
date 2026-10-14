@@ -2,10 +2,34 @@
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-10-14
+
+Release A2, the bridge to 3.0.0: additive, with deprecations. Released with
+`@getforma/build` 0.3.1, whose `--strict` needs this version.
+
+### Upgrading from 0.3.6: what an application may meet
+
+- **Each `IR:` warning carries a code and a position** (`IR: BUILD-101 ...
+  in /app/src/home/app.tsx:12:11 — ...`). The text around them is 0.3.6's,
+  with a few deliberate exceptions (`docs/DIAGNOSTICS.md`, "What a diagnostic
+  looks like"): three page-level lines now name the entry, a literal past
+  65,535 bytes is reported where it is written, BUILD-701 to BUILD-707 word
+  their constructs anew, and **BUILD-303 adds a line** for a `createList`
+  over a plain read of a signal initialised with literal rows. A gate that
+  counts or matches these lines should be checked against the new text.
+- **The same modules.** A page that does not use `browserOnly()` compiles to
+  the same bytes; `npm run emit:corpus` emits the same 14 modules.
+- **Deprecation lines, once per process:** creating `formaCompiler` or
+  `formaServer`, and the first call of `transformServerFunctions`
+  (`BUILD-901`).
+- **`formaCompiler`'s output routes URL attributes through core's guard**
+  (Security): a `javascript:` URL it used to write is dropped, as runtime
+  `h()` drops it.
+
 ### Added
 - **`DIAGNOSTIC_CATALOGUE` carries the preview frame's codes, `BUILD-805` to `BUILD-807` (FORMA-175).** `@getforma/build`'s `previewFrame` reports them when the `@getforma/core` the bundles import has no `dist/formajs-frame.global.js` (`BUILD-805`), when that runtime cannot be inlined as forma-server's `PreviewFrame::load` inlines it (`BUILD-806`: empty, not UTF-8, `</script`, `<!--`, a carriage return or a NUL), and when the bundles import more than one core whose frame runtimes differ (`BUILD-807`). Each is an error that fails the build with or without strict mode; none is a note. `docs/DIAGNOSTICS.md` documents them (`tests/diagnostics-conformance.test.ts` keeps the catalogue and the page equal; no code can be written as a page, so each is tested in `packages/build/tests/preview-frame.test.ts`).
 - **`DIAGNOSTIC_CATALOGUE` carries the raw-entry lint's codes, `BUILD-810` to `BUILD-814` (FORMA-126, SR8).** `@getforma/build`'s `forma-raw-lint` reports them (a raw entry not on the allowlist, an entry past its end date, an allowlist it cannot use, an entry that lists nothing, a source it cannot parse); they are never in a build's report. `BUILD-813` is a note, as the deprecations are. The compiler's behaviour is unchanged. Tests: `tests/diagnostics-conformance.test.ts` (the catalogue and `docs/DIAGNOSTICS.md` checked against each other, as for every code) and the build package's `tests/raw-lint.test.ts` > "the compiler catalogue and docs/DIAGNOSTICS.md carry BUILD-810 to BUILD-814 as the lint reports them".
-- **Coded build diagnostics (FORMA-119; DR-1 migration step 1, L-3, N12).** Every construct the compiler cannot represent in a server-rendered module (rule 11's anonymous islands, dropped attributes and text, unmatched children, dynamic tags, components from a package or past the 3-level inlining limit, placeholder modules, a literal past 65,535 bytes, unnamed signals) is reported with a stable code numbered by family (`BUILD-101` to `BUILD-901`, 53 codes in 9 families; the build package reports `BUILD-801` to `BUILD-804`, its raw-entry lint `BUILD-810` to `BUILD-814` (FORMA-126, above), and `BUILD-901` is `transformServerFunctions`' deprecation, FORMA-131), the file, the line and the column, one line of why and one of fix. `docs/DIAGNOSTICS.md` documents each code; `DIAGNOSTIC_CATALOGUE` exports them; `collectDiagnostics(fn)` returns those reported while `fn` runs.
+- **Coded build diagnostics (FORMA-119; DR-1 migration step 1, L-3, N12).** Every construct the compiler cannot represent in a server-rendered module (rule 11's anonymous islands, dropped attributes and text, unmatched children, dynamic tags, components from a package or past the 3-level inlining limit, placeholder modules, a literal past 65,535 bytes, unnamed signals) is reported with a stable code numbered by family (`BUILD-101` to `BUILD-901`, 56 codes in 9 families; the build package reports `BUILD-801` to `BUILD-807` (`BUILD-805` to `BUILD-807` its preview frame, FORMA-175, below), its raw-entry lint `BUILD-810` to `BUILD-814` (FORMA-126, above), and `BUILD-901` is `transformServerFunctions`' deprecation, FORMA-131), the file, the line and the column, one line of why and one of fix. `docs/DIAGNOSTICS.md` documents each code; `DIAGNOSTIC_CATALOGUE` exports them; `collectDiagnostics(fn)` returns those reported while `fn` runs.
   - **The default output does not change but for the code and the position.** Each report prints the line 0.3.6 printed, one `console.warn` per construct, with the code after `IR:` and `:line:column` after the file; no line is added or removed, so GateWASM's per-file count and ksx Studio's text matches see what they saw. Exceptions: `inline return node is not a call expression`, `real emission failed` and the module-write failure now name the entry file (the last also starts with `IR:`); a literal past 65,535 bytes is reported where it is written (`BUILD-604`) instead of as `real emission failed`; the constructs below get their own wording; and **`BUILD-303` adds a line** where 0.3.6 printed none, for a `createList` over literal rows (below), so a gate that counts these lines sees one more per such list (GateWASM `b750ca5` and ksx Studio `0cb57e2` have none).
   - **Positions in `.tsx` and `.jsx` are the author's.** The JSX transform's source map (esbuild, `sourcemap: 'external'`, whose code is byte-identical to a transform without one) takes a node's position back to the line written.
   - **`BUILD-403` names the composition chain** from the page down (`(chain: HomePage > Layout > Card > Panel > Badge)`, and `chain` in the data), so composition past the inlining limit can be counted in strict mode (L-26).
@@ -24,11 +48,20 @@
 - **The release's artefact upload can be re-run (A2 audit S7, FORMA-179; the package is unchanged).** The release's `pack` job uploads `release-packed` with `overwrite: true`, so re-running all jobs after a failure replaces the earlier attempt's artefact instead of failing on its name (A2 audit S7); `publish` still checks every file against the record whose hash `pack` passes as a job output. The SR43 lint's new rule K4 requires it, with two seeds in `--self-test`.
 
 ### Deprecated
+
+Each keeps working through 0.3.x, logs its deprecation, and goes in 3.0.0:
+
+| Deprecated in 0.3.7 | Use instead (3.0.0's form) |
+|---|---|
+| the Vite plugin `formaCompiler` (compiled output) | `@getforma/build`, which keeps runtime `h()` |
+| the Vite plugin `formaServer` | a route in the application's Rust server (server functions go in 3.0.0) |
+| `transformServerFunctions`, the `"use server"` transform (`BUILD-901`) | a route in the application's Rust server |
+
 - **The Vite plugins `formaCompiler` and `formaServer` are deprecated, and are removed in 3.0.0 (L-23).** Each logs a deprecation naming 3.0.0, once per process, when it is created.
   - `formaCompiler`'s compiled output does not behave like runtime `h()`. Probes against core 2.0.1 in FORMA-007's review found that an island hydrated over server markup gets no handlers or updates, a signal getter as a child renders as source text, style objects are dropped, and more. The README now says the path is unsupported and why.
   - `formaServer` goes with server functions (DR-22).
   - No application of the stack uses either plugin. `@getforma/build`, which keeps runtime `h()`, is the supported build, and nothing that `formaSsrPlugin` or the FMIR emitter does changes.
-- **`transformServerFunctions`, the `"use server"` transform, is deprecated, and is removed in 3.0.0 with server functions** (FORMA-131; DR-22), as `@getforma/core/server` is in core 2.1.0. Its first call in a process logs `[@getforma/compiler] BUILD-901 transformServerFunctions, the "use server" transform, is deprecated…`, whatever the module holds, and it is marked `@deprecated`. What it writes is unchanged, and so is the FMIR corpus: `npm run emit:corpus` emits the same 14 modules byte for byte. `formaServer` runs it, so a `formaServer` build now logs this line as well as the plugin's own. BUILD-901 opens a family for the compiler's own deprecated entry points, BUILD-9xx, not yet in `docs/DIAGNOSTICS.md` (FORMA-119's catalogue, still in review). Test: `tests/server-transform-deprecation.test.ts` > "transformServerFunctions logs BUILD-901 once, naming 3.0.0" (which also checks the stub and the registration are still written). `tests/formajs-contract.test.ts` keeps the line out of its output, as the plugins' tests do.
+- **`transformServerFunctions`, the `"use server"` transform, is deprecated, and is removed in 3.0.0 with server functions** (FORMA-131; DR-22), as `@getforma/core/server` is in core 2.1.0. Its first call in a process logs `[@getforma/compiler] BUILD-901 transformServerFunctions, the "use server" transform, is deprecated…`, whatever the module holds, and it is marked `@deprecated`. What it writes is unchanged, and so is the FMIR corpus: `npm run emit:corpus` emits the same 14 modules byte for byte. `formaServer` runs it, so a `formaServer` build now logs this line as well as the plugin's own. BUILD-901 opens a family for the compiler's own deprecated entry points, BUILD-9xx, documented in `docs/DIAGNOSTICS.md` with the rest of the catalogue. Test: `tests/server-transform-deprecation.test.ts` > "transformServerFunctions logs BUILD-901 once, naming 3.0.0" (which also checks the stub and the registration are still written). `tests/formajs-contract.test.ts` keeps the line out of its output, as the plugins' tests do.
 
 ### Security
 - **`formaCompiler`'s output no longer bypasses core's attribute guard.** It used to write, with its own `setAttribute`, a URL attribute whose value came from a variable or a getter, so `href: url` with `url = 'javascript:alert(1)'` was written where runtime `h()` drops it. It also baked a static `javascript:` URL and a static `ONCLICK` string into the template, and ran a lowercase `onclick` function at render.

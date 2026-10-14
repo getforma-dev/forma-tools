@@ -2,7 +2,8 @@
   "name": "forma-tools",
   "private": true,
   "workspaces": [
-    "packages/*"
+    "packages/compiler",
+    "packages/build"
   ],
   "scripts": {
     "test": "npm run test --workspaces",
