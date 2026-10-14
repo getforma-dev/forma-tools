@@ -1,29 +1,23 @@
 # Changelog
 
-## [0.2.2-ledger.2] - 2026-09-13 (local, unpublished)
+## [Unreleased]
 
-### Added
-- Optional `serviceWorker: 'on-demand'` installs without downloading assets, so deferred tools remain deferred and installation does not compete with first paint.
-- On-demand caching is restricted to exact content-hashed manifest JS/CSS/WASM URLs and successful, non-redirected immutable asset responses. Navigations, APIs, query URLs, private/no-store responses and unknown asset paths are excluded.
-- CacheStorage and quota failures no longer turn a successful asset request into a failed page load in on-demand mode. Existing precache behavior remains the default; watch mode remains network-only.
-- Generated-worker tests execute cache eligibility and storage-failure behavior; the build integration test verifies the emitted manifest allowlist.
+Consolidated from the local, unpublished builds Ledger vendors as `0.2.1-ledger.1`, `0.2.2-ledger.1` and `0.2.2-ledger.2` (checkpoint `205b612`). None of those labels was published; the version is set at release.
 
-## [0.2.2-ledger.1] - 2026-09-13 (local, unpublished)
+### Fixed
+- **Production workers no longer delete caches they do not own.** Activation deleted every cache on the origin except the worker's own, including other applications', and lookups matched requests against all of them. The worker now deletes only older `forma-` caches, reads only its own cache, and keeps content-hashed assets cache-first.
+- **Development workers (watch mode) are network-only.** They bypass CacheStorage and the HTTP cache for stable asset URLs, take over from an old cache-first worker, and remove obsolete `forma-` caches, so rebuilt CSS and JavaScript appear on reload.
+- Generated workers intercept only same-origin `GET` requests; cross-origin requests and writes pass through untouched.
 
 ### Added
 - Opt-in `codeSplitting` builds one shared ESM graph, retains native dynamic imports, and preserves esbuild's linked content hashes. Chunks are compressed and included in the asset manifest without renaming their import targets.
-- Routes expose static-only `modulepreload` dependencies and count those dependencies in byte budgets. Lazy chunks are excluded from initial preload/budget totals.
-- `BuildEntry.ssr: false` permits browser-only personal-vault routes beside SSR household routes. Split watch mode refreshes graph manifests and removes obsolete emitted chunks.
-- Executable multi-entry singleton/dynamic-import, linked invalidation, mixed SSR, inlining, and watched graph regression tests.
-
-## [0.2.1-ledger.1] - 2026-09-10 (local, unpublished)
-
-### Fixed
-- Development workers bypass CacheStorage and the HTTP cache for stable asset URLs, take over from old cache-first workers, and remove obsolete Forma caches. Rebuilt CSS and JavaScript appear on reload.
-- Production workers keep content-hashed assets cache-first, look up only their own cache, and leave unrelated application caches untouched.
-
-### Added
-- Generated-worker unit coverage and a real controlled-browser upgrade/rebuild regression (`npm run test:browser -w packages/build`).
+- Routes expose static-only `modulepreload` dependencies and count those dependencies in byte budgets. Lazy chunks are excluded from initial preload and budget totals.
+- `BuildEntry.ssr: false` keeps one entry browser-only in an otherwise SSR application. Split watch mode refreshes graph manifests and removes obsolete emitted chunks.
+- Optional `serviceWorker: 'on-demand'` installs without downloading assets, so deferred tools remain deferred and installation does not compete with first paint.
+- On-demand caching is restricted to exact content-hashed manifest JS/CSS/WASM URLs and successful, non-redirected immutable asset responses. Navigations, APIs, query URLs, private/no-store responses and unknown asset paths are excluded.
+- CacheStorage and quota failures no longer turn a successful asset request into a failed page load in on-demand mode. Precache remains the default; watch mode remains network-only.
+- Config validation rejects two `entryPoints` that share an `outfile`; both bundles were written to one file and the route served whichever finished last.
+- Tests: generated-worker unit coverage (cache scoping, development takeover, on-demand eligibility and storage failures); code-splitting builds (multi-entry singleton and dynamic import, linked invalidation, mixed SSR, server-inlined copies, watched graph, the on-demand allowlist); and a controlled-browser upgrade and rebuild regression, `npm run test:browser -w packages/build`.
 
 ## [0.2.0] - 2026-08-06
 
