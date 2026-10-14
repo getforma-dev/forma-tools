@@ -58,6 +58,62 @@ const BOOLEAN_ATTRS = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
+// Attributes core guards (left to runtime h())
+// ---------------------------------------------------------------------------
+
+/**
+ * Attributes whose value is resolved as a URL: the set core's guard checks
+ * (`URL_ATTRS` in FormaJS's `src/security/url-safety.ts`).
+ */
+const URL_ATTRS = new Set([
+  'href', 'src', 'action', 'formaction', 'xlink:href', 'poster', 'background', 'data',
+]);
+
+/** Characters a URL parser ignores when it reads the scheme (as core strips them). */
+const URL_IGNORED_CHARS_RE = /[\u0000-\u0020\u007F-\u009F]/g;
+
+/** A URL scheme, such as `javascript:` or `https:`. */
+const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * A well-formed tag or attribute name: core's pattern (`isSafeAttrName`,
+ * `isSafeTagName`). The template writes names verbatim, so a key such as
+ * `'href '` or `'x onclick'`, or a tag such as `'img src=x onerror=…'`, would
+ * add an attribute core never checks. Like every other construct the compiler
+ * cannot compile (a dynamic tag, a spread, a computed key), such an element is
+ * left to runtime `h()` rather than refused at build: there, `createElement`
+ * or `setAttribute` throws, exactly as it does without the plugin.
+ * Verified by: packages/compiler/tests/vite-plugin-deprecation.test.ts > "leaves <a 'x onclick': 'alert(1)'> to runtime h()"
+ */
+const SAFE_NAME_RE = /^[A-Za-z_:][-A-Za-z0-9_:.]*$/;
+
+/**
+ * True when writing this attribute is a decision for core's guard
+ * (`isUnsafeAttrWrite`), which runtime `h()` applies on the first render and
+ * on every reactive update, and which core does not export:
+ *
+ * - an `on…` attribute that is not a compiled `onX` listener (`ONCLICK`,
+ *   `onclick`): core drops it, or binds a lowercase `onclick` function as a
+ *   listener; compiled, it was baked into the template or ran at render;
+ * - a URL attribute whose value is not a literal: only core can check it;
+ * - a URL attribute whose literal value has a scheme: core decides which
+ *   schemes are safe (`javascript:` is not; `https:` is). A literal without a
+ *   scheme (`/about`, `#top`, `logo.png`) cannot run script and stays in the
+ *   template.
+ *
+ * The compiler leaves such an element to runtime `h()` rather than copying
+ * core's rules, so the two cannot drift (L-23).
+ * Verified by: packages/compiler/tests/vite-plugin-deprecation.test.ts > "leaves <a href: url> to runtime h()"
+ * Verified by: e2e/compiled-url-guard.spec.ts > "a compiled module writes no javascript: href from a variable, and keeps safe ones (FORMA-019)"
+ */
+function isGuardedAttr(key: string, value: t.Expression): boolean {
+  if (/^on/i.test(key) && !isEventProp(key)) return true;
+  if (!URL_ATTRS.has(key.toLowerCase())) return false;
+  if (!isStaticLiteral(value)) return true;
+  return t.isStringLiteral(value) && URL_SCHEME_RE.test(value.value.replace(URL_IGNORED_CHARS_RE, ''));
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -166,6 +222,7 @@ function analyzeHCall(
   const tagArg = args[0];
   if (!tagArg || !t.isStringLiteral(tagArg)) return null; // dynamic tag => bail
   const tag = tagArg.value;
+  if (!SAFE_NAME_RE.test(tag)) return null; // malformed tag => runtime h()
 
   // SVG tags => bail to runtime
   if (SVG_TAGS.has(tag)) return null;
@@ -196,6 +253,10 @@ function analyzeHCall(
       if (key === null) return null;
 
       const val = prop.value as t.Expression;
+
+      // A malformed name, or an attribute core guards: the whole element goes
+      // to runtime h().
+      if (!SAFE_NAME_RE.test(key) || isGuardedAttr(key, val)) return null;
 
       // ref
       if (key === 'ref') {

@@ -5,6 +5,20 @@
 ### Changed
 - **Release and CI install with `npm ci` (DR-32, FORMA-010; the package is unchanged).** `release.yml`, `ci.yml` and `compat.yml` install exactly what `package-lock.json` records instead of running `npm install`; `compat.yml` still installs the newest `@getforma/core` on top, deliberately. Each `uses:` names the commit its tag or branch pointed to on 2026-10-14, with the ref in a comment, and every CI job declares `contents: read`; `release.yml` keeps its workflow-level `contents: read` and `id-token: write`.
 
+### Deprecated
+- **The Vite plugins `formaCompiler` and `formaServer` are deprecated, and are removed in 3.0.0 (L-23).** Each logs a deprecation naming 3.0.0, once per process, when it is created.
+  - `formaCompiler`'s compiled output does not behave like runtime `h()`. Probes against core 2.0.1 in FORMA-007's review found that an island hydrated over server markup gets no handlers or updates, a signal getter as a child renders as source text, style objects are dropped, and more. The README now says the path is unsupported and why.
+  - `formaServer` goes with server functions (DR-22).
+  - No application of the stack uses either plugin. `@getforma/build`, which keeps runtime `h()`, is the supported build, and nothing that `formaSsrPlugin` or the FMIR emitter does changes.
+
+### Security
+- **`formaCompiler`'s output no longer bypasses core's attribute guard.** It used to write, with its own `setAttribute`, a URL attribute whose value came from a variable or a getter, so `href: url` with `url = 'javascript:alert(1)'` was written where runtime `h()` drops it. It also baked a static `javascript:` URL and a static `ONCLICK` string into the template, and ran a lowercase `onclick` function at render.
+  - An element carrying any of these is now left to runtime `h()`, which applies core's guard on the first render and on every reactive update: a URL attribute (`href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `background`, `data`, any case) whose value is not a literal, such an attribute whose literal value has a scheme, or an `on…` attribute that is not an `onX` listener.
+  - Literal relative URLs still compile into the template.
+  - A tag or attribute key that fails core's name pattern (`/^[A-Za-z_:][-A-Za-z0-9_:.]*$/`, its `isSafeTagName` and `isSafeAttrName`) is left to runtime `h()` as well. The template wrote names verbatim, so `'href '`, `'x onclick'` or a tag `'img src=x onerror=…'` added an attribute no guard saw. Runtime `h()` then throws at render, as it does without the plugin; the compiler does not refuse it at build, since it leaves every construct it cannot compile (a dynamic tag, a spread, a computed key) to runtime `h()`.
+  - Core does not export its guard, so the compiler defers to it rather than copying its rules. Compiled output imports nothing new from `@getforma/core`.
+  - Tests: `tests/vite-plugin-deprecation.test.ts` covers the attributes left to `h()`, the ones still compiled, the surrounding tree still compiled, and the deprecation logged once. `e2e/compiled-url-guard.spec.ts` > "a compiled module writes no javascript: href from a variable, and keeps safe ones (FORMA-019)" compiles a module with this compiler and runs it in Chromium against FormaJS. Before this change it failed: `<a href="javascript:alert(1)">`.
+
 ### Corrected
 - The 0.3.1 entry said 0.3.0 "was never published". npm holds `@getforma/compiler` 0.3.0, published on 2026-08-06 from `compiler-v0.3.0` (`778b71f`) with provenance; 0.3.1 carries the fixes made after it. The entry below is amended.
 - Two 0.3.0 entries described the Rust name→id map as last-insert-wins without saying which `forma-ir`. That was true of `forma-ir` 0.1.4 and earlier; since 0.2.0 the first slot in table order wins, everywhere (the rule is stated once, at `forma-ir`'s `IrModule::slot_id_by_name`). The entries below are amended, as are the README's slot-naming paragraph and the comments in `ir-walk.ts`, `tests/helpers/fmir.ts` and the `dynamic-attrs` corpus case that said the same. The README's migration notes, labelled "(unreleased)", shipped in 0.3.0 and now say so.
