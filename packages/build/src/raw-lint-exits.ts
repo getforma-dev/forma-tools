@@ -36,6 +36,7 @@ export const RAW_EXITS: readonly ExitInfo[] = Object.freeze([
   { name: 'reconcile', slug: 'reconcile', language: 'ts', what: "the runtime's reconcile() given markup the lint cannot trace to trustedHtml()" },
   { name: 'srcdoc', slug: 'srcdoc', language: 'ts', what: 'a srcdoc prop or attribute set to a value the lint cannot trace to trustedHtml()' },
   { name: 'core-reexport', slug: 'core-reexport', language: 'ts', what: "export * from core: every raw sink of core's re-exported under the application's own module" },
+  { name: "h('script')", slug: 'h-script', language: 'ts', what: "h('script'), a script element core builds (JSX <script> included), whose src runs under 'strict-dynamic'; refused in 3.0.0" },
   // Markup: HTML files, and string literals in either language.
   { name: 'data-bind:srcdoc', slug: 'data-bind-srcdoc', language: 'markup', what: "the HTML runtime's data-bind:srcdoc binding, which no trustedHtml() can reach" },
   { name: 'list-row-srcdoc', slug: 'list-row-srcdoc', language: 'markup', what: "a srcdoc attribute carrying {item…}, the HTML runtime's list-row binding" },

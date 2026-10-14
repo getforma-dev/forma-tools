@@ -436,6 +436,7 @@ TypeScript and JavaScript, inline scripts in HTML included:
 | `reconcile` | The runtime's `reconcile(el, markup)`, likewise. |
 | `srcdoc` | A `srcdoc` prop, attribute or property (any case) set to a value not traced to `trustedHtml()`: JSX, `h()`, a quoted or computed key, `setAttr`/`setAttribute(…, 'srcdoc', …)` (a template literal or a `const` holding the name included), `.srcdoc =`, `['srcdoc'] =`, `Reflect.set` and `Object.defineProperty`. |
 | `core-reexport` | `export * from '@getforma/core'` (or a subpath, or `export * as x from …`): every raw sink of core's behind the application's own module, where the lint does not follow its importers. A named re-export of a sink (`export { reconcile } from '@getforma/core/runtime'`, or a sink imported from core and exported) is reported under the sink's own exit. |
+| `h('script')` | A `script` element built by core's `h()`: `h('script', …)` (any case), under a name `h` is imported as, on core's namespace, or JSX `<script>`. Its `src` runs under `'strict-dynamic'`; it warns in development and 3.0.0 refuses it (FORMA-109). |
 
 Markup, in HTML files and in string literals in either language:
 
@@ -514,9 +515,10 @@ What it cannot see, and review must:
 - Props built from data at run time (`JSON.parse('{"dangerouslySetInnerHTML": …}')`,
   a key assembled from variables): the lint reads the names written in the
   source.
+- `h()` given a tag only known at run time (`h(tag, …)`).
 - The browser's own sinks (`innerHTML`, `insertAdjacentHTML`, `document.write`,
-  `Element.setHTMLUnsafe`): not Forma's exits, and what Trusted Types refuses
-  in the browser (DR-20).
+  `Element.setHTMLUnsafe`, `document.createElement('script')`): not Forma's
+  exits, and what Trusted Types refuses in the browser (DR-20).
 
 ## When Do You Need This?
 

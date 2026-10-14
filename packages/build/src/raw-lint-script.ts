@@ -451,6 +451,8 @@ class ScriptScan {
   private readonly skip = new Set<number>();
   /** Local names bound to core's other sinks, to the sink's name. */
   private readonly sinkLocals = new Map<string, string>();
+  /** Local names of core's h() (beside `h`, which JSX compiles to). */
+  private readonly hLocals = new Set<string>(['h']);
   /** Local names bound to core's module as a namespace. */
   private readonly namespaces = new Set<string>(['FormaRuntime']);
   /**
@@ -647,6 +649,7 @@ class ScriptScan {
   private bindImport(imported: string, local: string, fromCore: boolean, region = 0): void {
     this.bind(local, region, imported === 'trustedHtml' ? 'trustedCallee' : 'other');
     if (fromCore && SINK_ARGUMENT.has(imported)) this.sinkLocals.set(local, imported);
+    if (fromCore && imported === 'h') this.hLocals.add(local);
   }
 
   /**
@@ -1130,6 +1133,12 @@ class ScriptScan {
       else if (called) this.report(i, 'trustedHtml', `trustedHtml() called${as}`);
       else if (this.isKey(i)) this.report(i, 'trustedHtml', 'a property named trustedHtml');
       else this.report(i, 'trustedHtml', `trustedHtml referenced${name === 'trustedHtml' ? '' : ` as ${name}`}, not called: the lint cannot see what it is given`);
+      return;
+    }
+
+    // h('script'): a script element core builds, JSX `<script>` included (the lead's decision on the review).
+    if ((onNamespace ? name === 'h' : !afterDot && this.hLocals.has(name)) && this.isP(i + 1, '(') && this.t(i + 2)?.type === 'str' && /^script$/i.test(this.t(i + 2)!.value)) {
+      this.report(i, "h('script')", "h('script'): a script element whose src runs under 'strict-dynamic' (refused in 3.0.0)");
       return;
     }
 
