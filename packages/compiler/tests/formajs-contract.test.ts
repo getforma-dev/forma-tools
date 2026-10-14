@@ -9,9 +9,17 @@
  * A user's own `formajs` import is left as written; the build's `formaAlias`
  * still resolves it.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { parse } from '@babel/parser';
 import { compileFormaJSX, transformServerFunctions } from '../src/index';
+
+// transformServerFunctions logs its deprecation once (pinned in
+// server-transform-deprecation.test.ts). Keep that line out of this file's
+// output; every other warning still prints.
+const consoleWarn = console.warn;
+vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+  if (!String(args[0]).startsWith('[@getforma/compiler]')) consoleWarn(...args);
+});
 
 /** Every named or default import in `code`, as imported name → module specifier. */
 function importedFrom(code: string): Record<string, string> {
