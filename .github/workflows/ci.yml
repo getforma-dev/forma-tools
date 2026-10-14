@@ -182,6 +182,11 @@ jobs:
     # rust-cache): the "Build the SSR site" step 26s, of which cargo ~20s (a
     # debug build of the renderer against forma's crates), and the whole job
     # 1m52s, Playwright 44 tests included. Realistic worst case ~6m; 20 is >3x.
+    # The preview-frame lane (FORMA-175) adds, MEASURED in CI on its first run
+    # (forma-tools#24, the frame server's rust-cache cold): the "Build the
+    # preview-frame lane" step 17s (npm pack, the tarball's install, two
+    # builds, a debug build of the frame server), and the whole job 1m54s,
+    # Playwright 53 tests included.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -225,16 +230,30 @@ jobs:
           repository: getforma-dev/forma
           path: forma-checkout
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-      # The renderer reaches forma's crates through this link (build.sh makes
-      # it too); it must exist before rust-cache reads the crate's metadata.
-      - name: Link the forma checkout for the renderer
-        run: ln -sfn "$PWD/forma-checkout" e2e/ssr/render/forma
+      # The renderer and the frame lane's server reach forma's crates through
+      # these links (each build.sh makes its own too); they must exist before
+      # rust-cache reads the crates' metadata.
+      - name: Link the forma checkout for the renderer and the frame server
+        run: |
+          ln -sfn "$PWD/forma-checkout" e2e/ssr/render/forma
+          ln -sfn "$PWD/forma-checkout" e2e/frame/server/forma
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: e2e/ssr/render
+          workspaces: |
+            e2e/ssr/render
+            e2e/frame/server
           key: e2e-ssr
       - name: Build the SSR site (compiler -> forma walker -> FormaJS)
         run: FORMAJS_DIR="$PWD/formajs-checkout" FORMA_DIR="$PWD/forma-checkout" bash e2e/ssr/build.sh
+
+      # The preview-frame lane, e2e/frame/ (FORMA-175): core packed from the
+      # FormaJS checkout above and installed from its tarball into a fixture
+      # application, which THIS repo's build package builds with
+      # `previewFrame: true` (and without it); a small forma-server
+      # application embeds the output and calls `PreviewFrame::load` on it at
+      # start, and e2e/frame/frame.spec.ts loads its frame in Chromium.
+      - name: Build the preview-frame lane (packed core -> this build -> forma-server)
+        run: FORMAJS_DIR="$PWD/formajs-checkout" FORMA_DIR="$PWD/forma-checkout" bash e2e/frame/build.sh
 
       # Cache the browser binaries (~130 MB) keyed on the resolved Playwright
       # version. `--with-deps` still runs so the OS packages are present; only

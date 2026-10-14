@@ -757,6 +757,56 @@ Printed by the build itself (FORMA-131), on the console and in `BuildResult.warn
 
 Printed by the build itself (FORMA-131), on the console and in `BuildResult.warnings`; in the report as a note (`packages/build/tests/wasm-deprecation.test.ts` > "a strict build that still sets wasm passes, with BUILD-803 and BUILD-804 as notes in its report (FORMA-119)").
 
+### The preview frame's runtime: BUILD-805 to BUILD-807
+
+`previewFrame: true` (FORMA-175) copies the `dist/formajs-frame.global.js`
+of the `@getforma/core` the bundles import into the output, byte for byte,
+as `forma-runtime.<hash>.js`, named in the manifest under
+`assets["forma-runtime.js"]`, where forma-server's `PreviewFrame::load` reads
+it at start, inlines it into the preview frame and allows it by its SHA-256
+hash (FORMA-125, FORMA-128). Which core: before anything is written, each
+entry is bundled in memory with the bundles' own esbuild options
+(`formaAlias`, whose target esbuild resolves from its working directory;
+tsconfig `paths`; symbolic links followed), and each file it loads is mapped
+to its package, a core being a directory whose package.json is named
+`@getforma/core`; when the bundles import none, the core installed where the
+build runs. The build checks the runtime as forma-server does (FRAME-101 to
+FRAME-103) and refuses before it writes anything, in watch mode too, so the
+previous output stays as it was. Each code fails the build with or without
+strict mode; the error carries the diagnostic (`error.diagnostics`), and a
+`diagnosticsJson` report, when asked for, holds it alone, as no page was
+compiled.
+
+### BUILD-805 Preview frame runtime missing from @getforma/core
+
+**Why.** `previewFrame` is on, and the @getforma/core the bundles import has no dist/formajs-frame.global.js (it ships from core 2.1.0), or no core is found: there is no runtime to copy, and forma-server would refuse to start the frame (FRAME-101).
+
+**Fix.** Install @getforma/core 2.1.0 or later where the bundles import it from, or turn `previewFrame` off.
+
+**In strict mode.** An error, and without strict mode too: the build fails before it writes anything.
+
+Printed as `@getforma/build: BUILD-805 @getforma/core 2.0.3 at <dir> (imported by app.js) has no dist/formajs-frame.global.js: …`, naming the version, the directory and the entries that import it. The build never falls back to another core, nor to core's `dist/forma-runtime.js`, the CDN alias of the auto-mounting runtime (`packages/build/tests/preview-frame.test.ts` > "BUILD-805: a core without the frame runtime (older than 2.1.0) fails the build, naming its version, and leaves the previous output as it was").
+
+### BUILD-806 Preview frame runtime that cannot be inlined
+
+**Why.** Core's dist/formajs-frame.global.js is empty, not UTF-8, or contains `</script`, `<!--`, a carriage return or a NUL: it is inlined as it is into the frame's `<script>` and allowed by its hash, so it would end early or not match its hash, and forma-server would refuse it (FRAME-103).
+
+**Fix.** Reinstall @getforma/core and leave the file as published: no editor, formatter, patch or CRLF checkout may rewrite it.
+
+**In strict mode.** An error, and without strict mode too: the build fails before it writes anything.
+
+Printed with the file, line and column of what it refuses, as `@getforma/build: BUILD-806 <core>/dist/formajs-frame.global.js:2:11: @getforma/core 2.1.0's dist/formajs-frame.global.js contains "</script", …`; `</script` and `<!--` are matched in any ASCII case, as the HTML tokenizer and forma-server match them (`packages/build/tests/preview-frame.test.ts` > "BUILD-806: a runtime with %s fails the build with its code, before anything is written").
+
+### BUILD-807 Bundles that import more than one @getforma/core
+
+**Why.** `previewFrame` is on, and the bundles import more than one @getforma/core, whose frame runtimes differ (entries from packages with their own cores, or a library bundling its own): the frame runs one runtime, so the build would have to pick the core it renders previews with, and the page could mount the module with another.
+
+**Fix.** Make every entry import one @getforma/core (one version in the workspace, `npm dedupe`, a library taking core as a peer dependency), or turn `previewFrame` off.
+
+**In strict mode.** An error, and without strict mode too: the build fails before it writes anything.
+
+Printed naming each core, its version and the entries that import it, as `@getforma/build: BUILD-807 previewFrame is on, and the bundles import 2 copies of @getforma/core whose frame runtimes differ: @getforma/core 2.1.0 at <dir> (imported by a.js); @getforma/core 2.1.1 at <dir> (imported by b.js)…`. Copies whose frame runtimes are the same bytes (one version installed twice) are one core to the frame: the build copies those bytes (`packages/build/tests/preview-frame.test.ts` > "BUILD-807: entries from two packages with cores whose runtimes differ fail the build, naming each core and its entries").
+
 ### The raw-entry lint: BUILD-810 to BUILD-814
 
 `forma-raw-lint`, the build package's command for an application's CI

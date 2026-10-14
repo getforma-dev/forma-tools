@@ -107,11 +107,72 @@ server not yet on forma-server 0.2.2; setting `serviceWorker` without `app` is
 deprecated and warns once per build (`BUILD-802`), because from 3.0.0 a worker
 is written only for a named `app`. The development worker ignores `app`.
 
+### The preview frame's runtime (`previewFrame`)
+
+forma-server's preview frame (`PageResponse::frame`, FORMA-125) renders content
+nobody reviewed in an opaque-origin document whose one script is core's frame
+runtime, written inline and allowed by its SHA-256 hash. It finds that runtime
+the way it finds every asset: `PreviewFrame::load` reads the manifest's
+`assets["forma-runtime.js"]` from the embedded output at start, and refuses to
+start the frame without it (FRAME-101). An application that serves the frame
+turns the setting on:
+
+```ts
+await build({ ...config, previewFrame: true });
+```
+
+The build then copies `dist/formajs-frame.global.js` from the
+`@getforma/core` the bundles import (core 2.1.0 and later), byte for byte, as
+`forma-runtime.<hash>.js`, and names it in the manifest:
+
+```json
+"assets": { "app.js": "app.1797a84b.js", "forma-runtime.js": "forma-runtime.e7a8cc12.js" }
+```
+
+- **The core the bundles import, so the preview renders a module with the
+  core the page mounts it with.** Before anything is written, each entry is
+  bundled in memory with the bundles' own esbuild options, and every file it
+  loads is mapped to its package (a directory whose package.json is named
+  `@getforma/core`). The core is therefore the one the bundles reach,
+  however they reach it: `formaAlias`, whose target esbuild resolves from the
+  working directory (so a build run from a monorepo's root takes the root's
+  core, as its bundles do); tsconfig `paths` to a vendored copy; a linked or
+  pnpm-installed core, by its real path. When the bundles import cores whose
+  frame runtimes differ (entries from two packages, each with its own core,
+  or a library bundling its own), the build refuses rather than pick one
+  (`BUILD-807`); one version installed twice is one core. When the bundles
+  import no core, it copies the one installed where the build runs (the
+  working directory, as Node finds a package). The entries must bundle at
+  start, in watch mode too.
+- **Never core's `dist/forma-runtime.js`.** That file shares the target's
+  name, but it is the CDN alias of the auto-mounting runtime, which would bind
+  the whole frame document instead of rendering the host's module in tier (c).
+- **The bytes are core's, unchanged**: no minify, no transform, no line
+  endings rewritten, so the hash forma-server computes is the hash of core's
+  file, and the script the browser runs is the one hashed. It is inlined,
+  never fetched: no route loads it, it gets no `.br` or `.gz` copy, and the
+  worker's lists leave it out.
+- **It refuses what forma-server would refuse** (FRAME-103), before anything is
+  written, so the previous output stays as it was: `BUILD-805` when the core
+  the bundles import has no frame runtime (older than 2.1.0) or no core is
+  found, `BUILD-806` when the runtime is empty, not UTF-8, or contains
+  `</script` or `<!--` (in any case), a carriage return or a NUL, and
+  `BUILD-807` as above. Each fails the build with or without strict mode
+  (`docs/DIAGNOSTICS.md`).
+- **Watch mode** writes it unhashed as `forma-runtime.js`, and the dev manifest
+  names it as itself, as it does every watched asset.
+- **Off** (the default, or `false`), nothing is read and the output is
+  byte-identical to a build without the setting. While it is on, no entry may
+  take the name `forma-runtime.js` in any case (`Forma-Runtime.js` is the same
+  file on macOS and Windows); any value but `true` or `false` is a config
+  error.
+
 ## What It Does
 
 | Step | What happens |
 |------|-------------|
-| **Validate** | Rejects an unknown `serviceWorker` value, an `app` name forma-server cannot take, two entries sharing an `outfile`, an `outfile` that is a path, a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir` |
+| **Validate** | Rejects an unknown `serviceWorker` value, an `app` name forma-server cannot take, a `previewFrame` that is not a boolean, two entries sharing an `outfile`, an `outfile` that is a path (or `forma-runtime.js`, in any case, with `previewFrame`), a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir`; with `previewFrame`, finds the core the bundles import and reads and checks its frame runtime (`BUILD-805` to `BUILD-807`) |
+| **Frame runtime** | (Optional, `previewFrame: true`) Copies the `dist/formajs-frame.global.js` of the `@getforma/core` the bundles import, unchanged, as `forma-runtime.js`, hashed with the other assets and left uncompressed |
 | **Bundle** | esbuild bundles each entry point with JSX transform (`jsxFactory: "h"`) |
 | **CSS** | Runs Tailwind CLI or concatenates CSS files |
 | **Hash** | SHA-256 content hash appended to filenames (`app.a1b2c3d4.js`) |
@@ -154,6 +215,7 @@ const config: BuildConfig = {
   },
   // strict: true,                   // Fail on every coded SSR diagnostic (or FORMA_STRICT=1); see below
   // diagnosticsJson: "ssr-diagnostics.json", // Also write them as JSON, outside outputDir
+  previewFrame: false,                // true: copy core's frame runtime as forma-runtime.js (forma-server's PageResponse::frame)
   wasm: { crateDir: "../crates/forma-ir" },  // Deprecated (removed in 3.0.0): build the WASM walker
   watch: false,                       // Rebuild on change; writes a dev manifest and, with ssr, each page's .ir
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
@@ -175,6 +237,7 @@ dist/
 ├── home.e5f6g7h8.css.br
 ├── dashboard.i9j0k1l2.js
 ├── home.m3n4o5p6.ir          # FMIR binary (if ssr: true)
+├── forma-runtime.y5z6a7b8.js # Core's preview-frame runtime, unchanged and uncompressed (if previewFrame: true)
 ├── forma_ir.q7r8s9t0.js      # WASM loader (if the deprecated wasm key is set)
 ├── forma_ir_bg.u1v2w3x4.wasm # WASM binary
 ├── inter.woff2                # Copied fonts (never hashed)

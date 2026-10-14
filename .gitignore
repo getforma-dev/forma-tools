@@ -13,3 +13,10 @@ packages/compiler/ir-corpus/
 e2e/ssr/out/
 e2e/ssr/render/target/
 e2e/ssr/render/forma
+
+# The preview-frame e2e lane's output (the packed core, the builds, lane.json),
+# its Rust build, and the link build.sh puts to the forma checkout
+# (e2e/frame/build.sh). e2e/frame/app/node_modules is covered by node_modules/.
+e2e/frame/out/
+e2e/frame/server/target/
+e2e/frame/server/forma

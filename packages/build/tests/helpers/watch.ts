@@ -10,14 +10,13 @@
  */
 
 import { expect } from 'vitest';
-import { build as bundle } from 'esbuild';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import type { BuildConfig } from '../../src/types';
+import { bundleBuildRunner } from './runner';
 
 export interface Watcher {
   /** The current `manifest.json`, parsed; fails the test if the child died. */
@@ -28,24 +27,7 @@ export interface Watcher {
 
 export async function watching(config: BuildConfig, body: (watcher: Watcher) => Promise<void>): Promise<void> {
   const runner = join(config.outputDir, '..', `watch-runner-${process.pid}.mjs`);
-  const require = createRequire(import.meta.url);
-  await bundle({
-    entryPoints: [fileURLToPath(new URL('../../src/build.ts', import.meta.url))],
-    outfile: runner,
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    logLevel: 'warning',
-    // The compiler's Babel dependencies are CommonJS and require Node built-ins.
-    banner: { js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);" },
-    plugins: [{
-      name: 'watch-runner',
-      setup(builder) {
-        builder.onResolve({ filter: /^esbuild$/ }, () => ({ path: pathToFileURL(require.resolve('esbuild')).href, external: true }));
-        builder.onResolve({ filter: /^@getforma\/compiler$/ }, () => ({ path: fileURLToPath(new URL('../../../compiler/src/index.ts', import.meta.url)) }));
-      },
-    }],
-  });
+  await bundleBuildRunner(runner);
   // On POSIX the child leads its own process group, so the kill below also
   // reaches the esbuild service it starts, which otherwise can still be
   // writing into the output directory while the test removes it (ENOTEMPTY).
