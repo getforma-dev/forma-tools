@@ -333,10 +333,10 @@ export function parseOpcodeList(binary: Uint8Array): string[] {
  * whatever it contains. Called from the shared walk helpers, so every test
  * that emits a binary enforces them for free.
  *
- *   1. Slot names are pairwise unique. The Rust loader builds one
- *      HashMap<String, u16> from them (forma/crates/forma-ir/src/slot.rs), so a
- *      duplicate silently makes the earlier slot unreachable for server-side
- *      SlotData injection.
+ *   1. Slot names are pairwise unique. `forma-ir` resolves a name to the
+ *      first slot in table order (forma/crates/forma-ir/src/parser.rs,
+ *      `IrModule::slot_id_by_name`), so a duplicate silently makes the later
+ *      slot unreachable for server-side SlotData injection.
  *   2. Slot ids are pairwise unique and dense from 0 — they are the wire
  *      handles DYN_ATTR/DYN_TEXT/SHOW_IF/LIST/PROP bind to.
  *   3. The string table is interned: no value appears twice.

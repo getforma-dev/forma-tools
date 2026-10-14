@@ -213,7 +213,7 @@ its named signal slots and their SSR defaults.
 
 Slot names are a **compile contract**: the server injects `SlotData` by name (via `forma_ir::SlotData::from_json`), so the compiler derives stable, human-meaningful names for every binding. Names are visible in the emitted `.ir` string table.
 
-**Every slot name a page emits is unique.** The Rust loader builds one `HashMap<String, u16>` from the slot table, so two slots sharing a name silently collapse and the earlier one becomes permanently unreachable for injection. Uniqueness is enforced by the four page-wide occurrence registries described below (list, show, attr, text).
+**Every slot name a page emits is unique.** `forma-ir` resolves a name to the first slot in table order (`IrModule::slot_id_by_name`, `SlotData::from_json` and the island-props builder agree, since `forma-ir` 0.2.0), so of two slots sharing a name the later one is permanently unreachable for injection. Uniqueness is enforced by the four page-wide occurrence registries described below (list, show, attr, text).
 
 **Lists** (`createList`) derive a base name in this order:
 
@@ -237,16 +237,15 @@ A dynamic attribute or text child that binds a **signal in scope** (`() => count
 
 **Slot ids are not addresses.** They are handed out in the order the walk reaches each construct, so adding a signal renumbers everything after it. Nothing on the wire depends on the value: the client matches hydration markers positionally (`adoptNode` advances to the next `f:sN`/`f:tN`/`f:lN` of the right kind) and `DYN_TEXT` carries an independent `marker_id`. Address slots by NAME.
 
-**Migration.** All the changes below are in `[Unreleased]` — they are in the
-repo and not yet on npm, where the current version is 0.2.0. `CHANGELOG.md` is
-the authority for which release each one ships in; do not re-date them here
-from memory.
+**Migration.** Each change below names the release it shipped in.
+`CHANGELOG.md` is the authority for which release each one ships in; do not
+re-date them here from memory.
 
-- (unreleased) Signals in scopes the compiler previously did not read now get named slots, which **removes** the anonymous `attr:`/`text:` slots those bindings used to mint and renumbers the `#N` suffixes on the ones that remain. Measured over the shipped corpus: `dynamic-text` lost all four `text:*` names for four signal names, and `dynamic-attrs` lost `attr:value` (its `value: () => query()` binding now reuses `query`). Server code injecting a removed key fails **soft** — `SlotData::from_json` ignores unknown keys — so re-check every injected name against the emitted slot table after upgrading.
-- (unreleased) `show:*` slots now carry an SSR default, so a conditional whose condition is statically truthy server-renders its THEN branch. Pages that were shipping the wrong branch (and staying wrong through hydration) change their rendered HTML.
-- (unreleased) A page "twin" declaration of an island's signal is now a separate slot (`x` for the page's, `x#2` for the island's), and warns. Delete the twin.
-- (unreleased) `createShow` slots were previously all named `show:createShow` (and ternary shows `show:<index>`) — server code injecting those keys must move to the name-keyed scheme above.
-- (unreleased) Lists over literal sources were previously positional (`list:#N:array`) — where the map function has a named parameter they are now map-param-derived (`list:tile:array`). Unknown keys fail soft (silently ignored), so check names after upgrading.
+- (0.3.0) Signals in scopes the compiler previously did not read now get named slots, which **removes** the anonymous `attr:`/`text:` slots those bindings used to mint and renumbers the `#N` suffixes on the ones that remain. Measured over the shipped corpus: `dynamic-text` lost all four `text:*` names for four signal names, and `dynamic-attrs` lost `attr:value` (its `value: () => query()` binding now reuses `query`). Server code injecting a removed key fails **soft** — `SlotData::from_json` ignores unknown keys — so re-check every injected name against the emitted slot table after upgrading.
+- (0.3.0) `show:*` slots now carry an SSR default, so a conditional whose condition is statically truthy server-renders its THEN branch. Pages that were shipping the wrong branch (and staying wrong through hydration) change their rendered HTML.
+- (0.3.0) A page "twin" declaration of an island's signal is now a separate slot (`x` for the page's, `x#2` for the island's), and warns. Delete the twin.
+- (0.3.0) `createShow` slots were previously all named `show:createShow` (and ternary shows `show:<index>`) — server code injecting those keys must move to the name-keyed scheme above.
+- (0.3.0) Lists over literal sources were previously positional (`list:#N:array`) — where the map function has a named parameter they are now map-param-derived (`list:tile:array`). Unknown keys fail soft (silently ignored), so check names after upgrading.
 - (0.2.0) Every `createList` previously emitted `list:array` / `list:item` / `list:<prop>`, so on a page with more than one list only the first was reachable by name. Slots are now `list:<base>:…` with the base derived as described above.
 
 ### Islands: slot ids and props injection
