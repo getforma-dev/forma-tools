@@ -296,14 +296,16 @@ jobs:
               exit 1
             fi
             echo "::warning::installing chromium's system packages failed or ran past 4 minutes; retrying once"
-            # The cut attempt's apt-get runs as root, which `timeout` (the
-            # runner user) cannot signal, so it may still hold dpkg's lock:
-            # finish any half-configured package, tolerating a failure, then
-            # wait up to 60 s for the lock before the second attempt; without
-            # this the step ended here under errexit (FORMA-180 F17a).
+            # `timeout` runs as the runner user and cannot signal the root
+            # `apt-get` that `sudo` started, so after a cut it may still hold
+            # the dpkg lock; then `dpkg --configure -a` fails on that lock,
+            # and under errexit the step ended here, so the retry never ran
+            # (A2 audit F17a, FORMA-180). Its failure is tolerated and the
+            # lock waited out, up to 60 seconds, before attempt 2.
             sudo dpkg --configure -a || true
-            for _ in $(seq 1 60); do
+            for waited in $(seq 1 60); do
               if ! sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then break; fi
+              if [ "$waited" = 60 ]; then echo "::warning::the dpkg lock is still held after 60s; attempt 2 runs anyway"; fi
               sleep 1
             done
           done
