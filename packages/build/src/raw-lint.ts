@@ -31,8 +31,8 @@
  * Verified by: packages/build/tests/raw-lint.test.ts
  */
 
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, posix, relative, resolve, sep } from 'node:path';
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync, type Stats } from 'node:fs';
+import { basename, dirname, isAbsolute, posix, relative, resolve, sep } from 'node:path';
 
 import { EXIT_NAMES, RAW_EXITS, type Found } from './raw-lint-exits.js';
 import { RustFile, scanRust } from './raw-lint-rust.js';
@@ -287,39 +287,85 @@ function readAllowlist(path: string, label: string): { entries: AllowlistEntryRe
   return { entries, problems };
 }
 
-/** The source files under `paths`, sorted, each once. */
-function listFiles(paths: readonly string[], cwd: string, root: string, exclude: RegExp[]): string[] {
-  const files = new Set<string>();
+/**
+ * The source files under `paths`, sorted, each once, and a BUILD-814 for each
+ * path that cannot be read (FORMA-126 review, should-fix 7). Skipped names
+ * (`node_modules`, `target`, a leading `.`) and `--exclude` are checked before
+ * anything is read, so a dangling link there costs nothing. A symbolic link is
+ * followed; one that leads nowhere or loops is a BUILD-814, unless its name
+ * says it is not source (`notes.md`). A directory reached again below itself
+ * (a link to an ancestor) is not walked again, and a file reached by two paths
+ * is listed once, by its path without a link where there is one.
+ */
+function listFiles(paths: readonly string[], cwd: string, root: string, exclude: RegExp[]): { files: string[]; problems: RawLintDiagnostic[] } {
+  const files = new Map<string, { abs: string; viaLink: boolean }>();
+  const problems: RawLintDiagnostic[] = [];
   const rel = (abs: string) => relative(root, abs).split(sep).join('/');
-  const excluded = (abs: string, dir: boolean) => {
+  const excluded = (abs: string) => {
     const r = rel(abs);
-    return exclude.some((re) => re.test(r) || (dir && re.test(r + '/')));
+    return exclude.some((re) => re.test(r) || re.test(r + '/'));
   };
-  const walk = (dir: string) => {
-    for (const name of readdirSync(dir).sort()) {
-      const abs = resolve(dir, name);
-      const st = statSync(abs);
-      if (st.isDirectory()) {
-        if (SKIPPED_DIRECTORIES.has(name) || name.startsWith('.') || excluded(abs, true)) continue;
-        walk(abs);
-      } else if (st.isFile() && isSource(name) && !excluded(abs, false)) {
-        files.add(abs);
+  const unreadable = (abs: string, err: unknown, what: string) => {
+    const code = (err as NodeJS.ErrnoException).code ?? (err as Error).message;
+    problems.push(diagnostic('BUILD-814', { exit: null, file: rel(abs), line: 0, column: 0, symbol: null, message: `${rel(abs)} ${what} (${code})` }));
+  };
+  const visit = (abs: string, name: string, explicit: boolean, viaLink: boolean, ancestors: ReadonlySet<string>) => {
+    if (!explicit && (SKIPPED_DIRECTORIES.has(name) || name.startsWith('.'))) return;
+    if (excluded(abs)) return;
+    let st: Stats;
+    let isLink = false;
+    try {
+      isLink = lstatSync(abs).isSymbolicLink();
+      st = statSync(abs);
+    } catch (err) {
+      // A link to nothing, or a loop of links: fatal only for what may be source.
+      if (isLink && !explicit && /\.[^./]+$/.test(name) && !isSource(name)) return;
+      unreadable(abs, err, isLink ? 'is a symbolic link that cannot be followed' : 'cannot be read');
+      return;
+    }
+    const linked = viaLink || isLink;
+    if (st.isDirectory()) {
+      let real: string;
+      let names: string[];
+      try {
+        real = realpathSync(abs);
+        names = readdirSync(abs).sort();
+      } catch (err) {
+        unreadable(abs, err, 'cannot be read');
+        return;
       }
+      if (ancestors.has(real)) return;
+      const below = new Set(ancestors).add(real);
+      for (const child of names) visit(resolve(abs, child), child, false, linked, below);
+    } else if (st.isFile()) {
+      if (!isSource(name)) {
+        if (explicit) throw new RawLintUsageError(`${rel(abs)} is not a file the lint reads (TypeScript, JavaScript, Rust or HTML)`);
+        return;
+      }
+      let real = abs;
+      try {
+        real = realpathSync(abs);
+      } catch {
+        // Listed by its own path.
+      }
+      const seen = files.get(real);
+      if (!seen || (seen.viaLink && !linked)) files.set(real, { abs, viaLink: linked });
     }
   };
   for (const p of paths) {
     const abs = resolve(cwd, p);
-    if (!existsSync(abs)) throw new RawLintUsageError(`no such file or directory: ${p}`);
-    const st = statSync(abs);
-    if (st.isDirectory()) {
-      if (!excluded(abs, true)) walk(abs);
-    } else if (!isSource(abs)) {
-      throw new RawLintUsageError(`${p} is not a file the lint reads (TypeScript, JavaScript, Rust or HTML)`);
-    } else if (!excluded(abs, false)) {
-      files.add(abs);
+    let exists = existsSync(abs);
+    if (!exists) {
+      try {
+        exists = lstatSync(abs).isSymbolicLink();
+      } catch {
+        exists = false;
+      }
     }
+    if (!exists) throw new RawLintUsageError(`no such file or directory: ${p}`);
+    visit(abs, basename(abs), true, false, new Set());
   }
-  return [...files].sort();
+  return { files: [...files.values()].map((f) => f.abs).sort(), problems };
 }
 
 /**
@@ -353,7 +399,9 @@ export function rawLint(options: RawLintOptions): RawLintReport {
     }
   }
 
-  const files = listFiles(options.paths, cwd, root, (options.exclude ?? []).map(globToRegExp));
+  const listed = listFiles(options.paths, cwd, root, (options.exclude ?? []).map(globToRegExp));
+  const files = listed.files;
+  diagnostics.push(...listed.problems);
 
   // Rust aliases of RawHtml are collected from every file before any is scanned.
   const found: Array<Found & { file: string }> = [];

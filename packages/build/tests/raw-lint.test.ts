@@ -15,7 +15,7 @@
  * a variable named rawHtml.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -383,6 +383,36 @@ describe('reading sources', () => {
     const excluded = rawLint({ paths: ['app'], cwd: tmp, root: join(tmp, 'app'), today: TODAY, exclude: ['dist/**', 'gen/*.ts'] });
     expect(excluded.rawEntries.map((e) => e.file)).toEqual(['gen/keep/g.ts', 'src/a.ts']);
     expect(rawLint({ paths: ['app'], cwd: tmp, root: join(tmp, 'app'), today: TODAY, exclude: ['**/gen/**', 'dist'] }).rawEntries.map((e) => e.file)).toEqual(['src/a.ts']);
+  });
+
+  it('a dangling symbolic link or a loop never crashes: skips and --exclude come first, and what cannot be read is a BUILD-814', () => {
+    // The review's should-fix 7: a dangling .env at the root crashed `forma-raw-lint .`.
+    const app = join(tmp, 'app');
+    mkdirSync(join(app, 'src'), { recursive: true });
+    writeFileSync(join(app, 'src', 'a.ts'), 'export const x = trustedHtml("<b>");\n');
+    const link = (target: string, path: string) => symlinkSync(target, join(app, path));
+    const dirLink = (target: string, path: string) => symlinkSync(target, join(app, path), process.platform === 'win32' ? 'junction' : 'dir');
+    link('.env.local', '.env'); // dangling, a dot name: skipped before it is read
+    link('missing-notes.md', 'notes.md'); // dangling, not source by its name: ignored
+    dirLink(join(app, 'src'), 'alias'); // a second path to src: a.ts listed once, by its own path
+    dirLink(join(app, 'src'), join('src', 'self')); // a link to an ancestor: not walked again
+    const ok = rawLint({ paths: ['.'], cwd: app, today: TODAY });
+    expect(ok.rawEntries.map((e) => e.file)).toEqual(['src/a.ts']);
+    expect(codes(ok)).toEqual(['BUILD-810']);
+    expect(ok.files).toBe(1);
+
+    link('missing.ts', 'gone.ts'); // dangling, source by its name
+    link('loop2', 'loop1'); // a loop of links
+    link('loop1', 'loop2');
+    const bad = rawLint({ paths: ['.'], cwd: app, today: TODAY });
+    const unread = bad.diagnostics.filter((d) => d.code === 'BUILD-814');
+    expect(unread.map((d) => d.file)).toEqual(['gone.ts', 'loop1', 'loop2']);
+    for (const d of unread) expect(d.message).toContain('is a symbolic link that cannot be followed');
+    expect(bad.exitCode).toBe(1);
+    const excluded = rawLint({ paths: ['.'], cwd: app, today: TODAY, exclude: ['gone.ts', 'loop*'] });
+    expect(codes(excluded)).toEqual(['BUILD-810']);
+    // Named on the command line, a dangling link is read and reported, not refused.
+    expect(codes(rawLint({ paths: ['gone.ts'], cwd: app, today: TODAY }))).toEqual(['BUILD-814']);
   });
 
   it('refuses a path that does not exist, a file it does not read, and a bad date', () => {

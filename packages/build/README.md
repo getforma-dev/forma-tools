@@ -341,7 +341,10 @@ npx forma-raw-lint src crates
 It reads TypeScript, JavaScript (`.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`,
 `.mjs`, `.cjs`; not `.d.ts`), Rust (`.rs`) and HTML (`.html`, `.htm`) under
 the files and directories it is given, skipping `node_modules`, `target` and
-directories whose name starts with `.`. It needs nothing beyond this package:
+any file or directory whose name starts with `.`. Skips and `--exclude` are
+applied before anything is read. A symbolic link is followed; one that leads
+nowhere or loops is a `BUILD-814` (exclude it if it is not source), and a
+file reached by two paths is read once. It needs nothing beyond this package:
 an application that does not build with `@getforma/build` (a Rust-only one,
 or one that uses `@getforma/core` alone) runs it with
 `npx -p @getforma/build forma-raw-lint …`.
