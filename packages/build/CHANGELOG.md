@@ -2,12 +2,13 @@
 
 ## [Unreleased]
 
-Consolidated from the local, unpublished builds Ledger vendors as `0.2.1-ledger.1`, `0.2.2-ledger.1` and `0.2.2-ledger.2` (checkpoint `205b612`). None of those labels was published; the version is set at release.
+Consolidated from the local, unpublished builds Ledger vendors as `0.2.1-ledger.1`, `0.2.2-ledger.1` and `0.2.2-ledger.2` (checkpoint `205b612`), plus one validation fix. None of those labels was published; the version is set at release.
 
 ### Fixed
 - **Production workers no longer delete caches they do not own.** Activation deleted every cache on the origin except the worker's own, including other applications', and lookups matched requests against all of them. The worker now deletes only older `forma-` caches, reads only its own cache, and keeps content-hashed assets cache-first.
 - **Development workers (watch mode) are network-only.** They bypass CacheStorage and the HTTP cache for stable asset URLs, take over from an old cache-first worker, and remove obsolete `forma-` caches, so rebuilt CSS and JavaScript appear on reload.
 - Generated workers intercept only same-origin `GET` requests; cross-origin requests and writes pass through untouched.
+- **A route without `css` (or `js`) fails with a message naming the route.** A JavaScript config, or TypeScript run without a type check, could omit either list, and validation threw `TypeError: mapping.css is not iterable`, naming neither the route nor the key. It now reports, for example, `routes['/'].css is missing: list the route's CSS base names, or [] for none`; a string in place of the list is reported as `not an array` rather than read letter by letter. Validation still runs before the output directory is touched.
 
 ### Added
 - Opt-in `codeSplitting` builds one shared ESM graph, retains native dynamic imports, and preserves esbuild's linked content hashes. Chunks are compressed and included in the asset manifest without renaming their import targets.
@@ -17,7 +18,7 @@ Consolidated from the local, unpublished builds Ledger vendors as `0.2.1-ledger.
 - On-demand caching is restricted to exact content-hashed manifest JS/CSS/WASM URLs and successful, non-redirected immutable asset responses. Navigations, APIs, query URLs, private/no-store responses and unknown asset paths are excluded.
 - CacheStorage and quota failures no longer turn a successful asset request into a failed page load in on-demand mode. Precache remains the default; watch mode remains network-only.
 - Config validation rejects two `entryPoints` that share an `outfile`; both bundles were written to one file and the route served whichever finished last.
-- Tests: generated-worker unit coverage (cache scoping, development takeover, on-demand eligibility and storage failures); code-splitting builds (multi-entry singleton and dynamic import, linked invalidation, mixed SSR, server-inlined copies, watched graph, the on-demand allowlist); and a controlled-browser upgrade and rebuild regression, `npm run test:browser -w packages/build`.
+- Tests: generated-worker unit coverage (cache scoping, development takeover, on-demand eligibility and storage failures); code-splitting builds (multi-entry singleton and dynamic import, linked invalidation, mixed SSR, server-inlined copies, watched graph, the on-demand allowlist); config validation for missing route lists and duplicate outfiles; and a controlled-browser upgrade and rebuild regression, `npm run test:browser -w packages/build`.
 
 ## [0.2.0] - 2026-08-06
 

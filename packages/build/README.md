@@ -76,7 +76,7 @@ it automatically. Unhashed fonts use the browser HTTP cache. The default remains
 
 | Step | What happens |
 |------|-------------|
-| **Validate** | Rejects an `outfile` that is a path, or a route naming an asset no entry produces, before touching `outputDir` |
+| **Validate** | Rejects two entries sharing an `outfile`, an `outfile` that is a path, a route naming an asset no entry produces, or a route missing its `js` or `css` list, before touching `outputDir` |
 | **Bundle** | esbuild bundles each entry point with JSX transform (`jsxFactory: "h"`) |
 | **CSS** | Runs Tailwind CLI or concatenates CSS files |
 | **Hash** | SHA-256 content hash appended to filenames (`app.a1b2c3d4.js`) |
@@ -97,7 +97,7 @@ const config: BuildConfig = {
     { entry: "src/home/app.tsx", outfile: "home.js" },
     { entry: "src/dashboard/app.tsx", outfile: "dashboard.js" },
   ],
-  routes: {
+  routes: {                          // each route needs both js and css; [] for none
     "/": { js: ["home"], css: ["home"] },
     "/dashboard": { js: ["dashboard"], css: ["dashboard"] },
   },

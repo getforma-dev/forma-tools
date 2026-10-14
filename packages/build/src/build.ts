@@ -281,16 +281,25 @@ function compressAssets(distDir: string): number {
 
 /**
  * Reject configurations whose output cannot be correct, BEFORE anything is
- * written. Both checks close a silent failure mode:
+ * written. The first three checks close a silent failure mode; the fourth
+ * turns a crash into a message:
  *
+ *  - Two entries sharing an `outfile` write one file, and the route serves
+ *    whichever build finished last.
  *  - An `outfile` containing a path separator lands esbuild's output in a
  *    subdirectory, which the (non-recursive) hashing pass never sees. The asset
  *    was silently absent from the manifest and its route fell back to an
  *    unhashed name that 404s in production.
  *  - A route naming a JS/CSS base that no entry produces is a typo that
  *    manifests as a missing script tag on a deployed page, not at build time.
+ *  - A route whose `js` or `css` is missing (a JavaScript config is not type
+ *    checked) threw `TypeError: mapping.css is not iterable`, naming neither
+ *    the route nor the key; a string there was read letter by letter.
  *
+ * Verified by: packages/build/tests/build.test.ts > "rejects two entryPoints that share an outfile"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route that names an asset no entry produces"
+ * Verified by: packages/build/tests/build.test.ts > "rejects a route without css, naming the route"
+ * Verified by: packages/build/tests/build.test.ts > "rejects a route whose js is missing or not an array, naming each route"
  */
 function validateConfig(config: BuildConfig): void {
   const problems: string[] = [];
@@ -318,15 +327,23 @@ function validateConfig(config: BuildConfig): void {
     (config.cssEntries ?? []).map((e) => basename(e.outfile, '.css')),
   );
 
+  const baseNames = (route: string, key: 'js' | 'css', value: unknown): string[] => {
+    if (Array.isArray(value)) return value;
+    problems.push(
+      `routes['${route}'].${key} is ${value === undefined ? 'missing' : 'not an array'}: list the route's ${key.toUpperCase()} base names, or [] for none`,
+    );
+    return [];
+  };
+
   for (const [route, mapping] of Object.entries(config.routes)) {
-    for (const name of mapping.js) {
+    for (const name of baseNames(route, 'js', mapping?.js)) {
       if (!jsBases.has(name)) {
         problems.push(
           `routes['${route}'].js names '${name}', but no entryPoint produces '${name}.js'`,
         );
       }
     }
-    for (const name of mapping.css) {
+    for (const name of baseNames(route, 'css', mapping?.css)) {
       if (!cssBases.has(name)) {
         problems.push(
           `routes['${route}'].css names '${name}', but no cssEntry produces '${name}.css'`,
