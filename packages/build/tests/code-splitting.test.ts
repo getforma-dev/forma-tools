@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from '../src/build';
 
 const temporary: string[] = [];
@@ -81,7 +81,7 @@ describe('Opt-in ESM code splitting', () => {
   it('updates the watched graph and removes obsolete chunks instead of accumulating them', async () => {
     const { src, dist, config } = fixture(); const runner = join(src, 'watch-runner.mjs');
     const require = createRequire(import.meta.url);
-    await bundle({ entryPoints: [new URL('../src/build.ts', import.meta.url).pathname], outfile: runner, bundle: true, platform: 'node', format: 'esm', plugins: [{ name: 'external-build-tools', setup(builder) { builder.onResolve({ filter: /^(esbuild|@getforma\/compiler)$/ }, args => ({ path: args.path === 'esbuild' ? require.resolve(args.path) : args.path, external: true })); } }] });
+    await bundle({ entryPoints: [fileURLToPath(new URL('../src/build.ts', import.meta.url))], outfile: runner, bundle: true, platform: 'node', format: 'esm', plugins: [{ name: 'external-build-tools', setup(builder) { builder.onResolve({ filter: /^(esbuild|@getforma\/compiler)$/ }, args => ({ path: args.path === 'esbuild' ? pathToFileURL(require.resolve(args.path)).href : args.path, external: true })); } }] });
     const child = spawn(process.execPath, ['--input-type=module', '-e', `import {build} from ${JSON.stringify(pathToFileURL(runner).href)}; await build(${JSON.stringify({ ...config, watch: true })});`], { stdio: ['ignore', 'pipe', 'pipe'] });
     let diagnostics = ''; child.stderr.on('data', chunk => { diagnostics += chunk; }); child.stdout.resume();
     const manifest = () => JSON.parse(readFileSync(join(dist, 'manifest.json'), 'utf8'));
