@@ -46,7 +46,11 @@ export async function watching(config: BuildConfig, body: (watcher: Watcher) => 
       },
     }],
   });
-  const child = spawn(process.execPath, ['--input-type=module', '-e', `import {build} from ${JSON.stringify(pathToFileURL(runner).href)}; await build(${JSON.stringify({ ...config, watch: true })});`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // On POSIX the child leads its own process group, so the kill below also
+  // reaches the esbuild service it starts, which otherwise can still be
+  // writing into the output directory while the test removes it (ENOTEMPTY).
+  const group = process.platform !== 'win32';
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import {build} from ${JSON.stringify(pathToFileURL(runner).href)}; await build(${JSON.stringify({ ...config, watch: true })});`], { stdio: ['ignore', 'pipe', 'pipe'], detached: group });
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; });
   child.stderr.on('data', chunk => { output += chunk; });
@@ -62,7 +66,8 @@ export async function watching(config: BuildConfig, body: (watcher: Watcher) => 
   } finally {
     if (child.exitCode === null) {
       const exited = once(child, 'exit');
-      child.kill('SIGTERM');
+      if (group && child.pid !== undefined) process.kill(-child.pid, 'SIGTERM');
+      else child.kill('SIGTERM');
       await exited;
     }
   }
