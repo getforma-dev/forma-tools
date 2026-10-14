@@ -1,6 +1,6 @@
 import { createEffect as _$createEffect } from "@getforma/core";
 import { template as _$template } from "@getforma/core";
-import { h, createSignal } from '@getforma/core';
+import { h, createSignal } from 'formajs';
 const _tmpl$0 = _$template("<div id=\"compiled-counter\"><span id=\"compiled-count\"><!></span><button id=\"compiled-btn\">Compiled +1</button></div>");
 export function CompiledCounter() {
   const [count, setCount] = createSignal(0);

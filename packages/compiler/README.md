@@ -61,7 +61,7 @@ Patterns are matched against the module id with `\` normalized to `/` and any
 Vite query suffix (`?v=hash`) dropped. A `**` segment matches any number of path
 segments (including none) and `*` matches within one segment. A file is
 transformed only if it matches an include pattern, no exclude pattern, and
-imports `h` from `@getforma/core` (or from the aliased `formajs`, or `forma/`).
+imports from `formajs` / `forma/`.
 
 ## Server Functions — `formaServer`
 
