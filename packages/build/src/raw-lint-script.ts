@@ -1,0 +1,995 @@
+/**
+ * @getforma/build — the raw-entry lint's TypeScript, JavaScript and HTML
+ * scanner (FORMA-126; SR8).
+ *
+ * esbuild parses each file, as the build does: a file that does not parse is
+ * reported (BUILD-814) rather than passed unseen. Its output is the source with
+ * types erased, JSX turned into `h()` calls (an attribute becomes an object
+ * key, JSX text a string literal), comments dropped and string escapes
+ * normalised, so a small tokenizer reads it without meeting a type, a JSX text
+ * node or a comment. Positions are mapped back to the file as written through
+ * esbuild's source map.
+ *
+ * What it misses, by construction (each a reason the allowlist is reviewed,
+ * not a proof):
+ * - A sink reached through the application's own re-export of core
+ *   (`export * from '@getforma/core'` in `./forma.ts`, then `template()` from
+ *   `./forma`): `template`, `templateMany`, `reconcile` and `setHTMLUnsafe` are
+ *   tracked from core's own module names (`@getforma/core`, its subpaths,
+ *   `formajs`) and the CDN runtime's `FormaRuntime` global. `trustedHtml` is
+ *   matched by name wherever it comes from.
+ * - The registry key built at run time (`'@getforma/core' + '#trusted-types'`)
+ *   or found by `Object.getOwnPropertySymbols(globalThis)`.
+ * - A value's provenance across files or through a function: a raw sink is
+ *   passed only when its argument is a `trustedHtml(…)` call or a variable
+ *   this file binds to one; anything else is reported, so the lint errs on
+ *   the side of a listed entry.
+ * - The browser's own sinks (`innerHTML`, `insertAdjacentHTML`,
+ *   `document.write`, `Element.setHTMLUnsafe`): not Forma's exits, and what
+ *   Trusted Types refuses in the browser (DR-20). A `srcdoc` write is reported
+ *   in every form, the DOM's included.
+ *
+ * Verified by: packages/build/tests/raw-lint.test.ts
+ */
+
+import { transformSync, type Loader } from 'esbuild';
+
+import { positionIn, scanMarkup, type Found, type Position } from './raw-lint-exits.js';
+
+/** A file the lint could not read or parse (BUILD-814). */
+export class ScanError extends Error {
+  constructor(message: string, readonly line = 0, readonly column = 0) {
+    super(message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tokens
+// ---------------------------------------------------------------------------
+
+type TokType = 'id' | 'str' | 'tpl' | 'num' | 're' | 'p';
+
+interface Tok {
+  type: TokType;
+  /** The identifier, the punctuator, or a string's or template chunk's text between its delimiters. */
+  value: string;
+  /** Offset of the token's first character (a string's opening quote). */
+  start: number;
+  /** A `)` closing an `if`, `for`, `while` or `with` head: a `/` after it starts a regex. */
+  controlClose?: boolean;
+}
+
+const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+const CONTROL_HEAD = new Set(['if', 'for', 'while', 'with']);
+const PUNCTUATORS = [
+  '>>>=', '...', '===', '!==', '**=', '<<=', '>>=', '>>>', '&&=', '||=', '??=',
+  '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '**', '<<', '>>',
+];
+const IDENT = /[\p{ID_Start}$_\\][\p{ID_Continue}$‌‍\\]*/uy;
+const NUMBER = /(?:0[xXoObB][\da-fA-F_]+|\d[\d_]*(?:\.[\d_]*)?(?:[eE][+-]?\d+)?|\.\d[\d_]*(?:[eE][+-]?\d+)?)n?/y;
+
+/**
+ * Tokens of JavaScript as esbuild prints it. Comments are skipped; a string
+ * or regex that runs into a line end stops there, so a misread costs one line.
+ */
+function tokenize(code: string): Tok[] {
+  const toks: Tok[] = [];
+  const braces: Array<'{' | '${'> = [];
+  const parens: boolean[] = [];
+  const n = code.length;
+  let i = 0;
+
+  const regexAllowed = (): boolean => {
+    const t = toks[toks.length - 1];
+    if (!t) return true;
+    if (t.type === 'id') return REGEX_AFTER_WORD.has(t.value);
+    if (t.type !== 'p') return false;
+    if (t.value === ')') return t.controlClose === true;
+    return t.value !== ']';
+  };
+
+  /** A template's text from `from` to its closing backtick or next `${`. */
+  const templateChunk = (from: number): number => {
+    let j = from;
+    while (j < n) {
+      const c = code[j];
+      if (c === '\\') {
+        j += 2;
+        continue;
+      }
+      if (c === '`') {
+        toks.push({ type: 'tpl', value: code.slice(from, j), start: from - 1 });
+        return j + 1;
+      }
+      if (c === '$' && code[j + 1] === '{') {
+        toks.push({ type: 'tpl', value: code.slice(from, j), start: from - 1 });
+        toks.push({ type: 'p', value: '${', start: j });
+        braces.push('${');
+        return j + 2;
+      }
+      j++;
+    }
+    toks.push({ type: 'tpl', value: code.slice(from, n), start: from - 1 });
+    return n;
+  };
+
+  while (i < n) {
+    const c = code[i]!;
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v' || c === '﻿' || c === ' ' || c === ' ' || c === ' ') {
+      i++;
+      continue;
+    }
+    if (c === '#' && i === 0 && code[1] === '!') {
+      while (i < n && code[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && code[i + 1] === '/') {
+      while (i < n && code[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && code[i + 1] === '*') {
+      const end = code.indexOf('*/', i + 2);
+      i = end === -1 ? n : end + 2;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < n && code[j] !== c && code[j] !== '\n') j += code[j] === '\\' ? 2 : 1;
+      toks.push({ type: 'str', value: code.slice(i + 1, Math.min(j, n)), start: i });
+      i = j + 1;
+      continue;
+    }
+    if (c === '`') {
+      i = templateChunk(i + 1);
+      continue;
+    }
+    if (c === '/' && regexAllowed()) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < n && code[j] !== '\n') {
+        const d = code[j];
+        if (d === '\\') {
+          j += 2;
+          continue;
+        }
+        if (inClass) {
+          if (d === ']') inClass = false;
+        } else if (d === '[') {
+          inClass = true;
+        } else if (d === '/') {
+          break;
+        }
+        j++;
+      }
+      j++;
+      while (j < n && /[a-z]/i.test(code[j]!)) j++;
+      toks.push({ type: 're', value: code.slice(i, j), start: i });
+      i = j;
+      continue;
+    }
+    // A private name (`#paint`) is one identifier, so a symbol names it as written.
+    IDENT.lastIndex = c === '#' ? i + 1 : i;
+    const id = IDENT.exec(code);
+    if (id) {
+      const value = c === '#' ? '#' + id[0] : id[0];
+      toks.push({ type: 'id', value, start: i });
+      i += value.length;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(code[i + 1] ?? ''))) {
+      NUMBER.lastIndex = i;
+      const num = NUMBER.exec(code);
+      const len = num ? num[0].length : 1;
+      toks.push({ type: 'num', value: code.slice(i, i + len), start: i });
+      i += len;
+      continue;
+    }
+    if (c === '}') {
+      if (braces.pop() === '${') {
+        toks.push({ type: 'p', value: '}', start: i });
+        i = templateChunk(i + 1);
+        continue;
+      }
+      toks.push({ type: 'p', value: '}', start: i });
+      i++;
+      continue;
+    }
+    if (c === '{') {
+      braces.push('{');
+      toks.push({ type: 'p', value: '{', start: i });
+      i++;
+      continue;
+    }
+    if (c === '(') {
+      const prev = toks[toks.length - 1];
+      parens.push(prev?.type === 'id' && CONTROL_HEAD.has(prev.value));
+      toks.push({ type: 'p', value: '(', start: i });
+      i++;
+      continue;
+    }
+    if (c === ')') {
+      toks.push({ type: 'p', value: ')', start: i, controlClose: parens.pop() === true });
+      i++;
+      continue;
+    }
+    let punct = c;
+    for (const p of PUNCTUATORS) {
+      if (code.startsWith(p, i) && !(p === '?.' && /[0-9]/.test(code[i + 2] ?? ''))) {
+        punct = p;
+        break;
+      }
+    }
+    toks.push({ type: 'p', value: punct, start: i });
+    i += punct.length;
+  }
+  return toks;
+}
+
+/** For each bracket token, the index of its partner; -1 elsewhere or when unbalanced. */
+function pairBrackets(toks: Tok[]): number[] {
+  const pair = new Array<number>(toks.length).fill(-1);
+  const stack: number[] = [];
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]!;
+    if (t.type !== 'p') continue;
+    if (t.value === '(' || t.value === '[' || t.value === '{' || t.value === '${') {
+      stack.push(i);
+    } else if (t.value === ')' || t.value === ']' || t.value === '}') {
+      const open = stack.pop();
+      if (open !== undefined) {
+        pair[open] = i;
+        pair[i] = open;
+      }
+    }
+  }
+  return pair;
+}
+
+// ---------------------------------------------------------------------------
+// Source map
+// ---------------------------------------------------------------------------
+
+const BASE64_VALUE = new Map<string, number>(
+  [...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'].map((c, i) => [c, i]),
+);
+
+/** Per generated line, `[generatedColumn, sourceLine, sourceColumn]`, 0-based (source map v3). */
+function decodeMappings(mappings: string): Array<Array<[number, number, number]>> {
+  const lines: Array<Array<[number, number, number]>> = [];
+  let sourceLine = 0;
+  let sourceColumn = 0;
+  for (const lineText of mappings.split(';')) {
+    const segments: Array<[number, number, number]> = [];
+    let generatedColumn = 0;
+    for (const segmentText of lineText.split(',')) {
+      if (!segmentText) continue;
+      const fields: number[] = [];
+      let value = 0;
+      let shift = 0;
+      for (const char of segmentText) {
+        const digit = BASE64_VALUE.get(char);
+        if (digit === undefined) break;
+        value += (digit & 31) * 2 ** shift;
+        if (digit & 32) {
+          shift += 5;
+          continue;
+        }
+        fields.push(value % 2 === 1 ? -Math.floor(value / 2) : value / 2);
+        value = 0;
+        shift = 0;
+      }
+      generatedColumn += fields[0] ?? 0;
+      if (fields.length < 4) continue;
+      sourceLine += fields[2]!;
+      sourceColumn += fields[3]!;
+      segments.push([generatedColumn, sourceLine, sourceColumn]);
+    }
+    lines.push(segments);
+  }
+  return lines;
+}
+
+function lineStartsOf(text: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+  return starts;
+}
+
+/** Maps an offset in esbuild's output to the line and column written in the source. */
+class PositionMap {
+  private readonly lineStarts: number[];
+  private readonly sourceLineStarts: number[];
+  private readonly segments: Array<Array<[number, number, number]>>;
+
+  constructor(private readonly code: string, private readonly source: string, mappings: string) {
+    this.lineStarts = lineStartsOf(code);
+    this.sourceLineStarts = lineStartsOf(source);
+    this.segments = decodeMappings(mappings);
+  }
+
+  /** The source position of the generated offset (1-based line and column). */
+  at(offset: number): Position {
+    let lo = 0;
+    let hi = this.lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this.lineStarts[mid]! <= offset) lo = mid;
+      else hi = mid - 1;
+    }
+    const column = offset - this.lineStarts[lo]!;
+    // The last segment at or before the column; else the nearest line above.
+    for (let line = lo; line >= 0; line--) {
+      const segs = this.segments[line] ?? [];
+      let best: [number, number, number] | undefined;
+      for (const s of segs) {
+        if (line === lo && s[0] > column) break;
+        best = s;
+      }
+      if (best) {
+        const delta = line === lo ? column - best[0] : 0;
+        return { line: best[1] + 1, column: best[2] + 1 + Math.max(0, delta) };
+      }
+    }
+    return { line: lo + 1, column: column + 1 };
+  }
+
+  /**
+   * The source position of an offset inside a string or template token that
+   * starts at `tokenStart`: esbuild prints a template's text as written, so
+   * the lines inside it are the source's.
+   */
+  inside(tokenStart: number, offset: number): Position {
+    const start = this.at(tokenStart);
+    // A JSX attribute name or text node is printed as a string: its first
+    // character was not a quote in the source.
+    const sourceOffset = (this.sourceLineStarts[start.line - 1] ?? 0) + start.column - 1;
+    const unquoted = this.source[sourceOffset] !== this.code[tokenStart];
+    const at = positionIn(this.code, offset, { offset: tokenStart, line: start.line, column: start.column });
+    return unquoted && at.line === start.line ? { line: at.line, column: at.column - 1 } : at;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The scan
+// ---------------------------------------------------------------------------
+
+/** Module names core is published under; a subpath of any counts. */
+const FORMA_MODULES = ['@getforma/core', 'formajs'];
+/** The sinks a call names by function, with the index of the markup argument. */
+const SINK_ARGUMENT: ReadonlyMap<string, number> = new Map([
+  ['template', 0],
+  ['templateMany', 0],
+  ['setHTMLUnsafe', 1],
+  ['reconcile', 1],
+]);
+const GLOBAL_OBJECTS = new Set(['window', 'globalThis', 'self']);
+
+function isFormaModule(spec: string): boolean {
+  return FORMA_MODULES.some((m) => spec === m || spec.startsWith(m + '/'));
+}
+
+/**
+ * The loaders to try, the file's own first: a file whose extension
+ * understates it (JSX or TypeScript in a `.js` file) is still read, since a
+ * file read leniently can still be checked, and one that parses under none
+ * of them is reported.
+ */
+function loaderFor(file: string): Loader[] {
+  const lower = file.toLowerCase();
+  if (lower.endsWith('.tsx')) return ['tsx'];
+  if (lower.endsWith('.ts') || lower.endsWith('.mts') || lower.endsWith('.cts')) return ['ts', 'tsx'];
+  if (lower.endsWith('.jsx')) return ['jsx', 'tsx'];
+  return ['js', 'jsx', 'ts', 'tsx'];
+}
+
+/**
+ * The raw entries in a TypeScript or JavaScript source. Throws a
+ * {@link ScanError} when esbuild cannot parse it.
+ *
+ * Verified by: packages/build/tests/raw-lint.test.ts > "TypeScript exits: each fails unlisted, passes listed, fails expired"
+ */
+export function scanScript(source: string, file: string, loaders: Loader[] = loaderFor(file)): Found[] {
+  let transformed: { code: string; map: string } | undefined;
+  let firstError: unknown;
+  for (const loader of loaders) {
+    try {
+      transformed = transformSync(source, {
+        loader,
+        jsx: 'transform',
+        jsxFactory: 'h',
+        jsxFragment: 'Fragment',
+        sourcemap: 'external',
+        sourcefile: file,
+        legalComments: 'none',
+        charset: 'utf8',
+        target: 'esnext',
+        logLevel: 'silent',
+        tsconfigRaw: { compilerOptions: { experimentalDecorators: true } },
+      });
+      break;
+    } catch (err) {
+      firstError ??= err;
+    }
+  }
+  if (!transformed) {
+    const first = (firstError as { errors?: Array<{ text: string; location?: { line: number; column: number } | null }> }).errors?.[0];
+    throw new ScanError(
+      first ? `esbuild could not parse it: ${first.text}` : `esbuild could not parse it: ${String(firstError)}`,
+      first?.location?.line ?? 0,
+      first?.location ? first.location.column + 1 : 0,
+    );
+  }
+  const map = JSON.parse(transformed.map) as { mappings: string };
+  return new ScriptScan(transformed.code, new PositionMap(transformed.code, source, map.mappings)).run();
+}
+
+class ScriptScan {
+  private readonly toks: Tok[];
+  private readonly pair: number[];
+  private readonly found: Found[] = [];
+  /** Token indices not to read as uses: import and re-export lists, destructured requires. */
+  private readonly skip = new Set<number>();
+  /** Local names bound to core's trustedHtml (beside `trustedHtml` itself). */
+  private readonly trustedCallees = new Set<string>(['trustedHtml']);
+  /** Local names bound to core's other sinks, to the sink's name. */
+  private readonly sinkLocals = new Map<string, string>();
+  /** Local names bound to core's module as a namespace. */
+  private readonly namespaces = new Set<string>(['FormaRuntime']);
+  /** Variables this file binds to a trustedHtml() call. */
+  private readonly trustedVars = new Set<string>();
+  /** Export specifiers that rename trustedHtml, by token index, to the new name. */
+  private readonly exportAliases = new Map<number, string>();
+  private symbols: Array<string | null> = [];
+
+  constructor(code: string, private readonly map: PositionMap) {
+    this.toks = tokenize(code);
+    this.pair = pairBrackets(this.toks);
+  }
+
+  run(): Found[] {
+    this.collectBindings();
+    this.collectTrustedVars();
+    this.symbols = this.computeSymbols();
+    for (let i = 0; i < this.toks.length; i++) this.visit(i);
+    return this.found;
+  }
+
+  // -- helpers --------------------------------------------------------------
+
+  private t(i: number): Tok | undefined {
+    return this.toks[i];
+  }
+
+  private isP(i: number, value: string): boolean {
+    const t = this.toks[i];
+    return t !== undefined && t.type === 'p' && t.value === value;
+  }
+
+  private isId(i: number, value?: string): boolean {
+    const t = this.toks[i];
+    return t !== undefined && t.type === 'id' && (value === undefined || t.value === value);
+  }
+
+  private report(i: number, exit: string, message: string, at?: Position): void {
+    const pos = at ?? this.map.at(this.toks[i]!.start);
+    this.found.push({ exit, line: pos.line, column: pos.column, symbol: this.symbols[i] ?? null, message });
+  }
+
+  /**
+   * The end (exclusive) of the expression starting at `start`: the next `,`
+   * or `;` at its own depth, or the bracket that closes around it.
+   */
+  private expressionEnd(start: number): number {
+    let k = start;
+    while (k < this.toks.length) {
+      const t = this.toks[k]!;
+      if (t.type === 'p') {
+        if (t.value === '(' || t.value === '[' || t.value === '{' || t.value === '${') {
+          const close = this.pair[k]!;
+          if (close === -1) return this.toks.length;
+          k = close + 1;
+          continue;
+        }
+        if (t.value === ',' || t.value === ';' || t.value === ')' || t.value === ']' || t.value === '}') return k;
+      }
+      k++;
+    }
+    return k;
+  }
+
+  /** The tokens of call argument `index` of the call whose `(` is at `open`, or null. */
+  private argument(open: number, index: number): [number, number] | null {
+    const close = this.pair[open]!;
+    let start = open + 1;
+    for (let a = 0; ; a++) {
+      if (start >= close) return null;
+      const end = this.expressionEnd(start);
+      if (a === index) return end > start ? [start, end] : null;
+      if (!this.isP(end, ',')) return null;
+      start = end + 1;
+    }
+  }
+
+  /**
+   * The length of a trustedHtml callee at `i`: `trustedHtml`, a local bound to
+   * it, or `ns.trustedHtml` on core's namespace (behind `window.` and the like
+   * for the CDN global); 0 if there is none.
+   */
+  private trustedCalleeLength(i: number): number {
+    let k = i;
+    if (this.isId(k) && GLOBAL_OBJECTS.has(this.toks[k]!.value) && this.isP(k + 1, '.')) k += 2;
+    if (this.isId(k) && this.namespaces.has(this.toks[k]!.value) && this.isP(k + 1, '.') && this.isId(k + 2, 'trustedHtml')) return k + 3 - i;
+    if (k === i && this.isId(k) && this.trustedCallees.has(this.toks[k]!.value)) return 1;
+    return 0;
+  }
+
+  /** Whether the expression in `[a, b)` is markup vouched for by trustedHtml(). */
+  private isTrusted(a: number, b: number): boolean {
+    while (a < b && this.isP(a, '(') && this.pair[a] === b - 1) {
+      a++;
+      b--;
+    }
+    if (b - a === 1 && this.isId(a) && this.trustedVars.has(this.toks[a]!.value)) return true;
+    const callee = this.trustedCalleeLength(a);
+    if (callee === 0) return false;
+    let open = a + callee;
+    if (this.isP(open, '?.')) open++;
+    return this.isP(open, '(') && this.pair[open] === b - 1;
+  }
+
+  // -- bindings -------------------------------------------------------------
+
+  /** Imports, re-exports and destructured requires of core. */
+  private collectBindings(): void {
+    const toks = this.toks;
+    for (let i = 0; i < toks.length; i++) {
+      if (this.isId(i, 'import') && !this.isP(i - 1, '.') && !this.isP(i + 1, '(') && !this.isP(i + 1, '.')) {
+        i = this.importStatement(i);
+      } else if (this.isId(i, 'export') && (this.isP(i + 1, '{') || this.isP(i + 1, '*'))) {
+        i = this.exportStatement(i);
+      } else if ((this.isId(i, 'const') || this.isId(i, 'let') || this.isId(i, 'var')) && !this.isP(i - 1, '.')) {
+        this.destructuredRequire(i);
+      }
+    }
+  }
+
+  private importStatement(i: number): number {
+    // Find `from "module"` or a bare `import "module"`.
+    let k = i + 1;
+    const specifiers: Array<{ imported: string; local: string; at: number }> = [];
+    const namespaceLocals: string[] = [];
+    if (this.t(k)?.type === 'str') return k;
+    while (k < this.toks.length && !this.isId(k, 'from') && !this.isP(k, ';')) {
+      if (this.isP(k, '{')) {
+        const close = this.pair[k]!;
+        let s = k + 1;
+        while (s < close) {
+          const nameTok = this.t(s)!;
+          if (nameTok.type === 'id' || nameTok.type === 'str') {
+            if (this.isId(s + 1, 'as')) {
+              specifiers.push({ imported: nameTok.value, local: this.t(s + 2)!.value, at: s });
+              s += 3;
+            } else {
+              specifiers.push({ imported: nameTok.value, local: nameTok.value, at: s });
+              s += 1;
+            }
+          } else {
+            s += 1;
+          }
+        }
+        k = close + 1;
+        continue;
+      }
+      if (this.isP(k, '*') && this.isId(k + 1, 'as') && this.isId(k + 2)) {
+        namespaceLocals.push(this.t(k + 2)!.value);
+        k += 3;
+        continue;
+      }
+      if (this.isId(k) && this.t(k)!.value !== 'type') namespaceLocals.push(this.t(k)!.value);
+      k++;
+    }
+    const moduleTok = this.isId(k, 'from') ? this.t(k + 1) : undefined;
+    const end = moduleTok ? k + 1 : k;
+    for (let s = i; s <= end; s++) this.skip.add(s);
+    const fromCore = moduleTok !== undefined && moduleTok.type === 'str' && isFormaModule(moduleTok.value);
+    if (fromCore) for (const ns of namespaceLocals) this.namespaces.add(ns);
+    for (const spec of specifiers) this.bindImport(spec.imported, spec.local, fromCore);
+    return end;
+  }
+
+  /**
+   * trustedHtml under another name is followed wherever it is imported from
+   * (an application's own module may re-export it); the other sinks, whose
+   * names are common words, only from core.
+   */
+  private bindImport(imported: string, local: string, fromCore: boolean): void {
+    if (imported === 'trustedHtml') this.trustedCallees.add(local);
+    else if (fromCore && SINK_ARGUMENT.has(imported)) this.sinkLocals.set(local, imported);
+  }
+
+  /**
+   * `export { … } from` and `export { … }`: not uses, but trustedHtml
+   * exported under another name hides it from importers, so that is one.
+   */
+  private exportStatement(i: number): number {
+    if (this.isP(i + 1, '*')) {
+      let k = i + 1;
+      while (k < this.toks.length && !this.isP(k, ';') && this.t(k)?.type !== 'str') k++;
+      for (let s = i; s <= k; s++) this.skip.add(s);
+      return k;
+    }
+    const close = this.pair[i + 1]!;
+    if (close === -1) return i;
+    const reexport = this.isId(close + 1, 'from');
+    for (let s = i + 2; s < close; s++) {
+      const nameTok = this.t(s)!;
+      if ((nameTok.type === 'id' || nameTok.type === 'str') && this.isId(s + 1, 'as')) {
+        const alias = this.t(s + 2)!.value;
+        // `export { trustedHtml as x }`, or a local bound to it exported under a third name.
+        const isTrusted = nameTok.value === 'trustedHtml' || (!reexport && this.trustedCallees.has(nameTok.value));
+        if (isTrusted && alias !== 'trustedHtml') this.exportAliases.set(s, alias);
+      }
+    }
+    const end = reexport ? close + 2 : close;
+    for (let s = i; s <= end; s++) this.skip.add(s);
+    return end;
+  }
+
+  /** `const { reconcile } = require('@getforma/core/runtime')`, `= await import(…)`, `= FormaRuntime`. */
+  private destructuredRequire(i: number): void {
+    const pattern = i + 1;
+    let eq: number;
+    if (this.isP(pattern, '{')) {
+      const close = this.pair[pattern]!;
+      if (close === -1) return;
+      eq = close + 1;
+    } else if (this.isId(pattern)) {
+      eq = pattern + 1;
+    } else {
+      return;
+    }
+    if (!this.isP(eq, '=')) return;
+    let k = eq + 1;
+    if (this.isId(k, 'await')) k++;
+    let fromCore = false;
+    if ((this.isId(k, 'require') || this.isId(k, 'import')) && this.isP(k + 1, '(') && this.t(k + 2)?.type === 'str' && this.isP(k + 3, ')')) {
+      fromCore = isFormaModule(this.t(k + 2)!.value);
+    } else {
+      let g = k;
+      if (this.isId(g) && GLOBAL_OBJECTS.has(this.t(g)!.value) && this.isP(g + 1, '.')) g += 2;
+      fromCore = this.isId(g, 'FormaRuntime') && !this.isP(g + 1, '.') && !this.isP(g + 1, '(');
+    }
+    if (!fromCore) return;
+    if (this.isId(pattern)) {
+      this.namespaces.add(this.t(pattern)!.value);
+      return;
+    }
+    const close = this.pair[pattern]!;
+    for (let s = pattern + 1; s < close; s++) {
+      const nameTok = this.t(s)!;
+      if (nameTok.type !== 'id') continue;
+      if (this.isP(s + 1, ':') && this.isId(s + 2)) {
+        this.bindImport(nameTok.value, this.t(s + 2)!.value, true);
+        this.skip.add(s);
+        this.skip.add(s + 2);
+        s += 2;
+      } else if (this.isP(s - 1, '{') || this.isP(s - 1, ',')) {
+        this.bindImport(nameTok.value, nameTok.value, true);
+        this.skip.add(s);
+      }
+    }
+  }
+
+  /**
+   * Variables bound to a trustedHtml() call (their uses are the call's), and
+   * locals bound to trustedHtml itself (calls through them are uses).
+   */
+  private collectTrustedVars(): void {
+    // Two rounds, so `const th = trustedHtml; const x = th(…)` is followed.
+    for (let round = 0; round < 2; round++) {
+      for (let i = 0; i < this.toks.length; i++) {
+        if (!(this.isId(i, 'const') || this.isId(i, 'let') || this.isId(i, 'var'))) continue;
+        let k = i + 1;
+        while (this.isId(k) && this.isP(k + 1, '=')) {
+          const name = this.t(k)!.value;
+          const start = k + 2;
+          const end = this.expressionEnd(start);
+          if (this.isTrusted(start, end)) this.trustedVars.add(name);
+          else {
+            const callee = this.trustedCalleeLength(start);
+            if (callee > 0 && start + callee === end) this.trustedCallees.add(name);
+          }
+          if (!this.isP(end, ',')) break;
+          k = end + 1;
+        }
+      }
+    }
+  }
+
+  // -- symbols --------------------------------------------------------------
+
+  /** For each token, the dotted names of the functions, methods and classes around it. */
+  private computeSymbols(): Array<string | null> {
+    const toks = this.toks;
+    const classBodies = new Map<number, string | null>();
+    for (let i = 0; i < toks.length; i++) {
+      if (!this.isId(i, 'class') || this.isP(i - 1, '.') || this.isP(i + 1, ':')) continue;
+      const name = this.isId(i + 1) && this.t(i + 1)!.value !== 'extends' ? this.t(i + 1)!.value : this.nameBeforeValue(i - 1);
+      let k = i + 1;
+      while (k < toks.length && !this.isP(k, '{')) {
+        if (this.isP(k, '(') || this.isP(k, '[')) k = Math.max(k, this.pair[k]!);
+        k++;
+      }
+      classBodies.set(k, name);
+    }
+    const out = new Array<string | null>(toks.length).fill(null);
+    const stack: Array<{ close: number; name: string | null }> = [];
+    let current: string | null = null;
+    for (let i = 0; i < toks.length; i++) {
+      while (stack.length > 0 && stack[stack.length - 1]!.close < i) {
+        stack.pop();
+        current = this.joined(stack);
+      }
+      out[i] = current;
+      if (this.isP(i, '{') && this.pair[i]! > i) {
+        const name = classBodies.has(i) ? classBodies.get(i)! : this.scopeName(i);
+        stack.push({ close: this.pair[i]!, name });
+        current = this.joined(stack);
+      }
+    }
+    return out;
+  }
+
+  private joined(stack: Array<{ name: string | null }>): string | null {
+    const names = stack.map((s) => s.name).filter((n): n is string => n !== null);
+    return names.length > 0 ? names.join('.') : null;
+  }
+
+  /** The name a `{` at `k` opens a body for: a function, a method, an arrow assigned to a name. */
+  private scopeName(k: number): string | null {
+    if (this.isP(k - 1, ')')) {
+      const open = this.pair[k - 1]!;
+      if (open < 1) return null;
+      const before = this.t(open - 1)!;
+      if (before.type === 'id') {
+        if (['if', 'for', 'while', 'switch', 'catch', 'with'].includes(before.value)) return null;
+        if (before.value === 'await' && this.isId(open - 2, 'for')) return null;
+        if (before.value === 'function') return this.nameBeforeFunction(open - 1);
+        if (this.isP(open - 2, '.')) return null;
+        return before.value;
+      }
+      if (before.type === 'str') return before.value;
+      if (this.isP(open - 1, '*') && this.isId(open - 2, 'function')) return this.nameBeforeFunction(open - 2);
+      return null;
+    }
+    if (this.isP(k - 1, '=>')) {
+      let start = k - 2;
+      if (this.isP(start, ')')) start = this.pair[start]!;
+      let b = start - 1;
+      if (this.isId(b, 'async')) b--;
+      return this.nameBeforeValue(b);
+    }
+    if (this.isP(k - 1, '=')) return this.nameBeforeValue(k - 1);
+    return null;
+  }
+
+  private nameBeforeFunction(fn: number): string | null {
+    let b = fn - 1;
+    if (this.isId(b, 'async')) b--;
+    return this.nameBeforeValue(b);
+  }
+
+  /** `name =` or `name:` just before a value at `b + 1`. */
+  private nameBeforeValue(b: number): string | null {
+    if (this.isP(b, '=') || this.isP(b, ':')) {
+      const name = this.t(b - 1);
+      if (name && (name.type === 'id' || name.type === 'str')) return name.value;
+    }
+    return null;
+  }
+
+  // -- uses -----------------------------------------------------------------
+
+  private visit(i: number): void {
+    const tok = this.toks[i]!;
+    if (tok.type === 'str' || tok.type === 'tpl') {
+      for (const m of scanMarkup(tok.value)) {
+        this.report(i, m.exit, m.message, this.map.inside(tok.start, tok.start + 1 + m.offset));
+      }
+    }
+    const alias = this.exportAliases.get(i);
+    if (alias !== undefined) this.report(i, 'trustedHtml', `trustedHtml exported as ${alias}, which a search for trustedHtml does not find`);
+    if (this.skip.has(i)) return;
+    if (tok.type === 'str') this.visitString(i, tok);
+    else if (tok.type === 'id') this.visitIdentifier(i, tok);
+  }
+
+  /** A key in an object literal: `{ key:` or `, key:`. */
+  private isKey(i: number): boolean {
+    return this.isP(i + 1, ':') && (this.isP(i - 1, '{') || this.isP(i - 1, ','));
+  }
+
+  /** A shorthand property `{ key }` or `{ a, key, b }`. */
+  private isShorthand(i: number): boolean {
+    return (this.isP(i - 1, '{') || this.isP(i - 1, ',')) && (this.isP(i + 1, ',') || this.isP(i + 1, '}')) && this.enclosingIsBrace(i);
+  }
+
+  private enclosingIsBrace(i: number): boolean {
+    return this.enclosingOpener(i) === '{';
+  }
+
+  /** The innermost bracket open around token `i`: `(`, `[`, `{`, `${`, or null at the top level. */
+  private enclosingOpener(i: number): string | null {
+    let depth = 0;
+    for (let k = i - 1; k >= 0; k--) {
+      const t = this.toks[k]!;
+      if (t.type !== 'p') continue;
+      if (t.value === ')' || t.value === ']' || t.value === '}') depth++;
+      else if (t.value === '(' || t.value === '[' || t.value === '{' || t.value === '${') {
+        if (depth === 0) return t.value;
+        depth--;
+      }
+    }
+    return null;
+  }
+
+  private visitString(i: number, tok: Tok): void {
+    const isSrcdoc = /^srcdoc$/i.test(tok.value);
+    if (tok.value === 'dangerouslySetInnerHTML' || isSrcdoc) {
+      if (this.isKey(i)) {
+        this.checkKeyValue(i, i + 2, isSrcdoc ? 'srcdoc' : 'dangerouslySetInnerHTML');
+        return;
+      }
+      // A computed key: `["srcdoc"]: value`.
+      if (this.isP(i - 1, '[') && this.isP(i + 1, ']') && this.isP(i + 2, ':')) {
+        this.checkKeyValue(i, i + 3, isSrcdoc ? 'srcdoc' : 'dangerouslySetInnerHTML');
+        return;
+      }
+    }
+    // An attribute name argument: setAttr(el, 'srcdoc', value), el.setAttribute('srcdoc', value).
+    if (isSrcdoc && (this.isP(i - 1, '(') || this.isP(i - 1, ',')) && this.isP(i + 1, ',') && this.enclosingOpener(i) === '(') {
+      const end = this.expressionEnd(i + 2);
+      if (!this.isTrusted(i + 2, end)) this.report(i, 'srcdoc', "the srcdoc attribute set to a value not traced to trustedHtml()");
+    }
+  }
+
+  private visitIdentifier(i: number, tok: Tok): void {
+    const name = tok.value;
+    const afterDot = this.isP(i - 1, '.') || this.isP(i - 1, '?.');
+    const onNamespace = afterDot && this.isId(i - 2) && this.namespaces.has(this.t(i - 2)!.value);
+
+    // trustedHtml, and any local bound to it.
+    if (name === 'trustedHtml' || (!afterDot && this.trustedCallees.has(name))) {
+      if (this.isKey(i) && name !== 'trustedHtml') return;
+      // `const mint = trustedHtml`: the new name's declaration is not a use; the reference is.
+      if (name !== 'trustedHtml' && this.isP(i + 1, '=') && (this.isId(i - 1, 'const') || this.isId(i - 1, 'let') || this.isId(i - 1, 'var'))) return;
+      const called = this.isP(i + 1, '(') || (this.isP(i + 1, '?.') && this.isP(i + 2, '('));
+      const as = name === 'trustedHtml' ? '' : ` as ${name}()`;
+      if (this.isId(i - 1, 'function')) this.report(i, 'trustedHtml', 'a function named trustedHtml: its callers reach raw markup by that name');
+      else if (called) this.report(i, 'trustedHtml', `trustedHtml() called${as}`);
+      else if (this.isKey(i)) this.report(i, 'trustedHtml', 'a property named trustedHtml');
+      else this.report(i, 'trustedHtml', `trustedHtml referenced${name === 'trustedHtml' ? '' : ` as ${name}`}, not called: the lint cannot see what it is given`);
+      return;
+    }
+
+    // template, templateMany, setHTMLUnsafe, reconcile from core.
+    const sink = onNamespace ? (SINK_ARGUMENT.has(name) ? name : undefined) : !afterDot && !this.isKey(i) ? this.sinkLocals.get(name) : undefined;
+    if (sink) {
+      const open = this.isP(i + 1, '(') ? i + 1 : this.isP(i + 1, '?.') && this.isP(i + 2, '(') ? i + 2 : -1;
+      if (open === -1) {
+        this.report(i, sink, `${sink} referenced, not called: the lint cannot see what it is given`);
+        return;
+      }
+      const arg = this.argument(open, SINK_ARGUMENT.get(sink)!);
+      if (!arg || !this.isTrusted(arg[0], arg[1])) this.report(i, sink, `${sink}() given markup not traced to trustedHtml()`);
+      return;
+    }
+
+    // Props and attributes: dangerouslySetInnerHTML and srcdoc.
+    const isSrcdoc = /^srcdoc$/i.test(name);
+    if (name !== 'dangerouslySetInnerHTML' && !isSrcdoc) return;
+    const exit = isSrcdoc ? 'srcdoc' : 'dangerouslySetInnerHTML';
+    if (this.isKey(i)) {
+      this.checkKeyValue(i, i + 2, exit);
+    } else if (!afterDot && this.isShorthand(i)) {
+      this.report(i, exit, `${name} passed by shorthand: the lint cannot see what it holds`);
+    } else if (afterDot && this.isP(i + 1, '=')) {
+      this.checkKeyValue(i, i + 2, exit);
+    }
+  }
+
+  /** `dangerouslySetInnerHTML: { __html: trustedHtml(…) }` or `srcdoc: trustedHtml(…)` passes; anything else is a use. */
+  private checkKeyValue(i: number, start: number, exit: string): void {
+    const end = this.expressionEnd(start);
+    if (exit === 'srcdoc') {
+      if (!this.isTrusted(start, end)) this.report(i, 'srcdoc', 'srcdoc set to a value not traced to trustedHtml()');
+      return;
+    }
+    if (this.isTrusted(start, end)) return;
+    let seen = 0;
+    let trusted = 0;
+    for (let k = start; k < end; k++) {
+      const t = this.toks[k]!;
+      if ((t.type === 'id' || t.type === 'str') && t.value === '__html' && this.isKey(k)) {
+        seen++;
+        if (this.isTrusted(k + 2, this.expressionEnd(k + 2))) trusted++;
+      }
+    }
+    if (seen === 0 || trusted < seen) {
+      this.report(i, 'dangerouslySetInnerHTML', seen === 0
+        ? 'dangerouslySetInnerHTML set to a value the lint cannot read as { __html: trustedHtml(…) }'
+        : 'dangerouslySetInnerHTML with an __html not traced to trustedHtml()');
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HTML
+// ---------------------------------------------------------------------------
+
+const SCRIPT_TYPES = new Set(['', 'module', 'text/javascript', 'application/javascript', 'text/ecmascript', 'application/ecmascript']);
+
+/**
+ * The raw entries in an HTML file: the markup exits in its tags (not its text
+ * or comments), and every exit in its inline scripts.
+ *
+ * Verified by: packages/build/tests/raw-lint.test.ts > "markup exits: each fails unlisted, passes listed, fails expired"
+ */
+export function scanHtml(source: string, file: string): Found[] {
+  const found: Found[] = [];
+  // Comments become spaces, so offsets and lines stay the file's.
+  const masked = source.replace(/<!--[\s\S]*?(?:-->|$)/g, (m) => m.replace(/[^\n]/g, ' '));
+  const blank = (from: number, to: number, text: string) => text.slice(0, from) + text.slice(from, to).replace(/[^\n]/g, ' ') + text.slice(to);
+  let tags = masked;
+  for (const m of masked.matchAll(/<(script|style)\b([^>]*)>([\s\S]*?)(?:<\/\1\s*>|$)/gi)) {
+    const contentStart = m.index! + m[0].indexOf('>') + 1;
+    const contentEnd = contentStart + m[3]!.length;
+    tags = blank(contentStart, contentEnd, tags);
+    if (m[1]!.toLowerCase() !== 'script') continue;
+    const attrs = m[2]!;
+    if (/\bsrc\s*=/i.test(attrs)) continue;
+    const type = /\btype\s*=\s*["']?([^"'\s>]*)/i.exec(attrs)?.[1]?.toLowerCase() ?? '';
+    if (!SCRIPT_TYPES.has(type)) continue;
+    // The script alone, at its own offsets.
+    const virtual = source.slice(0, contentStart).replace(/[^\n]/g, ' ') + source.slice(contentStart, contentEnd);
+    try {
+      found.push(...scanScript(virtual, file, ['js', 'jsx']));
+    } catch (err) {
+      if (err instanceof ScanError) throw new ScanError(`an inline script: ${err.message}`, err.line, err.column);
+      throw err;
+    }
+  }
+  for (const tag of htmlTags(tags)) {
+    for (const m of scanMarkup(tag.text)) {
+      const pos = positionIn(source, tag.start + m.offset);
+      found.push({ exit: m.exit, line: pos.line, column: pos.column, symbol: null, message: m.message });
+    }
+  }
+  return found.sort((a, b) => a.line - b.line || a.column - b.column);
+}
+
+/** Each start tag, its quoted attribute values honoured (a `>` inside one does not end it). */
+function htmlTags(text: string): Array<{ start: number; text: string }> {
+  const tags: Array<{ start: number; text: string }> = [];
+  const n = text.length;
+  let i = text.indexOf('<');
+  while (i !== -1 && i < n) {
+    if (!/[a-zA-Z]/.test(text[i + 1] ?? '')) {
+      i = text.indexOf('<', i + 1);
+      continue;
+    }
+    let j = i + 1;
+    while (j < n && text[j] !== '>') {
+      const c = text[j];
+      if (c === '"' || c === "'") {
+        const close = text.indexOf(c, j + 1);
+        j = close === -1 ? n : close + 1;
+        continue;
+      }
+      j++;
+    }
+    tags.push({ start: i, text: text.slice(i, Math.min(j + 1, n)) });
+    i = text.indexOf('<', j);
+  }
+  return tags;
+}

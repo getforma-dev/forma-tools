@@ -84,7 +84,8 @@ They are BUILD-504, a construct DR-1's published subset admits (its reads
 are reported where they are), and the deprecations, whose old paths keep
 working in A2: BUILD-802 to BUILD-804 (build options and the wasm-pack step;
 a build that still sets `wasm` passes in strict mode) and BUILD-901 (the
-compiler's `transformServerFunctions`).
+compiler's `transformServerFunctions`). The raw-entry lint's BUILD-813, an allowlist
+entry that lists nothing, is a note too: the lint's run does not fail on it.
 
 ## Families
 
@@ -97,7 +98,7 @@ compiler's `transformServerFunctions`).
 | BUILD-5xx | A signal the compiler cannot name |
 | BUILD-6xx | The page module: a placeholder, or a literal too long |
 | BUILD-7xx | A construct adoption does not handle; `browserOnly()` is the way out |
-| BUILD-8xx | The build package (reported by `@getforma/build`) |
+| BUILD-8xx | The build package (reported by `@getforma/build`), its raw-entry lint included (BUILD-810 to BUILD-814) |
 | BUILD-9xx | The compiler's own deprecated entry points (logged when called) |
 
 ## The codes
@@ -755,6 +756,72 @@ Printed by the build itself (FORMA-131), on the console and in `BuildResult.warn
 **In strict mode.** A note: never an error.
 
 Printed by the build itself (FORMA-131), on the console and in `BuildResult.warnings`; in the report as a note (`packages/build/tests/wasm-deprecation.test.ts` > "a strict build that still sets wasm passes, with BUILD-803 and BUILD-804 as notes in its report (FORMA-119)").
+
+### The raw-entry lint: BUILD-810 to BUILD-814
+
+`forma-raw-lint`, the build package's command for an application's CI
+(FORMA-126; v2's SR8, M8, DR-19, L-37), reports these. It finds every use of
+INV1's and INV2's exits (the raw-HTML constructors and the string forms the
+A2 bridge still accepts, the typed raw homes, Trusted Types' per-route
+relaxation) and fails on any that `forma-raw-allowlist.json` does not list
+with an owner and an end date, and on any entry past its end date. Each line
+names the exit (`trustedHtml`, `body_prefix`, …), the file, line and column,
+and the innermost named function; `--json` writes the same as data. They are
+never in a build's report. The exits, the allowlist's format and what the
+scan misses are in the package README
+([`packages/build/README.md`](../packages/build/README.md#raw-entry-lint-forma-raw-lint)).
+The run exits 0 when it passes, 1 on a BUILD-810, BUILD-811 or BUILD-814,
+and 2 on a BUILD-812 or a usage error.
+
+### BUILD-810 Raw entry not on the allowlist (forma-raw-lint)
+
+**Why.** The source uses one of INV1's and INV2's exits (raw HTML, a typed raw home or a Trusted Types relaxation), and the allowlist names no owner and end date for it (SR8).
+
+**Fix.** Write it without the exit (render through a component, or the typed form the message names), or add an entry to forma-raw-allowlist.json with its path, line or symbol, exit, owner, until and reason.
+
+**In the lint.** An error: the run exits 1.
+
+Printed as `BUILD-810 error body_prefix in src/server/mod.rs:772:9 (in index_handler): body_prefix: body_prefix set to a value not traced to RawHtml::trusted (a string still works in 0.2.x); not on the allowlist` (`packages/build/tests/raw-lint.test.ts` > "SR8: a seeded body_prefix outside the allowlist fails, and so does an entry past its end date").
+
+### BUILD-811 Allowlist entry past its end date (forma-raw-lint)
+
+**Why.** The entry's until date has passed: the raw entry it lists was due to go, and its owner has neither removed nor renewed it.
+
+**Fix.** Remove the raw entry and its allowlist entry, or, with its owner, set a new until and say why in reason.
+
+**In the lint.** An error: the run exits 1. `until` is the last day the entry is valid; the day after, it fails, whether or not it still lists anything.
+
+Printed once per entry (`packages/build/tests/raw-lint.test.ts` > "SR8: a seeded body_prefix outside the allowlist fails, and so does an entry past its end date").
+
+### BUILD-812 Allowlist file the lint cannot use (forma-raw-lint)
+
+**Why.** The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date or a reason; the lint does not guess what it meant.
+
+**Fix.** Correct the file: the message names the entry and the field.
+
+**In the lint.** An error: the run exits 2. An entry with a problem lists nothing, so the raw entries it meant are reported too.
+
+Printed once per problem (`packages/build/tests/raw-lint.test.ts` > "BUILD-812: an allowlist the lint cannot use stops the run with exit code 2, naming the entry and the field").
+
+### BUILD-813 Allowlist entry that lists nothing (forma-raw-lint; note)
+
+**Why.** No raw entry matches it, so the inventory overstates: the exit was removed, or moved to another line or symbol. A note: the run does not fail on it.
+
+**Fix.** Remove the entry, or point its line or symbol at where the raw entry now is.
+
+**In the lint.** A note: never fails the run.
+
+Printed once per entry (`packages/build/tests/raw-lint.test.ts` > "BUILD-813: an entry that lists nothing is a note, and the run passes").
+
+### BUILD-814 Source file the lint cannot read (forma-raw-lint)
+
+**Why.** The file could not be read or parsed, so the raw entries in it cannot be counted; the lint fails rather than pass a file it did not see.
+
+**Fix.** Fix the syntax error the message names, or leave the file out with --exclude if it is not source.
+
+**In the lint.** An error: the run exits 1. esbuild parses TypeScript and JavaScript (a `.js` file is also tried as JSX and TypeScript), and an HTML file's inline scripts; a Rust file is tokenized, which does not fail.
+
+Printed with esbuild's message and position (`packages/build/tests/raw-lint.test.ts` > "BUILD-814: a file esbuild cannot parse fails the run at its line, and so does an inline script").
 
 ## BUILD-9xx: The compiler's own deprecated entry points (logged when called)
 

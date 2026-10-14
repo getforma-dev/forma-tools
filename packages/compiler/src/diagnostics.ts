@@ -233,6 +233,25 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
     "The wasm-pack step goes in 3.0.0: forma_ir.js, forma_ir_bg.wasm and the manifest's wasm entry go with the WASM walker. It still runs and ships the walker in A2, so strict mode does not fail on it.",
     'Remove `wasm` from the config.',
     false),
+  // The raw-entry lint, forma-raw-lint (FORMA-126, SR8): reported by @getforma/build's
+  // bin, never in a build's report. RAW_LINT_CATALOGUE in packages/build/src/raw-lint.ts
+  // holds the same entries (packages/build/tests/raw-lint.test.ts keeps them equal).
+  entry('BUILD-810', 'Raw entry not on the allowlist (forma-raw-lint)',
+    "The source uses one of INV1's and INV2's exits (raw HTML, a typed raw home or a Trusted Types relaxation), and the allowlist names no owner and end date for it (SR8).",
+    'Write it without the exit (render through a component, or the typed form the message names), or add an entry to forma-raw-allowlist.json with its path, line or symbol, exit, owner, until and reason.'),
+  entry('BUILD-811', 'Allowlist entry past its end date (forma-raw-lint)',
+    "The entry's until date has passed: the raw entry it lists was due to go, and its owner has neither removed nor renewed it.",
+    'Remove the raw entry and its allowlist entry, or, with its owner, set a new until and say why in reason.'),
+  entry('BUILD-812', 'Allowlist file the lint cannot use (forma-raw-lint)',
+    'The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date or a reason; the lint does not guess what it meant.',
+    'Correct the file: the message names the entry and the field.'),
+  entry('BUILD-813', 'Allowlist entry that lists nothing (forma-raw-lint; note)',
+    'No raw entry matches it, so the inventory overstates: the exit was removed, or moved to another line or symbol. A note: the run does not fail on it.',
+    'Remove the entry, or point its line or symbol at where the raw entry now is.',
+    false),
+  entry('BUILD-814', 'Source file the lint cannot read (forma-raw-lint)',
+    'The file could not be read or parsed, so the raw entries in it cannot be counted; the lint fails rather than pass a file it did not see.',
+    'Fix the syntax error the message names, or leave the file out with --exclude if it is not source.'),
 
   // ── 9xx: the compiler's own deprecated entry points ──────────────────────
   entry('BUILD-901', '`transformServerFunctions` called (deprecated; note)',

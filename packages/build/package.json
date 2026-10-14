@@ -12,11 +12,14 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "forma-raw-lint": "dist/raw-lint-cli.js"
+  },
   "files": [
     "dist/"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --external @getforma/compiler",
+    "build": "tsup src/index.ts src/raw-lint-cli.ts --format esm --dts --external @getforma/compiler",
     "test": "vitest run",
     "test:browser": "playwright test --config playwright.config.ts"
   },

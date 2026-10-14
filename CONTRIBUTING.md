@@ -30,6 +30,7 @@ npm test
 | `npm run emit:corpus` | Re-emits the FMIR corpus with the current compiler |
 | `npm run test:e2e` | Playwright, against a FormaJS build from the sibling repo, plus the SSR lane (this compiler, the sibling `forma`'s walker, FormaJS; needs cargo) — see [`e2e/README.md`](e2e/README.md) |
 | `npm run build --workspaces` | Both packages build |
+| `node scripts/test-raw-lint-bin.mjs` (after the build) | The packed `forma-raw-lint` bin, installed as an application installs it, fails a seeded `body_prefix`, passes it listed and fails it past its end date (SR8, FORMA-126) |
 | `ruby scripts/check-release-workflow.rb --self-test` and `bash scripts/test-release-artifacts.sh` | The release workflow's SR43 shape (only the publish job holds `id-token: write`, with no cache and no dependency code beside it) and the packed-tarball check the publish job runs before publishing; CI's `release-workflow` job runs both after actionlint |
 
 CI adds two jobs that are easy to forget locally:

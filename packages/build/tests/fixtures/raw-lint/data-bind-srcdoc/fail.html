@@ -1,0 +1,9 @@
+<!doctype html>
+<html>
+  <body>
+    <div data-forma-state='{"doc": "<p>hello</p>"}'>
+      <iframe sandbox data-bind:srcdoc="{doc}" title="preview"></iframe> <!-- expect: data-bind:srcdoc -->
+      <iframe sandbox title="a > in a value" DATA-BIND:SRCDOC="{doc}"></iframe> <!-- expect: data-bind:srcdoc -->
+    </div>
+  </body>
+</html>

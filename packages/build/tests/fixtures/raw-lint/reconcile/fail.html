@@ -1,0 +1,10 @@
+<!doctype html>
+<html>
+  <body>
+    <main id="stage"></main>
+    <script type="module">
+      const html = await (await fetch('/stage')).text();
+      FormaRuntime.reconcile(document.getElementById('stage'), html); // expect: reconcile
+    </script>
+  </body>
+</html>
