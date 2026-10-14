@@ -40,10 +40,10 @@ pattern of seeding an island's signals from its props before the component runs.
 | Case | What it pins | Today |
 |------|--------------|-------|
 | `generic-state` | server value 7 survives activation of a `mount()` root | expected-fail, FORMA-103 / FORMA-104 |
-| `root-fragment` | a root JSX Fragment's button works after Phase 2 activation | expected-fail, FORMA-003 |
-| `textarea-child`, `title` | no marker text before JavaScript | expected-fail, FORMA-002 |
-| `textarea-value` | value before JavaScript (FORMA-002); live value after activation and client-rendered (FORMA-003) | expected-fail |
-| `select` | `b` selected and submitted before JavaScript (FORMA-002), after activation and client-rendered (FORMA-003) | expected-fail |
+| `root-fragment` | a root JSX Fragment's button works after Phase 2 activation | passes (flipped by FORMA-003) |
+| `textarea-child`, `title` | no marker text before JavaScript | passes (flipped by FORMA-002) |
+| `textarea-value` | value before JavaScript (FORMA-002); live value after activation and client-rendered (FORMA-003) | passes (flipped by both) |
+| `select` | `b` selected and submitted before JavaScript (FORMA-002), after activation and client-rendered (FORMA-003) | passes (flipped by both) |
 | `edited-controls` | text, checkbox and option edited before activation survive it | passes (fails with formajs `042e353`) |
 | `ledger-arrival` | seeded values survive activation; Retry runs | passes |
 
