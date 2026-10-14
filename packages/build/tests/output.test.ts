@@ -11,7 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -26,8 +26,11 @@ function fail(code: string): never {
   throw Object.assign(new Error(`${code}: injected`), { code });
 }
 
-/** A real filesystem whose `renameSync` fails when `when` says so. */
-function failing(when: (from: string, to: string, call: number) => string | undefined): OutputFs & { calls: number } {
+/** A real filesystem whose `renameSync` fails when `when` says so (and `cpSync` when `copy` does). */
+function failing(
+  when: (from: string, to: string, call: number) => string | undefined,
+  copy: (from: string) => string | undefined = () => undefined,
+): OutputFs & { calls: number } {
   const fs = {
     calls: 0,
     renameSync(from: string, to: string) {
@@ -36,9 +39,17 @@ function failing(when: (from: string, to: string, call: number) => string | unde
       renameSync(from, to);
     },
     rmSync,
+    cpSync(from: string, to: string, options: { recursive: true }) {
+      const code = copy(from);
+      if (code) fail(code);
+      cpSync(from, to, options);
+    },
   };
   return fs;
 }
+
+/** The pid of a process that has exited, so it names nothing running. */
+const deadPid = () => spawnSync(process.execPath, ['-e', '']).pid;
 
 let root: string;
 let target: string;
@@ -120,6 +131,35 @@ describe('replaceDirectory', () => {
     expect(readdirSync(root)).toEqual(['dist']);
   });
 
+  it('names where the previous output is when it cannot be put back either, and the next build puts it back', () => {
+    const staging = newBuild();
+    const fs = failing((from, to) => (to === target && from !== target ? 'EIO' : undefined));
+    let message = '';
+    try {
+      replaceDirectory(staging, target, { fs, platform: 'linux' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    const aside = readdirSync(root).filter(name => name.startsWith('.dist.forma-previous-'));
+    expect(aside).toHaveLength(1);
+    expect(existsSync(target)).toBe(false);
+    expect(message).toContain(join(root, aside[0]!));
+    expect(message).toContain(`the next build moves it back to ${target}`);
+
+    // The next build (in this process too: a swap is synchronous, so no
+    // previous output named with this pid can be mid-swap) keeps it.
+    createStagingDirectory(target);
+    expect(readFileSync(join(target, 'previous.js'), 'utf8')).toBe('previous build');
+  });
+
+  it("says the output may be partial when a mount point's copy fails", () => {
+    const staging = newBuild();
+    const fs = failing((from) => (from === target ? 'EXDEV' : undefined), () => 'ENOSPC');
+    expect(() => replaceDirectory(staging, target, { fs, platform: 'linux' }))
+      .toThrow(/copying the new build into .* failed \(ENOSPC\); .* may be partial: build again/);
+    expect(readdirSync(root)).toEqual(['dist']);
+  });
+
   it("replaces a mount point's contents in place", () => {
     // A container volume mounted at outputDir cannot be renamed (EBUSY on
     // Linux, EXDEV across filesystems); the build must still land.
@@ -138,9 +178,30 @@ describe('replaceDirectory', () => {
 });
 
 describe('createStagingDirectory', () => {
+  it('puts back the previous output a build killed between its two renames left aside, the newest if several', () => {
+    // The killed build moved dist aside and died before moving its staging
+    // directory in: dist is absent and the last good build is beside it.
+    rmSync(target, { recursive: true });
+    const dead = deadPid();
+    const older = join(root, `.dist.forma-previous-${dead}-0a1b2c3d`);
+    const newer = join(root, `.dist.forma-previous-${dead}-4e5f6a7b`);
+    mkdirSync(older); writeFileSync(join(older, 'app.js'), 'older build');
+    mkdirSync(newer); writeFileSync(join(newer, 'app.js'), 'newer build');
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(older, past, past);
+    mkdirSync(join(root, `.dist.forma-staging-${dead}-0a1b2c3d`)); // its half-written staging
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const staging = createStagingDirectory(target);
+
+    expect(readFileSync(join(target, 'app.js'), 'utf8')).toBe('newer build');
+    expect(readdirSync(root).sort()).toEqual(['dist', staging.slice(root.length + 1)].sort());
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`restored the previous build to ${target}`));
+  });
+
   it('removes what a killed build left beside the output, and only that', () => {
     // A process that has exited: its pid names nothing running.
-    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    const dead = deadPid();
     const abandoned = [`.dist.forma-staging-${dead}-0a1b2c3d`, `.dist.forma-previous-${dead}-0a1b2c3d`];
     const kept = [
       `.dist.forma-staging-${process.pid}-0a1b2c3d`, // a build still running (this one)
