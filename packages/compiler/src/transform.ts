@@ -76,6 +76,18 @@ const URL_IGNORED_CHARS_RE = /[\u0000-\u0020\u007F-\u009F]/g;
 const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 
 /**
+ * A well-formed tag or attribute name: core's pattern (`isSafeAttrName`,
+ * `isSafeTagName`). The template writes names verbatim, so a key such as
+ * `'href '` or `'x onclick'`, or a tag such as `'img src=x onerror=…'`, would
+ * add an attribute core never checks. Like every other construct the compiler
+ * cannot compile (a dynamic tag, a spread, a computed key), such an element is
+ * left to runtime `h()` rather than refused at build: there, `createElement`
+ * or `setAttribute` throws, exactly as it does without the plugin.
+ * Verified by: packages/compiler/tests/vite-plugin-deprecation.test.ts > "leaves <a 'x onclick': 'alert(1)'> to runtime h()"
+ */
+const SAFE_NAME_RE = /^[A-Za-z_:][-A-Za-z0-9_:.]*$/;
+
+/**
  * True when writing this attribute is a decision for core's guard
  * (`isUnsafeAttrWrite`), which runtime `h()` applies on the first render and
  * on every reactive update, and which core does not export:
@@ -210,6 +222,7 @@ function analyzeHCall(
   const tagArg = args[0];
   if (!tagArg || !t.isStringLiteral(tagArg)) return null; // dynamic tag => bail
   const tag = tagArg.value;
+  if (!SAFE_NAME_RE.test(tag)) return null; // malformed tag => runtime h()
 
   // SVG tags => bail to runtime
   if (SVG_TAGS.has(tag)) return null;
@@ -241,8 +254,9 @@ function analyzeHCall(
 
       const val = prop.value as t.Expression;
 
-      // An attribute core guards: the whole element goes to runtime h().
-      if (isGuardedAttr(key, val)) return null;
+      // A malformed name, or an attribute core guards: the whole element goes
+      // to runtime h().
+      if (!SAFE_NAME_RE.test(key) || isGuardedAttr(key, val)) return null;
 
       // ref
       if (key === 'ref') {

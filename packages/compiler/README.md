@@ -36,6 +36,7 @@ npm install -D @getforma/compiler
 > - a URL attribute (`href`, `src`, `action`, `formaction`, `xlink:href`, `poster`, `background`, `data`) whose value is not a literal;
 > - such an attribute whose literal value has a scheme (`javascript:`, `https:`);
 > - an `on…` attribute that is not an `onX` listener (`ONCLICK`, `onclick`).
+> - a tag or attribute name that is not well formed (`'href '`, `'x onclick'`), which runtime `h()` rejects.
 >
 > Literal relative URLs (`/about`, `#top`) still compile into the template.
 

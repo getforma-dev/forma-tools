@@ -163,8 +163,7 @@ export interface FormaServerOptions {
  *   plugins: [formaServer({ mode: 'client' })],
  * });
  * ```
- */
-/**
+ *
  * @deprecated Removed in 3.0.0 with server functions (L-23, DR-22).
  */
 export function formaServer(options?: FormaServerOptions): Plugin {

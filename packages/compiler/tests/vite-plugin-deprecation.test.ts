@@ -45,6 +45,12 @@ describe('compiled output leaves unsafe-attribute writes to core (L-23)', () => 
     ['div', "ONCLICK: 'alert(1)'"],
     ['div', "onclick: 'alert(1)'"],
     ['div', 'onclick: fn'],
+    // Names that fail core's name pattern: written verbatim into the template,
+    // they would smuggle in an attribute. Runtime h() rejects them, as
+    // core's SSR does (FORMA-019's review, verified in Chromium).
+    ['a', "'href ': 'javascript:alert(1)'"],
+    ['a', "'x onclick': 'alert(1)'"],
+    ['img src=x onerror=alert(1)', ''],
   ])('leaves <%s %s> to runtime h()', (tag, props) => {
     // Nothing else in the module compiles, so the module is left as written.
     expect(compileOne(tag, props)).toBeNull();
