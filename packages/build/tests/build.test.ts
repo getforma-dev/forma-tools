@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { build } from '../src/build';
 import * as publicApi from '../src/index';
 import type { BuildConfig, AssetManifest } from '../src/types';
+import { APP_NAME_VECTORS } from './helpers/app-name-vectors';
 import {
   mkdtempSync,
   writeFileSync,
@@ -531,6 +532,107 @@ describe('@getforma/build — functional', () => {
       expect(existsSync(join(outDir, 'sw.js'))).toBe(true);
     }
   }, 15_000);
+
+  it('names the worker\'s cache per application and build, and gives it a waiting upgrade', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+      app: 'ledger',
+    };
+    for (const serviceWorker of ['precache', 'on-demand'] as const) {
+      const { manifest } = await build({ ...config, serviceWorker });
+      const worker = readFileSync(join(outDir, 'sw.js'), 'utf8');
+      // The name forma-server's sw::ServiceWorker::for_app("ledger") retires.
+      expect(worker).toContain(`const CACHE_NAME = "forma:ledger:${manifest.build_hash.slice(0, 12)}";`);
+      expect(worker).not.toContain('skipWaiting');
+      expect(worker).not.toContain('clients.claim');
+    }
+  }, 15_000);
+
+  it('rejects an application name forma-server cannot take, naming it', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+    // The shared table (forma-server's for_app takes the same), plus values a
+    // JavaScript config could hold that are not strings at all.
+    for (const app of [...APP_NAME_VECTORS.refused, 42, null, Object.create(null)]) {
+      const error = await rejection({ ...config, app });
+      // Printed escaped, as forma-server's {:?} does: control characters and
+      // lookalikes stay visible.
+      const shown = typeof app === 'string' ? JSON.stringify(app) : String(JSON.stringify(app) ?? typeof app);
+      expect(error.message, shown).toContain(`app is ${shown}`);
+      expect(error.message).toContain('sw::ServiceWorker::for_app');
+      expect(existsSync(outDir)).toBe(false);
+    }
+    // Two-sided: every name the grammar accepts builds, its trailing-hyphen
+    // and one-character edges included.
+    for (const app of APP_NAME_VECTORS.accepted) {
+      await build({ ...config, app });
+      expect(readFileSync(join(outDir, 'sw.js'), 'utf8')).toContain(`"forma:${app}:`);
+    }
+  }, 60_000);
+
+  it('warns when serviceWorker is set without app, naming the 3.0.0 change, and is silent with app', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const said = () => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('BUILD-802'));
+      for (const serviceWorker of ['precache', 'on-demand'] as const) {
+        warn.mockClear();
+        const { warnings } = await build({ ...config, serviceWorker });
+        const entries = warnings.filter((w) => w.includes('BUILD-802'));
+        expect(entries, serviceWorker).toHaveLength(1);
+        expect(entries[0]).toContain('3.0.0');
+        expect(entries[0]).toContain('sw::ServiceWorker::for_app');
+        expect(said(), 'printed once per build').toHaveLength(1);
+
+        warn.mockClear();
+        const named = await build({ ...config, serviceWorker, app: 'ledger' });
+        expect(named.warnings.filter((w) => w.includes('BUILD-802'))).toEqual([]);
+        expect(said()).toEqual([]);
+      }
+      // No serviceWorker at all: nothing asked for, nothing said.
+      warn.mockClear();
+      const plain = await build(config);
+      expect(plain.warnings.filter((w) => w.includes('BUILD-802'))).toEqual([]);
+      expect(said()).toEqual([]);
+
+      // Watch mode warns too (a CSS-only route, so no esbuild watcher stays alive).
+      const cssFile = join(srcDir, 'app.css');
+      writeFileSync(cssFile, 'main { color: red; }');
+      const watchConfig: BuildConfig = {
+        entryPoints: [],
+        routes: { '/': { js: [], css: ['app'] } },
+        cssEntries: [{ input: cssFile, outfile: 'app.css' }],
+        outputDir: join(tmpRoot, 'watch-dist'),
+        watch: true,
+        serviceWorker: 'on-demand',
+      };
+      warn.mockClear();
+      const watched = await build(watchConfig);
+      expect(watched.warnings.filter((w) => w.includes('BUILD-802'))).toHaveLength(1);
+      expect(said()).toHaveLength(1);
+      warn.mockClear();
+      const watchedNamed = await build({ ...watchConfig, outputDir: join(tmpRoot, 'watch-dist-2'), app: 'ledger' });
+      expect(watchedNamed.warnings.filter((w) => w.includes('BUILD-802'))).toEqual([]);
+      expect(said()).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  }, 60_000);
 
   // ---- Test 12: WASM build through a .cmd-shimmed tool -------------------
   it('runs a .cmd-shimmed wasm-pack (the Windows npm install shape)', async () => {

@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { serviceWorkerSource } from './service-worker.js';
+import { APP_NAME, appCacheName, serviceWorkerSource } from './service-worker.js';
 import { splitGraph, type SplitGraph } from './split-graph.js';
 import { createStagingDirectory, replaceDirectory, writeFileAtomic } from './output.js';
 
@@ -283,6 +283,38 @@ function compressAssets(distDir: string): number {
 // ---------------------------------------------------------------------------
 
 /**
+ * A config value as an error message shows it: escaped, the way forma-server
+ * prints a refused name (`{:?}`), so a control character or a lookalike stays
+ * visible; never a throw, whatever a JavaScript config holds.
+ */
+function shown(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? typeof value;
+  } catch {
+    return typeof value;
+  }
+}
+
+/**
+ * BUILD-802 (deprecated in 0.3.1): `serviceWorker` is set but `app` is not,
+ * so the worker is 0.3.0's, with the cache names every Forma application on
+ * the origin shares and an immediate takeover. Said once per `build()` call,
+ * production and watch alike, on the console and in `BuildResult.warnings`.
+ *
+ * Verified by: packages/build/tests/build.test.ts > "warns when serviceWorker is set without app, naming the 3.0.0 change, and is silent with app"
+ */
+function workerWithoutApp(config: BuildConfig): string | undefined {
+  if (config.serviceWorker === undefined || config.app !== undefined) return undefined;
+  return (
+    `BUILD-802 serviceWorker is set without app: this is 0.3.0's worker, whose caches every ` +
+    `Forma application on the origin shares and which takes over open tabs at once. Set app to ` +
+    `the name the server passes to forma-server's sw::ServiceWorker::for_app for caches per ` +
+    `application and build and a waiting upgrade; from 3.0.0 a worker is written only for a ` +
+    `named app.`
+  );
+}
+
+/**
  * Reject configurations whose output cannot be correct, BEFORE anything is
  * written. The first four checks close a silent failure mode; the fifth
  * turns a crash into a message:
@@ -302,6 +334,7 @@ function compressAssets(distDir: string): number {
  *    the route nor the key; a string there was read letter by letter.
  *
  * Verified by: packages/build/tests/build.test.ts > "rejects an unknown serviceWorker value, naming it"
+ * Verified by: packages/build/tests/build.test.ts > "rejects an application name forma-server cannot take, naming it"
  * Verified by: packages/build/tests/build.test.ts > "rejects two entryPoints that share an outfile"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route that names an asset no entry produces"
  * Verified by: packages/build/tests/build.test.ts > "rejects a route without css, naming the route"
@@ -315,6 +348,16 @@ function validateConfig(config: BuildConfig): void {
   if (serviceWorker !== undefined && serviceWorker !== 'precache' && serviceWorker !== 'on-demand') {
     problems.push(
       `serviceWorker is '${String(serviceWorker)}': use 'precache' (the default) or 'on-demand'`,
+    );
+  }
+
+  // The worker's cache names carry it between colons, and the server must
+  // name the same application to retire them (FORMA-130).
+  const app: unknown = config.app;
+  if (app !== undefined && (typeof app !== 'string' || !APP_NAME.test(app))) {
+    problems.push(
+      `app is ${shown(app)}: use 1 to 63 of a-z, 0-9 and -, starting with a letter or digit ` +
+        `(the name forma-server's sw::ServiceWorker::for_app takes)`,
     );
   }
 
@@ -491,7 +534,11 @@ function generateServiceWorker(
 ): void {
   const distDir = config.outputDir;
   const onDemand = config.serviceWorker === 'on-demand';
-  const swCacheName = `forma-${buildHash.slice(0, 12)}${onDemand ? '-on-demand-v1' : ''}`;
+  // Per application and build when the config names the application
+  // (FORMA-130); otherwise 0.3.0's shared `forma-` name.
+  const swCacheName = config.app !== undefined
+    ? appCacheName(config.app, buildHash)
+    : `forma-${buildHash.slice(0, 12)}${onDemand ? '-on-demand-v1' : ''}`;
   const fonts = readdirSync(distDir)
     .filter((f) => f.endsWith('.woff2'))
     .sort();
@@ -513,7 +560,7 @@ function generateServiceWorker(
   const immutableUrls = onDemand ? [...new Set(Object.values(assets))]
     .filter(file => !file.includes('..') && /^[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]{8}\.(?:js|css|wasm)$/.test(file))
     .sort().map(file => `/_assets/${file}`) : undefined;
-  const swContent = serviceWorkerSource(swCacheName, precacheUrls, config.watch === true, immutableUrls);
+  const swContent = serviceWorkerSource(swCacheName, precacheUrls, config.watch === true, immutableUrls, config.app);
 
   writeFileAtomic(join(distDir, 'sw.js'), swContent);
   console.log(`   SW generated: dist/sw.js (${config.watch ? 'network-only development' : `cache: ${swCacheName}`})`);
@@ -644,7 +691,11 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
   // Validate before anything is written: a config error must not touch the
   // previous build's output on its way to failing.
   validateConfig(config);
-  if (config.watch) return buildInto(config, config.outputDir);
+  const deprecation = workerWithoutApp(config);
+  if (deprecation) console.warn(`Warning: ${deprecation}`);
+  const withDeprecation = (result: BuildResult): BuildResult =>
+    deprecation ? { ...result, warnings: [...result.warnings, deprecation] } : result;
+  if (config.watch) return withDeprecation(await buildInto(config, config.outputDir));
 
   const staging = createStagingDirectory(config.outputDir);
   let result: BuildResult;
@@ -656,7 +707,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
   }
   // Throws with the previous output restored if the swap itself fails.
   replaceDirectory(staging, config.outputDir);
-  return result;
+  return withDeprecation(result);
 }
 
 /**
