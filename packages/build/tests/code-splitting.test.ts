@@ -1,13 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { build as bundle } from 'esbuild';
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { createRequire } from 'node:module';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { build } from '../src/build';
+import { watching } from './helpers/watch';
 
 const temporary: string[] = [];
 // A watched build's esbuild service can still be writing for a moment after
@@ -27,17 +24,6 @@ function fixture() {
 
 const chunks = (dist: string) => readdirSync(dist).filter(file => /^chunk\..*\.js$/.test(file));
 const listedChunks = (manifest: { assets: Record<string, string> }) => [...new Set(Object.values(manifest.assets))].filter(file => /^chunk\..*\.js$/.test(file));
-
-/** Run `build({ ...config, watch: true })` in a child process for the length of `body`. */
-async function watching(config: ReturnType<typeof fixture>['config'], body: (manifest: () => any) => Promise<void>) {
-  const runner = join(config.outputDir, '..', 'src', 'watch-runner.mjs');
-  const require = createRequire(import.meta.url);
-  await bundle({ entryPoints: [fileURLToPath(new URL('../src/build.ts', import.meta.url))], outfile: runner, bundle: true, platform: 'node', format: 'esm', plugins: [{ name: 'external-build-tools', setup(builder) { builder.onResolve({ filter: /^(esbuild|@getforma\/compiler)$/ }, args => ({ path: args.path === 'esbuild' ? pathToFileURL(require.resolve(args.path)).href : args.path, external: true })); } }] });
-  const child = spawn(process.execPath, ['--input-type=module', '-e', `import {build} from ${JSON.stringify(pathToFileURL(runner).href)}; await build(${JSON.stringify({ ...config, watch: true })});`], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let diagnostics = ''; child.stderr.on('data', chunk => { diagnostics += chunk; }); child.stdout.resume();
-  const manifest = () => { expect(child.exitCode, diagnostics).toBeNull(); return JSON.parse(readFileSync(join(config.outputDir, 'manifest.json'), 'utf8')); };
-  try { await body(manifest); } finally { if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; } }
-}
 
 describe('Opt-in ESM code splitting', () => {
   it('generates opt-in on-demand workers from the real immutable output graph without install-time downloads', async () => {
@@ -96,7 +82,7 @@ describe('Opt-in ESM code splitting', () => {
   });
   it('updates the watched graph and removes obsolete chunks instead of accumulating them', async () => {
     const { src, dist, config } = fixture();
-    await watching(config, async manifest => {
+    await watching(config, async ({ manifest }) => {
       // Each read waits for the state it asserts: the watcher rewrites the
       // manifest after esbuild has written the chunks, so a chunk on disk does
       // not yet mean a manifest that lists it.
@@ -120,7 +106,7 @@ describe('Opt-in ESM code splitting', () => {
     // replaced by rename is a new file, so its inode changes; one rewritten in
     // place keeps it.
     const { src, dist, config } = fixture();
-    await watching(config, async manifest => {
+    await watching(config, async ({ manifest }) => {
       await vi.waitFor(() => expect(manifest().build_hash).toBe('dev'), { timeout: 5000 });
       const oldChunks = chunks(dist);
       const inode = () => statSync(join(dist, 'manifest.json'), { bigint: true }).ino;
