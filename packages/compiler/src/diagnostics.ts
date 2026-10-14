@@ -243,7 +243,7 @@ export const DIAGNOSTIC_CATALOGUE: readonly DiagnosticEntry[] = Object.freeze([
     "The entry's until date has passed: the raw entry it lists was due to go, and its owner has neither removed nor renewed it.",
     'Remove the raw entry and its allowlist entry, or, with its owner, set a new until and say why in reason.'),
   entry('BUILD-812', 'Allowlist file the lint cannot use (forma-raw-lint)',
-    'The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date or a reason; the lint does not guess what it meant.',
+    'The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date at most a year after the run, or a reason; the lint does not guess what it meant.',
     'Correct the file: the message names the entry and the field.'),
   entry('BUILD-813', 'Allowlist entry that lists fewer uses than it says (forma-raw-lint; note)',
     'It matches fewer raw entries than its count, or none, so the inventory overstates and leaves room for unreviewed uses: one was removed, or moved to another line or symbol. A note: the run does not fail on it.',

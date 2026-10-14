@@ -26,7 +26,8 @@
  * `path` is relative to the allowlist's directory, with `/`. An entry names a
  * line or a symbol (the innermost named function, method, class or module,
  * as the lint prints it), lists at most `count` uses (default 1), and expires
- * after `until`, the last day it is valid.
+ * after `until`, the last day it is valid (UTC), which may be at most a year
+ * after the run.
  *
  * Verified by: packages/build/tests/raw-lint.test.ts
  */
@@ -78,7 +79,7 @@ export const RAW_LINT_CATALOGUE: readonly RawLintCode[] = Object.freeze([
   {
     code: 'BUILD-812',
     title: 'Allowlist file the lint cannot use (forma-raw-lint)',
-    why: 'The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date or a reason; the lint does not guess what it meant.',
+    why: 'The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date at most a year after the run, or a reason; the lint does not guess what it meant.',
     fix: 'Correct the file: the message names the entry and the field.',
     severity: 'error',
   },
@@ -220,7 +221,17 @@ function diagnostic(code: string, fields: Omit<RawLintDiagnostic, 'code' | 'seve
 const ENTRY_FIELDS = new Set(['path', 'exit', 'line', 'symbol', 'owner', 'until', 'reason', 'count']);
 
 /** The allowlist's entries, each checked; what is wrong with any is a BUILD-812. */
-function readAllowlist(path: string, label: string): { entries: AllowlistEntryRef[]; problems: RawLintDiagnostic[] } {
+/**
+ * The latest `until` an entry may name: one year after the run's date, so
+ * every entry is revisited at least yearly (the lead's decision on the
+ * FORMA-126 review). 29 February runs to 1 March.
+ */
+export function latestUntil(today: string): string {
+  const [y, m, d] = today.split('-').map(Number) as [number, number, number];
+  return new Date(Date.UTC(y + 1, m - 1, d)).toISOString().slice(0, 10);
+}
+
+function readAllowlist(path: string, label: string, today: string): { entries: AllowlistEntryRef[]; problems: RawLintDiagnostic[] } {
   const problems: RawLintDiagnostic[] = [];
   const problem = (message: string) => problems.push(diagnostic('BUILD-812', { exit: null, file: label, line: 0, column: 0, symbol: null, message }));
   let data: unknown;
@@ -266,6 +277,9 @@ function readAllowlist(path: string, label: string): { entries: AllowlistEntryRe
     const reason = text('reason');
     if (exit !== undefined && !EXIT_NAMES.has(exit)) problem(`${where}: exit '${exit}' is not one the lint knows (${[...EXIT_NAMES].join(', ')})`);
     if (until !== undefined && !isValidDate(until)) problem(`${where}: until '${until}' is not a date written YYYY-MM-DD`);
+    else if (until !== undefined && until > latestUntil(today)) {
+      problem(`${where}: until '${until}' is more than a year after today (${today}); the latest it can be is ${latestUntil(today)}, so every entry is revisited at least yearly`);
+    }
     const hasLine = e.line !== undefined;
     const hasSymbol = e.symbol !== undefined;
     if (hasLine === hasSymbol) problem(`${where}: name exactly one of line and symbol`);
@@ -393,7 +407,7 @@ export function rawLint(options: RawLintOptions): RawLintReport {
     if (!existsSync(allowlistPath)) {
       diagnostics.push(diagnostic('BUILD-812', { exit: null, file: allowlistLabel!, line: 0, column: 0, symbol: null, message: `${options.allowlist}: no such allowlist file` }));
     } else {
-      const read = readAllowlist(allowlistPath, allowlistLabel!);
+      const read = readAllowlist(allowlistPath, allowlistLabel!, today);
       entries = read.entries;
       diagnostics.push(...read.problems);
     }

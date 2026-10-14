@@ -349,6 +349,12 @@ an application that does not build with `@getforma/build` (a Rust-only one,
 or one that uses `@getforma/core` alone) runs it with
 `npx -p @getforma/build forma-raw-lint …`.
 
+**Point it at source, not build output.** A bundle that includes core carries
+core's own raw entries: the registry key survives minification, and a
+development build carries `data-bind:srcdoc` in a warning. Name the source
+directories, or leave committed bundles out with `--exclude` (for example
+`--exclude 'crates/*/assets/**' --exclude 'dist/**'`).
+
 ```
 --allowlist <file>  The allowlist (default: ./forma-raw-allowlist.json, if it exists)
 --root <dir>        What paths are relative to (default: the allowlist's directory, else .)
@@ -408,8 +414,12 @@ Each entry has:
   around it; a line pins one use.
 - `exit`: one of the names below.
 - `owner`: who answers for it.
-- `until`: `YYYY-MM-DD`, the last day the entry is valid. The day after, the
-  run fails until the owner removes the raw entry or renews the date.
+- `until`: `YYYY-MM-DD`, the last day the entry is valid, in UTC (the run's
+  date is UTC's, as on a CI runner, so west of UTC an entry ends some hours
+  before the local day does). The day after, the run fails until the owner
+  removes the raw entry or renews the date. It may be at most a year after
+  the run's date (an entry further out is refused, `BUILD-812`), so every
+  entry is revisited at least yearly.
 - `reason`: why it is raw, and where it is going.
 - `count` (optional, default 1): how many uses of that exit the entry lists.
   A second use in the same function is not on the allowlist until the count
@@ -508,8 +518,11 @@ What it cannot see, and review must:
   parameter or a closure or pattern binding in between undoes it), or for
   `self.x` that the `impl`'s own struct declares `RawHtml`. Everything else is
   reported, so the lint errs toward an entry on the list.
-- The registry key built at run time (`'@getforma/core' + '#trusted-types'`)
-  or found with `Object.getOwnPropertySymbols`.
+- A name built at run time: the registry key from variables
+  (`` `${pkg}#trusted-types` ``) or found with `Object.getOwnPropertySymbols`,
+  and an attribute name such as `` `data-bind:${attr}` ``. A key or name
+  written whole, or as a sum of literals esbuild folds
+  (`'@getforma/core' + '#trusted-types'`), is found.
 - A Rust name assembled by a macro (`paste!`), and `body_prefix` carried in by
   struct update (`PageConfig { ..base }`).
 - Props built from data at run time (`JSON.parse('{"dangerouslySetInnerHTML": …}')`,

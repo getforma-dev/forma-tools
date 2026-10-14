@@ -19,8 +19,10 @@
  *   its subpaths, `formajs`) and the CDN runtime's `FormaRuntime` global,
  *   through imports, `require`, `await import`, destructuring, aliases and
  *   bracket access. `trustedHtml` is matched by name wherever it comes from.
- * - The registry key built at run time (`'@getforma/core' + '#trusted-types'`)
- *   or found by `Object.getOwnPropertySymbols(globalThis)`.
+ * - A name built at run time: the registry key from variables
+ *   (`${pkg}#trusted-types`) or found by `Object.getOwnPropertySymbols`, and an
+ *   attribute name such as `data-bind:${attr}`. A sum of literals esbuild
+ *   folds (`'@getforma/core' + '#trusted-types'`) is found.
  * - A value's provenance across files or through a function: a raw sink is
  *   passed only when its argument is a `trustedHtml(…)` call or a `const` in
  *   scope bound to one (lexically: a nearer binding of the name shadows it);

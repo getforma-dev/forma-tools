@@ -24,6 +24,7 @@ import { DIAGNOSTIC_CATALOGUE } from '@getforma/compiler';
 import {
   RAW_EXITS,
   RAW_LINT_CATALOGUE,
+  latestUntil,
   RawLintUsageError,
   formatRawLintReport,
   rawLint,
@@ -34,7 +35,8 @@ import {
 const CORPUS = resolve(__dirname, 'fixtures/raw-lint');
 const TODAY = '2026-10-14';
 const YESTERDAY = '2026-10-13';
-const LATER = '2099-12-31';
+/** Within a year of TODAY: an entry further out is refused (BUILD-812). */
+const LATER = '2027-06-30';
 
 interface Marker {
   file: string;
@@ -263,6 +265,11 @@ describe('the allowlist', () => {
       [JSON.stringify({ version: 1, entries: [{ ...base, symbol: 'page', exit: 'innerHTML' }] }), "entries[0]: exit 'innerHTML' is not one the lint knows"],
       [JSON.stringify({ version: 1, entries: [{ ...base, symbol: 'page', until: '2026-02-30' }] }), "entries[0]: until '2026-02-30' is not a date"],
       [JSON.stringify({ version: 1, entries: [{ ...base, symbol: 'page', until: '31/12/2026' }] }), "until '31/12/2026' is not a date"],
+      // The review's nit 1: an unpadded date compares wrongly as a string.
+      [JSON.stringify({ version: 1, entries: [{ ...base, symbol: 'page', until: '2026-1-5' }] }), "until '2026-1-5' is not a date"],
+      // At most a year after the run (the lead's decision).
+      [JSON.stringify({ version: 1, entries: [{ ...base, symbol: 'page', until: '2027-10-15' }] }), "until '2027-10-15' is more than a year after today (2026-10-14); the latest it can be is 2027-10-14"],
+      [JSON.stringify({ version: 1, entries: [{ ...base, symbol: 'page', until: '9999-12-31' }] }), 'more than a year after today'],
       [JSON.stringify({ version: 1, entries: [{ ...base }] }), 'entries[0]: name exactly one of line and symbol'],
       [JSON.stringify({ version: 1, entries: [{ ...base, line: 2, symbol: 'page' }] }), 'name exactly one of line and symbol'],
       [JSON.stringify({ version: 1, entries: [{ ...base, line: 0 }] }), 'line must be a positive integer'],
@@ -278,6 +285,10 @@ describe('the allowlist', () => {
       expect(problems.map((d) => d.message).join('\n'), text).toContain(message);
       expect(problems.every((d) => d.file === 'allowlist.json'), text).toBe(true);
     }
+    // A year to the day is the latest accepted.
+    const yearOut = rawLint({ paths: ['src'], cwd: tmp, today: TODAY, allowlist: writeAllowlist([{ ...base, symbol: 'page', count: 2, until: '2027-10-14' }]) });
+    expect(yearOut.exitCode).toBe(0);
+    expect(latestUntil('2028-02-29')).toBe('2029-03-01');
     const missing = rawLint({ paths: ['src'], cwd: tmp, allowlist: 'nope.json', today: TODAY });
     expect(missing.exitCode).toBe(2);
     expect(missing.diagnostics.find((d) => d.code === 'BUILD-812')!.message).toContain('nope.json: no such allowlist file');

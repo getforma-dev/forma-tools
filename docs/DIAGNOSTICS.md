@@ -795,7 +795,7 @@ Printed once per entry (`packages/build/tests/raw-lint.test.ts` > "SR8: a seeded
 
 ### BUILD-812 Allowlist file the lint cannot use (forma-raw-lint)
 
-**Why.** The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date or a reason; the lint does not guess what it meant.
+**Why.** The allowlist cannot be read, is not version 1, or has an entry without a path, a known exit, one of line or symbol, an owner, a real until date at most a year after the run, or a reason; the lint does not guess what it meant.
 
 **Fix.** Correct the file: the message names the entry and the field.
 

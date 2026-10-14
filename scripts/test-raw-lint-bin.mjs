@@ -9,7 +9,7 @@
 // Usage: node scripts/test-raw-lint-bin.mjs
 
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,8 +42,15 @@ try {
   const app = join(scratch, 'app');
   mkdirSync(join(app, 'src'), { recursive: true });
   writeFileSync(join(app, 'package.json'), JSON.stringify({ name: 'raw-lint-consumer', private: true }));
-  const installed = run('npm', ['install', join(scratch, tarball), '--no-audit', '--no-fund', '--ignore-scripts', '--prefer-offline'], app);
+  // esbuild at the version the lockfile records (FORMA-010), not the newest its
+  // range allows; its platform binaries are pinned exactly by esbuild itself.
+  const lock = JSON.parse(readFileSync(join(repo, 'package-lock.json'), 'utf8'));
+  const esbuild = lock.packages?.['node_modules/esbuild']?.version;
+  if (!esbuild) fail('package-lock.json records no node_modules/esbuild version');
+  const installed = run('npm', ['install', join(scratch, tarball), `esbuild@${esbuild}`, '--save-exact', '--no-audit', '--no-fund', '--ignore-scripts', '--prefer-offline'], app);
   if (installed.status !== 0) fail('installing the packed tarball failed', installed);
+  const got = JSON.parse(readFileSync(join(app, 'node_modules', 'esbuild', 'package.json'), 'utf8')).version;
+  if (got !== esbuild) fail(`installed esbuild ${got}, not the lockfile's ${esbuild}`);
 
   writeFileSync(join(app, 'src', 'main.rs'), [
     'const SHELL: &str = "<main id=\\"app\\"></main>";',
