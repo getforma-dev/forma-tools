@@ -27,6 +27,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -36,6 +37,7 @@ import { basename, dirname, join } from 'node:path';
 export interface OutputFs {
   renameSync: (from: string, to: string) => void;
   rmSync: (path: string, options: { recursive: true; force: true }) => void;
+  cpSync: (from: string, to: string, options: { recursive: true }) => void;
 }
 
 /** Where the output is written from; both default to the real ones. */
@@ -44,7 +46,7 @@ export interface OutputEnv {
   platform?: NodeJS.Platform;
 }
 
-const nodeFs: OutputFs = { renameSync, rmSync };
+const nodeFs: OutputFs = { renameSync, rmSync, cpSync };
 
 /** Codes Windows returns while another process holds a handle on the path. */
 const TRANSIENT_ON_WINDOWS = new Set(['EPERM', 'EACCES', 'EBUSY']);
@@ -110,7 +112,6 @@ function sibling(target: string, kind: string): string {
 }
 
 function isRunning(pid: number): boolean {
-  if (pid === process.pid) return true;
   try {
     process.kill(pid, 0);
     return true;
@@ -121,20 +122,55 @@ function isRunning(pid: number): boolean {
 }
 
 /**
- * Remove staging and previous-output directories left beside `target` by a
- * build that was killed before it could clean up (Ctrl-C, a CI timeout).
- * A directory whose build is still running is left alone.
+ * Whether a sibling may still be in use. A staging directory of this process
+ * may belong to a build still running here (`build()` is asynchronous). A
+ * previous output of this process cannot: the swap that sets one aside is
+ * synchronous, so by the time anything else runs it has finished or failed.
  */
-function removeAbandoned(target: string): void {
+function inUse(kind: string, pid: number): boolean {
+  if (pid === process.pid) return kind === STAGING;
+  return isRunning(pid);
+}
+
+/**
+ * Deal with what a build that stopped before cleaning up (Ctrl-C, a CI
+ * timeout, a failed swap) left beside `target`, before anything else:
+ *
+ * - If `target` is absent and a previous output was set aside, the build
+ *   stopped between the swap's two renames. That previous output is the last
+ *   good build: it is put back (the newest, if several), not deleted.
+ * - Every other abandoned staging or previous-output directory is removed.
+ *
+ * A directory whose build is still running is left alone.
+ * Verified by: packages/build/tests/output.test.ts > "puts back the previous output a build killed between its two renames left aside, the newest if several"
+ */
+function recoverAbandoned(target: string): void {
   const parent = dirname(target);
   if (!existsSync(parent)) return;
   const prefix = `.${basename(target)}.`;
+  const abandoned: Array<{ kind: string; path: string }> = [];
   for (const name of readdirSync(parent)) {
     if (!name.startsWith(prefix)) continue;
     const match = /^(forma-staging|forma-previous)-(\d+)-[0-9a-f]{8}$/.exec(name.slice(prefix.length));
-    if (!match || isRunning(Number(match[2]))) continue;
-    rmSync(join(parent, name), { recursive: true, force: true });
+    if (!match || inUse(match[1]!, Number(match[2]))) continue;
+    abandoned.push({ kind: match[1]!, path: join(parent, name) });
   }
+
+  if (!existsSync(target)) {
+    const previous = abandoned
+      .filter(entry => entry.kind === PREVIOUS)
+      .map(entry => ({ ...entry, modified: statSync(entry.path).mtimeMs }))
+      .sort((a, b) => b.modified - a.modified)[0];
+    if (previous) {
+      // If this throws, nothing has been removed yet: the build fails with the
+      // previous output still where the error says.
+      renameWithRetry(previous.path, target);
+      console.warn(`   Warning: restored the previous build to ${target} from ${previous.path}, where a build that stopped part way through its swap left it.`);
+      abandoned.splice(abandoned.findIndex(entry => entry.path === previous.path), 1);
+    }
+  }
+
+  for (const entry of abandoned) rmSync(entry.path, { recursive: true, force: true });
 }
 
 /**
@@ -143,7 +179,7 @@ function removeAbandoned(target: string): void {
  * Verified by: packages/build/tests/output.test.ts > "removes what a killed build left beside the output, and only that"
  */
 export function createStagingDirectory(target: string): string {
-  removeAbandoned(target);
+  recoverAbandoned(target);
   const staging = sibling(target, STAGING);
   mkdirSync(staging, { recursive: true });
   return staging;
@@ -204,10 +240,13 @@ export function replaceDirectory(staging: string, target: string, env: OutputEnv
       restored = false;
     }
     fs.rmSync(staging, { recursive: true, force: true });
+    // Unrestored, the previous build stays at `previous`: while `target` is
+    // absent, the next build moves it back before anything else.
     throw new Error(
       restored
         ? `@getforma/build: could not move the new build into ${target}; the previous build is restored there.`
-        : `@getforma/build: could not move the new build into ${target}, nor restore the previous one; it is at ${previous}.`,
+        : `@getforma/build: could not move the new build into ${target}, nor restore the previous one. ` +
+          `It is at ${previous}; the next build moves it back to ${target} before it starts.`,
       { cause: error },
     );
   }
@@ -216,14 +255,26 @@ export function replaceDirectory(staging: string, target: string, env: OutputEnv
     fs.rmSync(previous, { recursive: true, force: true });
   } catch {
     // A handle still open in the old output (Windows). The new build is in
-    // place; the next build removes this directory (removeAbandoned).
+    // place; the next build removes this directory (recoverAbandoned).
     console.warn(`   Warning: could not remove the previous build at ${previous}; the next build removes it.`);
   }
 }
 
+/**
+ * Verified by: packages/build/tests/output.test.ts > "says the output may be partial when a mount point's copy fails"
+ */
 function replaceContents(staging: string, target: string, fs: OutputFs): void {
-  for (const name of readdirSync(target)) fs.rmSync(join(target, name), { recursive: true, force: true });
-  for (const name of readdirSync(staging)) cpSync(join(staging, name), join(target, name), { recursive: true });
+  try {
+    for (const name of readdirSync(target)) fs.rmSync(join(target, name), { recursive: true, force: true });
+    for (const name of readdirSync(staging)) fs.cpSync(join(staging, name), join(target, name), { recursive: true });
+  } catch (error) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    throw new Error(
+      `@getforma/build: copying the new build into ${target} failed (${errorCode(error) ?? 'error'}); ` +
+        `${target} is a mount point, emptied first, so it may be partial: build again before embedding it.`,
+      { cause: error },
+    );
+  }
   fs.rmSync(staging, { recursive: true, force: true });
   console.warn(`   Warning: ${target} is a mount point; its contents were replaced in place, not swapped atomically.`);
 }
