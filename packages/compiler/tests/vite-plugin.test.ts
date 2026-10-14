@@ -91,6 +91,18 @@ describe('formaCompiler file gating', () => {
     const unrelated = `export const view = h('div', null, 'x');`;
     expect(runTransform(plugin, unrelated, '/proj/src/view.ts')).toBeNull();
   });
+
+  it('leaves a module that imports h from "@getforma/core" to runtime h()', () => {
+    // It passes the quick `forma/` substring check by accident; the transform
+    // still declines it. The compiled path is not yet equivalent to runtime
+    // h() (hydration, core's URL guard, children), so widening it is its own
+    // change, not part of a patch.
+    const scoped = `
+      import { h } from '@getforma/core';
+      export const view = h('div', { class: 'card' }, 'hello');
+    `;
+    expect(runTransform(plugin, scoped, '/proj/src/view.ts')).toBeNull();
+  });
 });
 
 describe('formaServer file gating', () => {
@@ -105,6 +117,12 @@ describe('formaServer file gating', () => {
   it('transforms a project file with a "use server" directive', () => {
     expect(runTransform(plugin, SERVER_FN, '/proj/src/api.ts'))
       .toContain('$$serverFunction');
+  });
+
+  it('imports the RPC stub from "@getforma/core/server", not "formajs/server"', () => {
+    const out = runTransform(plugin, SERVER_FN, '/proj/src/api.ts');
+    expect(out).toContain('from "@getforma/core/server"');
+    expect(out).not.toMatch(/formajs/);
   });
 
   it('skips node_modules', () => {

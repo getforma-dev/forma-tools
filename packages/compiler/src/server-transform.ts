@@ -14,11 +14,11 @@
  * }
  *
  * // Client output:
- * import { $$serverFunction } from "formajs/server";
+ * import { $$serverFunction } from "@getforma/core/server";
  * const createTodo = $$serverFunction("/rpc/createTodo_a1b2c3");
  *
  * // Server output:
- * import { registerServerFunction } from "formajs/server";
+ * import { registerServerFunction } from "@getforma/core/server";
  * async function createTodo(text: string) {
  *   return db.insert('todos', { text, done: false });
  * }
@@ -35,6 +35,14 @@ import type { NodePath } from '@babel/traverse';
 // Handle both ESM default and CJS module.exports patterns
 const traverse = (typeof _traverse === 'function' ? _traverse : (_traverse as any).default) as typeof _traverse;
 const generate = (typeof _generate === 'function' ? _generate : (_generate as any).default) as typeof _generate;
+
+/**
+ * The module the stubs and registrations import from: the published
+ * package's `./server` subpath. Never `formajs/server`: npm refuses the bare
+ * name to anyone, so it resolves only where a build aliases it.
+ * Verified by: packages/compiler/tests/formajs-contract.test.ts > "client mode generates $$serverFunction import from \"@getforma/core/server\""
+ */
+const CORE_SERVER_MODULE = '@getforma/core/server';
 
 export interface ServerTransformOptions {
   /** Whether this is the client or server build. */
@@ -143,17 +151,17 @@ export function transformServerFunctions(
 
   // Add necessary imports
   if (options.mode === 'client' && serverFunctions.length > 0) {
-    // Add: import { $$serverFunction } from "formajs/server";
+    // Add: import { $$serverFunction } from "@getforma/core/server";
     const importDecl = t.importDeclaration(
       [t.importSpecifier(t.identifier('$$serverFunction'), t.identifier('$$serverFunction'))],
-      t.stringLiteral('formajs/server'),
+      t.stringLiteral(CORE_SERVER_MODULE),
     );
     ast.program.body.unshift(importDecl);
   } else if (options.mode === 'server' && serverFunctions.length > 0) {
-    // Add: import { registerServerFunction } from "formajs/server";
+    // Add: import { registerServerFunction } from "@getforma/core/server";
     const importDecl = t.importDeclaration(
       [t.importSpecifier(t.identifier('registerServerFunction'), t.identifier('registerServerFunction'))],
-      t.stringLiteral('formajs/server'),
+      t.stringLiteral(CORE_SERVER_MODULE),
     );
     ast.program.body.unshift(importDecl);
 

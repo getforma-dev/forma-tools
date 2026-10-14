@@ -7,7 +7,7 @@
  * Usage:
  * ```ts
  * // vite.config.ts
- * import { formaCompiler } from 'forma/compiler';
+ * import { formaCompiler } from '@getforma/compiler';
  *
  * export default defineConfig({
  *   plugins: [formaCompiler()],
@@ -91,7 +91,12 @@ export function formaCompiler(options?: FormaCompilerOptions): Plugin {
       // Check include patterns
       if (!includePatterns.some(re => re.test(path))) return;
 
-      // Only transform files that import h from forma
+      // Only transform files that import h from forma. A cheap substring
+      // pre-filter, not the decision: `@getforma/core` passes it by accident
+      // (`getforma/` contains `forma/`), and compileFormaJSX then declines the
+      // module, because it compiles only `h` imported from `formajs` or
+      // `forma/*`. Such a module keeps runtime h(), at the cost of one parse.
+      // Verified by: packages/compiler/tests/vite-plugin.test.ts > "leaves a module that imports h from \"@getforma/core\" to runtime h()"
       if (!code.includes('forma/') && !code.includes('formajs')) return;
 
       return compileFormaJSX(code, id);
@@ -115,7 +120,7 @@ export interface FormaServerOptions {
  * Usage:
  * ```ts
  * // vite.config.ts
- * import { formaServer } from 'forma/compiler';
+ * import { formaServer } from '@getforma/compiler';
  *
  * export default defineConfig({
  *   plugins: [formaServer({ mode: 'client' })],
