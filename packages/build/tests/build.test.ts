@@ -94,7 +94,30 @@ describe('@getforma/build — functional', () => {
     // Result object should agree with disk manifest
     expect(result.manifest.build_hash).toBe(manifest.build_hash);
     expect(result.warnings).toEqual([]);
+    expect(readFileSync(join(outDir, 'sw.js'), 'utf8')).toContain(
+      `const CACHE_NAME = "forma-${manifest.build_hash.slice(0, 12)}";`,
+    );
   }, 15_000);
+
+  it('watch output wires the network-only worker to its unhashed dev manifest', async () => {
+    const cssFile = join(srcDir, 'app.css');
+    writeFileSync(cssFile, 'main { color: red; }');
+    // A CSS-only route exercises real watch-mode orchestration without leaving
+    // an esbuild watcher alive after the test finishes.
+    const result = await build({
+      entryPoints: [],
+      routes: { '/': { js: [], css: ['app'] } },
+      cssEntries: [{ input: cssFile, outfile: 'app.css' }],
+      outputDir: outDir,
+      watch: true,
+    });
+    expect(result.manifest.build_hash).toBe('dev');
+    expect(result.manifest.routes['/'].css).toEqual(['app.css']);
+    const worker = readFileSync(join(outDir, 'sw.js'), 'utf8');
+    expect(worker).toContain("fetch(event.request, { cache: 'no-store' })");
+    expect(worker).toContain("name.startsWith('forma-')");
+    expect(worker).not.toContain('caches.open');
+  });
 
   // ---- Test 2: Content-hashed filenames exist on disk --------------------
   it('content-hashed filenames actually exist on disk', async () => {

@@ -42,6 +42,36 @@ npx tsx build.ts
 
 This bundles your app with esbuild, content-hashes all assets, generates Brotli + gzip compressed versions, and writes an asset manifest.
 
+### Optional shared ESM graph
+
+Set `codeSplitting: true` to share one runtime across entries and preserve native
+`import()` boundaries. Split JavaScript keeps esbuild's linked graph filenames
+(`page.ABC12345.js`, `chunk.DEF67890.js`); do not rename those files afterward.
+`manifest.assets` includes entries and chunks, while each route's `modulepreload`
+contains only transitive static imports. Servers can preload those files without
+fetching lazy tools. `total_size_br` includes static dependencies but not deferred
+imports. Servers with legacy lowercase-hex hash detection should allow immutable
+caching for these exact manifest-listed production files; development stays
+network-only. `serverInlined` copies retain valid relative imports but are not
+standalone scripts, so split ESM should normally be served as external modules.
+
+With `ssr: true`, an entry can set `ssr: false` to keep only that route browser-only.
+Watch builds keep stable entry URLs, regenerate chunk mappings, and remove old
+successful-graph chunks after rebuilding instead of accumulating them on disk.
+
+### Optional on-demand asset caching
+
+Set `serviceWorker: 'on-demand'` to generate a worker that downloads nothing on
+installation and caches eligible static assets only when the app requests them.
+This preserves lazy imports and avoids cache warmup competing with first paint.
+It accepts only exact content-hashed JS/CSS/WASM files from the build manifest,
+with successful, non-redirected immutable asset responses. HTML, APIs, query
+URLs, unknown assets and private/no-store responses never enter this cache.
+CacheStorage denial and quota errors do not block successful network responses.
+The worker is still registered by the application; generation does not register
+it automatically. Unhashed fonts use the browser HTTP cache. The default remains
+`serviceWorker: 'precache'`, and watch mode always uses the network-only worker.
+
 ## What It Does
 
 | Step | What happens |
@@ -144,6 +174,24 @@ The manifest maps source filenames to content-hashed filenames:
 ```
 
 The Rust server (`forma-server`) reads this manifest to serve assets with correct cache headers and resolve hashed filenames.
+
+### Development service worker
+
+Watch builds emit a network-only worker for stable `/_assets/` URLs. It bypasses
+both CacheStorage and the browser's HTTP cache, immediately activates, and
+removes old `forma-*` caches without touching other applications' caches.
+Production builds continue using cache-first content-hashed assets.
+
+When upgrading a running development app from the old cache-first worker,
+rebuild the frontend, restart any server that embeds build output, then reload
+so `/sw.js` updates. Reload once more after the new worker takes control if the
+first navigation started under the old controller. No cache-clearing workaround
+is needed for subsequent rebuilds. A server must actually serve the new asset
+bytes; this worker change does not restart Rust or watch CSS on its behalf.
+
+Run the controlled-page regression with `npm run test:browser -w packages/build`
+from the workspace root. It uses installed Chrome when bundled Chromium is
+unavailable, or the explicit `FORMA_BROWSER_CHANNEL` override.
 
 ## When Do You Need This?
 

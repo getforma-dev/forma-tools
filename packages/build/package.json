@@ -1,6 +1,6 @@
 {
   "name": "@getforma/build",
-  "version": "0.2.0",
+  "version": "0.2.2-ledger.2",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -17,7 +17,8 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --external @getforma/compiler",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:browser": "playwright test --config playwright.config.ts"
   },
   "dependencies": {
     "esbuild": "^0.28.1"
