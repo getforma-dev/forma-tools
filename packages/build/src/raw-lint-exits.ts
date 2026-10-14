@@ -34,6 +34,8 @@ export const RAW_EXITS: readonly ExitInfo[] = Object.freeze([
   { name: 'template', slug: 'template', language: 'ts', what: "core's template() given markup the lint cannot trace to trustedHtml()" },
   { name: 'templateMany', slug: 'templateMany', language: 'ts', what: "core's templateMany() given markup the lint cannot trace to trustedHtml()" },
   { name: 'reconcile', slug: 'reconcile', language: 'ts', what: "the runtime's reconcile() given markup the lint cannot trace to trustedHtml()" },
+  { name: 'mountMarkup', slug: 'mountMarkup', language: 'ts', what: "the runtime's mountMarkup(), 2.1.0's tiered mount, given markup the lint cannot trace to trustedHtml()" },
+  { name: 'MountHandle.update', slug: 'MountHandle-update', language: 'ts', what: "update() on a mountMarkup() handle given markup the lint cannot trace to trustedHtml()" },
   { name: 'srcdoc', slug: 'srcdoc', language: 'ts', what: 'a srcdoc prop or attribute set to a value the lint cannot trace to trustedHtml()' },
   { name: 'core-reexport', slug: 'core-reexport', language: 'ts', what: "export * from core: every raw sink of core's re-exported under the application's own module" },
   { name: "h('script')", slug: 'h-script', language: 'ts', what: "h('script'), a script element core builds (JSX <script> included), whose src runs under 'strict-dynamic'; refused in 3.0.0" },

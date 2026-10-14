@@ -14,8 +14,8 @@
  * not a proof):
  * - A sink reached through core's module in a callback
  *   (`import('@getforma/core').then((m) => m.template(s))`, or with
- *   `({ template }) =>`): `template`, `templateMany`, `reconcile` and
- *   `setHTMLUnsafe` are tracked from core's own module names (`@getforma/core`,
+ *   `({ template }) =>`): `template`, `templateMany`, `reconcile`,
+ *   `mountMarkup` and `setHTMLUnsafe` are tracked from core's own module names (`@getforma/core`,
  *   its subpaths, `formajs`) and the CDN runtime's `FormaRuntime` global,
  *   through imports, `require`, `await import`, destructuring, aliases and
  *   bracket access. `trustedHtml` is matched by name wherever it comes from.
@@ -27,6 +27,8 @@
  *   passed only when its argument is a `trustedHtml(…)` call or a `const` in
  *   scope bound to one (lexically: a nearer binding of the name shadows it);
  *   anything else is reported, so the lint errs on the side of a listed entry.
+ * - `update()` on a mount handle the file does not see made (a parameter, or a
+ *   name never assigned a `mountMarkup()` call).
  * - The browser's own sinks (`innerHTML`, `insertAdjacentHTML`,
  *   `document.write`, `Element.setHTMLUnsafe`): not Forma's exits, and what
  *   Trusted Types refuses in the browser (DR-20). A `srcdoc` write is reported
@@ -367,6 +369,8 @@ const SINK_ARGUMENT: ReadonlyMap<string, number> = new Map([
   ['templateMany', 0],
   ['setHTMLUnsafe', 1],
   ['reconcile', 1],
+  // 2.1.0's tiered mount (FORMA-128): `mountMarkup(root, markup, options)` (the A2 audit's S2).
+  ['mountMarkup', 1],
 ]);
 const GLOBAL_OBJECTS = new Set(['window', 'globalThis', 'self']);
 
@@ -452,6 +456,12 @@ class ScriptScan {
   private readonly skip = new Set<number>();
   /** Local names bound to core's other sinks, to the sink's name. */
   private readonly sinkLocals = new Map<string, string>();
+  /** Names a mountMarkup() handle is held under: variables, fields and properties assigned one. */
+  private readonly handleNames = new Set<string>();
+  /** Locals `update` is destructured into from a mountMarkup() call. */
+  private readonly handleUpdateLocals = new Set<string>();
+  /** `update` tokens chained on a mountMarkup() call: `mountMarkup(…).update(…)`. */
+  private readonly directUpdates = new Set<number>();
   /** Local names of core's h() (beside `h`, which JSX compiles to). */
   private readonly hLocals = new Set<string>(['h']);
   /** Local names bound to core's module as a namespace. */
@@ -487,6 +497,7 @@ class ScriptScan {
   run(): Found[] {
     this.computeRegions();
     this.collectBindings();
+    this.collectMountHandles();
     this.collectDeclarations();
     this.classifyConsts();
     this.symbols = this.computeSymbols();
@@ -647,6 +658,53 @@ class ScriptScan {
     this.bind(local, region, imported === 'trustedHtml' ? 'trustedCallee' : 'other');
     if (fromCore && SINK_ARGUMENT.has(imported)) this.sinkLocals.set(local, imported);
     if (fromCore && imported === 'h') this.hLocals.add(local);
+  }
+
+  /**
+   * The handles mountMarkup() calls make (the A2 audit's S2): a handle's
+   * `update(markup)` is the same raw sink. A call is followed when its result
+   * is assigned to a name (`const w = mountMarkup(…)`, `w = …`, a class field,
+   * `this.handle = …`; by name, file-wide), chained (`mountMarkup(…).update(…)`)
+   * or destructured (`const { update } = mountMarkup(…)`). A handle the file
+   * does not see made (a parameter) is a listed miss.
+   */
+  private collectMountHandles(): void {
+    for (let k = 0; k < this.toks.length; k++) {
+      const t = this.toks[k]!;
+      let start: number;
+      let open: number;
+      if (t.type === 'id' && !this.isP(k - 1, '.') && !this.isP(k - 1, '?.') && this.sinkLocals.get(t.value) === 'mountMarkup') {
+        start = k;
+        open = k + 1;
+      } else if (t.type === 'id' && t.value === 'mountMarkup' && this.isP(k - 1, '.') && this.isNamespaceAt(k - 2)) {
+        start = k - 2;
+        open = k + 1;
+      } else if (t.type === 'str' && t.value === 'mountMarkup' && this.isP(k - 1, '[') && this.isP(k + 1, ']') && this.isNamespaceAt(k - 2)) {
+        start = k - 2;
+        open = k + 2;
+      } else {
+        continue;
+      }
+      if (this.isP(start, ')') && this.pair[start]! >= 0) start = this.pair[start]!;
+      while (this.isP(start - 1, '.') && this.isId(start - 2)) start -= 2;
+      if (!this.isP(open, '(') || this.pair[open]! < open) continue;
+      const close = this.pair[open]!;
+      if ((this.isP(close + 1, '.') || this.isP(close + 1, '?.')) && this.isId(close + 2, 'update')) this.directUpdates.add(close + 2);
+      if (!this.isP(start - 1, '=')) continue;
+      const target = start - 2;
+      if (this.isId(target)) {
+        this.handleNames.add(this.toks[target]!.value);
+      } else if (this.isP(target, '}') && this.pair[target]! >= 0) {
+        // `const { update, unmount } = mountMarkup(…)`, `{ update: up }`.
+        for (let p = this.pair[target]! + 1; p < target; p++) {
+          if (!this.isId(p, 'update') || !(this.isP(p - 1, '{') || this.isP(p - 1, ','))) continue;
+          const local = this.isP(p + 1, ':') && this.isId(p + 2) ? p + 2 : p;
+          this.handleUpdateLocals.add(this.toks[local]!.value);
+          this.skip.add(p);
+          this.skip.add(local);
+        }
+      }
+    }
   }
 
   /**
@@ -1053,13 +1111,13 @@ class ScriptScan {
   }
 
   /** A sink of core's at `i`, its name ending before `after`: called with untraced markup, or referenced. */
-  private checkSinkUse(i: number, sink: string, after: number): void {
+  private checkSinkUse(i: number, sink: string, after: number, argIndex = SINK_ARGUMENT.get(sink)!): void {
     const open = this.isP(after, '(') ? after : this.isP(after, '?.') && this.isP(after + 1, '(') ? after + 1 : -1;
     if (open === -1) {
       this.report(i, sink, `${sink} referenced, not called: the lint cannot see what it is given`);
       return;
     }
-    const arg = this.argument(open, SINK_ARGUMENT.get(sink)!);
+    const arg = this.argument(open, argIndex);
     if (!arg || !this.isTrusted(arg[0], arg[1])) this.report(i, sink, `${sink}() given markup not traced to trustedHtml()`);
   }
 
@@ -1128,7 +1186,16 @@ class ScriptScan {
       return;
     }
 
-    // template, templateMany, setHTMLUnsafe, reconcile from core.
+    // update() on a mountMarkup() handle (the A2 audit's S2).
+    if (name === 'update' && !this.isKey(i)) {
+      const onHandle = this.directUpdates.has(i) || (afterDot && this.isId(i - 2) && this.handleNames.has(this.t(i - 2)!.value));
+      if (onHandle || (!afterDot && this.handleUpdateLocals.has(name))) {
+        this.checkSinkUse(i, 'MountHandle.update', i + 1, 0);
+        return;
+      }
+    }
+
+    // template, templateMany, setHTMLUnsafe, reconcile, mountMarkup from core.
     const sink = onNamespace ? (SINK_ARGUMENT.has(name) ? name : undefined) : !afterDot && !this.isKey(i) ? this.sinkLocals.get(name) : undefined;
     if (sink) {
       this.checkSinkUse(i, sink, i + 1);
