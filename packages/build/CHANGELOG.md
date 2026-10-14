@@ -44,8 +44,10 @@ Release A2, the bridge to 3.0.0: additive, with deprecations. Released with
   it was without the setting (`tests/preview-frame.test.ts` > "with
   previewFrame off or unset the output is byte-identical, names no runtime,
   and reads no frame runtime").
-- **A new bin, `forma-raw-lint`,** for an application's CI; `build()` and the
-  package's exports are unchanged.
+- **A new bin, `forma-raw-lint`,** for an application's CI: 24 raw-entry
+  exits, among them core 2.1.0's `mountMarkup` and a mount handle's `update`
+  given a string (#27, the A2 audit's S2). `build()` and the package's exports
+  are unchanged.
 
 ### Added
 - **`previewFrame: true` copies the preview-frame runtime of the `@getforma/core` the bundles import into the output as `forma-runtime.js` (FORMA-175; DR-14 tier (c), DR-26, L-27, L-44).** forma-server's preview frame (`PageResponse::frame`, FORMA-125) inlines core's frame runtime (FORMA-128) and allows it by its SHA-256 hash; `PreviewFrame::load` reads it at start from the manifest's `assets["forma-runtime.js"]`, and until a build writes it the frame refuses to start (FRAME-101). Off by default; off (or `false`), nothing is read and the output is byte-identical to a build without the setting.
