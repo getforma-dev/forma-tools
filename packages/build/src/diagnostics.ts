@@ -11,8 +11,8 @@
  * Verified by: packages/build/tests/strict.test.ts
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 import type { BuildConfig, BuildDiagnostic } from './types.js';
 
@@ -149,6 +149,97 @@ export function workerWithoutAppDiagnostic(message: string): CompilerDiagnostic 
   };
 }
 
+/**
+ * BUILD-803: the config sets `wasm` (FORMA-131's deprecation), in the report
+ * beside the line the build prints. A note: the old path keeps working in A2,
+ * so strict mode does not fail a build that still sets it.
+ */
+export function wasmKeyDiagnostic(message: string): CompilerDiagnostic {
+  return {
+    code: 'BUILD-803',
+    file: '',
+    line: 0,
+    column: 0,
+    message: message.replace(/^BUILD-803 /, ''),
+    why: "The `wasm` key is deprecated and goes in 3.0.0 with the WASM walker (forma-ir's `wasm` feature and `@getforma/core/wasm`).",
+    fix: 'Remove `wasm` from the config: islands re-render in the browser with h(), and forma-server renders pages.',
+    strict: false,
+  };
+}
+
+/** BUILD-804: the wasm-pack step ran (FORMA-131's deprecation). A note, as BUILD-803. */
+export function wasmPackDiagnostic(message: string): CompilerDiagnostic {
+  return {
+    code: 'BUILD-804',
+    file: '',
+    line: 0,
+    column: 0,
+    message: message.replace(/^BUILD-804 /, ''),
+    why: "The wasm-pack step is deprecated and goes in 3.0.0: forma_ir.js, forma_ir_bg.wasm and the manifest's wasm entry go with the WASM walker.",
+    fix: 'Remove `wasm` from the config.',
+    strict: false,
+  };
+}
+
+/**
+ * Whether `report` lies inside `outputDir`, as the filesystem sees them: both
+ * through their real paths (a symlink or junction pointing into `outputDir`
+ * counts as inside), compared case-insensitively where the filesystem ignores
+ * case, and with `..` counted only as a whole path segment (`dist/..d.json`
+ * is inside `dist`). Either path may not exist yet: its nearest existing
+ * ancestor is resolved, and the rest is taken as written.
+ * Verified by: packages/build/tests/strict.test.ts > "refuses a JSON report path inside outputDir, before anything is written"
+ */
+export function isInsideOutputDir(report: string, outputDir: string): boolean {
+  const out = realPathOf(outputDir);
+  const target = realPathOf(report);
+  const fold = caseInsensitiveAt(out.existing);
+  const rel = fold
+    ? relative(out.path.toLowerCase(), target.path.toLowerCase())
+    : relative(out.path, target.path);
+  if (rel === '') return true;
+  if (isAbsolute(rel)) return false;
+  return rel !== '..' && !rel.startsWith(`..${sep}`);
+}
+
+/** `path` with its nearest existing ancestor through realpath, and that ancestor. */
+function realPathOf(path: string): { path: string; existing: string } {
+  let current = resolve(path);
+  const rest: string[] = [];
+  while (!existsSync(current)) {
+    const parent = dirname(current);
+    if (parent === current) break;
+    rest.unshift(basename(current));
+    current = parent;
+  }
+  let real = current;
+  try {
+    real = realpathSync.native(current);
+  } catch {
+    // An unreadable ancestor is compared as written.
+  }
+  return { path: rest.length ? join(real, ...rest) : real, existing: real };
+}
+
+/**
+ * Whether the filesystem holding `dir` (an existing path) ignores case: the
+ * same path with one letter's case flipped names the same file. A path with
+ * no letter is taken as case-sensitive.
+ */
+function caseInsensitiveAt(dir: string): boolean {
+  const i = dir.search(/[A-Za-z][^A-Za-z]*$/);
+  if (i < 0) return false;
+  const c = dir[i]!;
+  const flipped = dir.slice(0, i) + (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()) + dir.slice(i + 1);
+  try {
+    const a = statSync(dir);
+    const b = statSync(flipped);
+    return a.ino === b.ino && a.dev === b.dev;
+  } catch {
+    return false;
+  }
+}
+
 /** The report's format version. A field may be added without a change;
  *  renaming or removing a field, or changing what one means, increments it. */
 export const DIAGNOSTICS_JSON_VERSION = 1;
@@ -176,7 +267,7 @@ export function formatBuildDiagnostic(d: BuildDiagnostic): string {
 export function strictFailure(errors: BuildDiagnostic[]): Error & { diagnostics: BuildDiagnostic[] } {
   const count = errors.length === 1 ? '1 SSR diagnostic is an error' : `${errors.length} SSR diagnostics are errors`;
   const error = new Error(
-    `@getforma/build --strict: ${count} (without --strict they are warnings):\n`
+    `@getforma/build strict mode (strict: true or FORMA_STRICT=1): ${count}; without it they are warnings:\n`
     + errors.map(formatBuildDiagnostic).join('\n')
     + `\nEach code, with its fix: ${CATALOGUE_URL}`,
   ) as Error & { diagnostics: BuildDiagnostic[] };

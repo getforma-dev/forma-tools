@@ -134,6 +134,23 @@ describe('the deprecated wasm key and wasm-pack step (FORMA-131)', () => {
     expect(manifest.wasm?.loader).toMatch(/^forma_ir\.[0-9a-f]{8}\.js$/);
   }, 20_000);
 
+  it('a strict build that still sets wasm passes, with BUILD-803 and BUILD-804 as notes in its report (FORMA-119)', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const crateDir = join(tmpRoot, 'crate');
+    const binDir = join(tmpRoot, 'bin');
+    fakeWasmPack(binDir, crateDir);
+    process.env.PATH = binDir + delimiter + prevPath;
+    const report = join(tmpRoot, 'diagnostics.json');
+
+    // The old path keeps working in A2: strict mode does not fail on it.
+    const result = await build({ ...config, wasm: { crateDir }, strict: true, diagnosticsJson: report });
+
+    const expected = [['BUILD-803', 'note', ''], ['BUILD-804', 'note', '']];
+    expect(result.diagnostics.map((d) => [d.code, d.severity, d.page])).toEqual(expected);
+    const json = JSON.parse(readFileSync(report, 'utf8'));
+    expect(json.diagnostics.map((d: { code: string; severity: string; page: string }) => [d.code, d.severity, d.page])).toEqual(expected);
+  }, 20_000);
+
   it('a config without wasm warns neither', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 

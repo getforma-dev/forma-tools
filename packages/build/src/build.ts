@@ -21,7 +21,7 @@ import {
   statSync,
   existsSync,
 } from 'node:fs';
-import { join, extname, basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { join, extname, basename, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { brotliCompressSync, gzipSync, constants } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
@@ -32,7 +32,10 @@ import { createStagingDirectory, replaceDirectory, writeFileAtomic } from './out
 import {
   DiagnosticsCollector,
   compilerMissing,
+  isInsideOutputDir,
   resolveDiagnosticOptions,
+  wasmKeyDiagnostic,
+  wasmPackDiagnostic,
   workerWithoutAppDiagnostic,
   strictFailure,
   writeDiagnosticsJson,
@@ -457,8 +460,7 @@ function validateConfig(config: BuildConfig): void {
   // served or embedded with the assets (FORMA-119).
   // Verified by: packages/build/tests/strict.test.ts > "refuses a JSON report path inside outputDir, before anything is written"
   if (config.diagnosticsJson !== undefined) {
-    const inside = relative(resolve(config.outputDir), resolve(config.diagnosticsJson));
-    if (inside === '' || (!inside.startsWith('..') && !isAbsolute(inside))) {
+    if (isInsideOutputDir(config.diagnosticsJson, config.outputDir)) {
       problems.push(
         `diagnosticsJson '${config.diagnosticsJson}' is inside outputDir '${config.outputDir}': the build replaces outputDir whole, and its files are served; write the report outside it`,
       );
@@ -829,9 +831,11 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
     // of them; watch mode hands it to each page's plugin.
     const strict = config.strict === true;
     const collector = new DiagnosticsCollector(strict, config.entryPoints.map((entry) => basename(entry.outfile, '.js')));
-    // BUILD-802, which build() has already printed, joins the report.
-    const deprecation = workerWithoutApp(config);
-    if (deprecation) collector.addBuildLevel(workerWithoutAppDiagnostic(deprecation));
+    // BUILD-802 and BUILD-803, which build() has already printed, join the report.
+    const workerDeprecation = workerWithoutApp(config);
+    if (workerDeprecation) collector.addBuildLevel(workerWithoutAppDiagnostic(workerDeprecation));
+    const wasmDeprecation = wasmKey(config);
+    if (wasmDeprecation) collector.addBuildLevel(wasmKeyDiagnostic(wasmDeprecation));
     const pluginShared: SsrPluginShared = {
       onDiagnostics: collector.onDiagnostics,
       ...(config.watch && strict ? { strict: true } : {}),
@@ -846,12 +850,12 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
         // a page it never checked: refuse instead (fail closed).
         if (strict && !('collectDiagnostics' in mod)) {
           throw new Error(
-            '--strict needs @getforma/compiler 0.3.7 or later, which reports coded diagnostics; '
+            'strict mode (strict: true or FORMA_STRICT=1) needs @getforma/compiler 0.3.7 or later, which reports coded diagnostics; '
             + 'the installed compiler does not, so the build cannot check its pages.',
           );
         }
       } catch (error) {
-        if ((error as Error).message.startsWith('--strict needs')) throw error;
+        if ((error as Error).message.startsWith('strict mode (strict: true or FORMA_STRICT=1) needs')) throw error;
         console.warn(
           'Warning: BUILD-801 @getforma/compiler not available for SSR. Skipping IR emission.',
         );
@@ -993,7 +997,12 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
       }),
     );
 
-    // ── SSR diagnostics: the JSON report, then --strict ───────────────
+    // ── WASM build ────────────────────────────────────────────────────
+    // Before the report, so BUILD-804 is in it when the step ran.
+    const wasmBuilt = buildWasm(config);
+    if (wasmBuilt) collector.addBuildLevel(wasmPackDiagnostic(WASM_PACK_DEPRECATION));
+
+    // ── SSR diagnostics: the JSON report, then strict mode ────────────
     // Every page is compiled by now, so a strict failure names them all.
     const diagnostics = collector.all();
     if (config.diagnosticsJson) {
@@ -1004,9 +1013,6 @@ async function buildInto(config: BuildConfig, shownDir: string): Promise<BuildRe
       const errors = collector.errors();
       if (errors.length > 0) throw strictFailure(errors);
     }
-
-    // ── WASM build ────────────────────────────────────────────────────
-    const wasmBuilt = buildWasm(config);
 
     // ── Content hashing ───────────────────────────────────────────────
     const assets = hashAssets(config, graph?.assets);

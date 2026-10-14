@@ -248,7 +248,7 @@ and `fix`.
   but a note, after every page is compiled, with all of them at once:
 
   ```
-  Error: @getforma/build --strict: 2 SSR diagnostics are errors (without --strict they are warnings):
+  Error: @getforma/build strict mode (strict: true or FORMA_STRICT=1): 2 SSR diagnostics are errors; without it they are warnings:
   /app/src/home/app.tsx:12:11  BUILD-101  call expression helpers.extra(...) in /app/src/home/app.tsx:12:11 — emitted as an empty island shell, …
       why: The call becomes an anonymous island (`island_<n>`) that no registry names: …
       fix: Write the subtree as h() calls, a component in a relative file, …
@@ -258,7 +258,9 @@ and `fix`.
   script that takes `--strict` maps it to the config.
 
   ```ts
-  await build({ /* … */ ssr: isSsr, strict: process.argv.includes("--strict") });
+  // `|| undefined` leaves `strict` unset without the flag, so FORMA_STRICT=1
+  // still applies; `false` would turn strict mode off whatever the variable says.
+  await build({ /* … */ ssr: isSsr, strict: process.argv.includes("--strict") || undefined });
   ```
 
   `strict: false` ignores `FORMA_STRICT`; a value of it other than `1`,
@@ -270,7 +272,9 @@ and `fix`.
 - **JSON** (`diagnosticsJson: "<path>"`): the build writes
   `{ version, strict, diagnostics }` to that path, also when strict mode fails
   it. The path must be outside `outputDir`, which the build replaces whole and
-  serves; one inside is refused before anything is written. A field may be
+  serves; one inside is refused before anything is written, inside as the
+  filesystem sees it (through real paths, so a symlink into `outputDir`
+  counts; case-insensitively where the filesystem ignores case). A field may be
   added to the report without a change of `version`; renaming or removing one,
   or changing what one means, increments it.
 

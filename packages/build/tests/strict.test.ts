@@ -9,7 +9,7 @@
  * them at once, and leaves the previous output as it was.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -164,18 +164,50 @@ describe('the JSON report', () => {
 
   it('refuses a JSON report path inside outputDir, before anything is written', async () => {
     // Inside outputDir the report would be swapped away on success, written
-    // into the previous build on failure, and served with the assets.
+    // into the previous build on failure (which must stay untouched, L-21),
+    // and served with the assets. "Inside" as the filesystem sees it.
     const entries = twoBrokenPages();
-    for (const path of [join(outDir, 'ssr-diagnostics.json'), join(outDir, 'reports', 'd.json'), outDir]) {
-      await expect(build(config(entries, { diagnosticsJson: path }))).rejects.toThrow(
-        /diagnosticsJson '.*' is inside outputDir '.*': the build replaces outputDir whole/,
-      );
+    const refused = /diagnosticsJson '.*' is inside outputDir '.*': the build replaces outputDir whole/;
+
+    // Does this filesystem ignore case? tmpRoot under another spelling.
+    const flipped = tmpRoot.replace(/[A-Za-z](?=[^A-Za-z]*$)/, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+    const foldsCase = (() => {
+      try { return statSync(flipped).ino === statSync(tmpRoot).ino; } catch { return false; }
+    })();
+    const spelled = join(tmpRoot, 'DIST', 'diag.json');
+
+    // No previous build yet: plain paths, `..` that is not a segment, and
+    // (where the filesystem ignores case) another spelling of a directory
+    // that does not exist yet, which no real path can canonicalize.
+    const inside = [join(outDir, 'ssr-diagnostics.json'), join(outDir, 'reports', 'd.json'), outDir, join(outDir, '..diag.json')];
+    for (const path of foldsCase ? [...inside, spelled] : inside) {
+      await expect(build(config(entries, { diagnosticsJson: path })), path).rejects.toThrow(refused);
     }
     expect(existsSync(outDir)).toBe(false);
-    // Beside it is fine.
-    await build(config(entries, { diagnosticsJson: join(tmpRoot, 'dist-diagnostics.json') }));
+
+    // A live previous build, and a strict build that fails: the report must
+    // not reach it through a symlink (a junction on Windows) or, where the
+    // filesystem ignores case, through another spelling.
+    await build(config(entries));
+    const before = readFileSync(join(outDir, 'manifest.json'), 'utf8');
+    const link = join(tmpRoot, 'reports');
+    symlinkSync(outDir, link, process.platform === 'win32' ? 'junction' : 'dir');
+    for (const path of [join(link, 'diag.json'), ...(foldsCase ? [spelled] : [])]) {
+      await expect(build(config(entries, { strict: true, diagnosticsJson: path })), path).rejects.toThrow(refused);
+    }
+    expect(existsSync(join(outDir, 'diag.json'))).toBe(false);
+    expect(readFileSync(join(outDir, 'manifest.json'), 'utf8')).toBe(before);
+    if (!foldsCase) {
+      // A case-sensitive filesystem: DIST is another directory, beside dist.
+      await expect(build(config(entries, { strict: true, diagnosticsJson: spelled }))).rejects.toThrow(/SSR diagnostics are errors/);
+      expect(existsSync(spelled)).toBe(true);
+    }
+
+    // Beside it is fine, `..` as a segment included.
+    const beside = join(outDir, '..', 'dist-diagnostics.json');
+    await build(config(entries, { diagnosticsJson: beside }));
     expect(existsSync(join(tmpRoot, 'dist-diagnostics.json'))).toBe(true);
-  }, 30_000);
+  }, 60_000);
 
   it('is written on request, also when --strict fails the build', async () => {
     const entries = twoBrokenPages();
@@ -216,7 +248,9 @@ describe('where strict comes from', () => {
     const entries = twoBrokenPages();
     vi.stubEnv('FORMA_STRICT', '1');
     try {
-      await expect(build(config(entries))).rejects.toThrow(/--strict: 2 SSR diagnostics are errors/);
+      await expect(build(config(entries))).rejects.toThrow(
+        /strict mode \(strict: true or FORMA_STRICT=1\): 2 SSR diagnostics are errors; without it they are warnings/,
+      );
     } finally {
       vi.unstubAllEnvs();
     }

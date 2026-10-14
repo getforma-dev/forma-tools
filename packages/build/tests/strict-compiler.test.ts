@@ -68,7 +68,7 @@ describe('a compiler without coded diagnostics', () => {
     }));
     const { build } = await import('../src/build');
 
-    await expect(build(config({ strict: true }))).rejects.toThrow(/--strict needs @getforma\/compiler 0\.3\.7 or later/);
+    await expect(build(config({ strict: true }))).rejects.toThrow(/strict mode \(strict: true or FORMA_STRICT=1\) needs @getforma\/compiler 0\.3\.7 or later/);
     const result = await build(config());
     expect(result.diagnostics).toEqual([]);
   }, 30_000);
