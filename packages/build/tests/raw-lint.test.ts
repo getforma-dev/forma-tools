@@ -466,7 +466,8 @@ describe('the command', () => {
     const pkg = JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf8')) as { bin: Record<string, string>; scripts: { build: string } };
     expect(pkg.bin).toEqual({ 'forma-raw-lint': 'dist/raw-lint-cli.js' });
     expect(pkg.scripts.build).toContain('src/raw-lint-cli.ts');
-    expect(readFileSync(resolve(__dirname, '../src/raw-lint-cli.ts'), 'utf8').startsWith('#!/usr/bin/env node\n')).toBe(true);
+    // Windows runners check source out with CRLF; the shebang is what matters.
+    expect(readFileSync(resolve(__dirname, '../src/raw-lint-cli.ts'), 'utf8')).toMatch(/^#!\/usr\/bin\/env node\r?\n/);
   });
 });
 
