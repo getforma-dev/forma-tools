@@ -119,7 +119,7 @@ const config: BuildConfig = {
     dashboard: "src/dashboard/app.tsx",
   },
   wasm: { crateDir: "../crates/forma-ir" },  // Build WASM walker
-  watch: false,                       // Rebuild on change; writes a dev manifest
+  watch: false,                       // Rebuild on change; writes a dev manifest and, with ssr, each page's .ir
   budgetThreshold: 200_000,           // Warn at 200KB brotli per route
   formaAlias: "@getforma/core",       // What bare 'formajs' imports resolve to
   serverInlined: ["app.js"],          // Also keep the unhashed name on disk
@@ -176,6 +176,23 @@ The manifest maps source filenames to content-hashed filenames:
 ```
 
 The Rust server (`forma-server`) reads this manifest to serve assets with correct cache headers and resolve hashed filenames.
+
+### Watch mode and server-rendered pages
+
+With `ssr: true`, watch mode keeps each page's FMIR module current, so a page
+the server renders changes on an incremental rebuild (N7). Each page is watched
+over its own SSR entry's module graph (`ssrEntryPoints`, else its browser
+entry), apart from the browser bundles: an edit re-runs the compiler for the
+pages it touches and no others, including an SSR entry the browser bundle never
+imports. A module is written as `<page>.ir`, replaced by rename and only when
+its bytes change, and the dev manifest names it in the route's `ir`. A page
+that stops compiling keeps its last good module and logs why. Each rewrite logs
+its time, for example `IR rewritten: home.ir in 36 ms`.
+
+The server must read the new module. `forma-server` loads the `.ir` modules
+when the application starts (`load_ir_modules`), so restart it on a change
+under `outputDir`, for example with `cargo watch`, until it rereads them in
+development builds.
 
 ### Development service worker
 
