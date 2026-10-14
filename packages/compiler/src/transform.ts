@@ -796,8 +796,11 @@ export function compileFormaJSX(
     if (!t.isImportDeclaration(node)) continue;
     const source = node.source.value;
 
-    // Check if this imports from forma
-    if (!source.startsWith('forma/') && !source.startsWith('formajs')) continue;
+    // Check if this imports from forma: the published package, which is what
+    // compiled output itself imports and what applications migrate to (only
+    // its root entry exports h), or the aliased bare name, still accepted.
+    // Verified by: packages/compiler/tests/formajs-contract.test.ts > "compiles h() imported from \"@getforma/core\", and the output never names \"formajs\""
+    if (source !== CORE_MODULE && !source.startsWith('forma/') && !source.startsWith('formajs')) continue;
 
     for (const spec of node.specifiers) {
       if (!t.isImportSpecifier(spec)) continue;

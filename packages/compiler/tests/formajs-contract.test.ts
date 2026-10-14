@@ -94,6 +94,27 @@ describe('compiler → @getforma/core import contracts', () => {
     });
   });
 
+  it('compiles h() imported from "@getforma/core", and the output never names "formajs"', () => {
+    // The scoped name is what compiled output imports and what applications
+    // migrate to (DR-33); the transform must recognise it as a Forma import,
+    // or a migrated module silently falls back to runtime h().
+    const source = `
+      import { h, createSignal } from '@getforma/core';
+      const [count] = createSignal(0);
+      export const view = h('p', { class: 'n' }, () => count());
+    `;
+    const out = compileFormaJSX(source, '/tmp/test.tsx');
+    expect(out).not.toBeNull();
+    expect(out!.code).toContain('cloneNode(true)');
+    expect(out!.code).not.toMatch(/formajs/);
+    expect(importedFrom(out!.code)).toEqual({
+      template: '@getforma/core',
+      createEffect: '@getforma/core',
+      h: '@getforma/core',
+      createSignal: '@getforma/core',
+    });
+  });
+
   it('static-only component generates template import but no createEffect', () => {
     const source = `
       import { h } from 'formajs';

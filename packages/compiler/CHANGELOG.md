@@ -5,6 +5,9 @@
 ### Changed
 - **Compiled output imports `@getforma/core`, never the bare `formajs`.** `formaCompiler`'s template transform imports `template` and `createEffect` from `@getforma/core`, and `formaServer`'s stubs and registrations import from `@getforma/core/server`; both entry points are in `@getforma/core` 2.0.1's `exports`. The bare name resolved only where a build aliased it (`@getforma/build`'s `formaAlias`, or a Vite `resolve.alias`), and npm refuses to publish `formajs` to anyone because it is too similar to the third-party `forma-js`, so it can never be claimed and only an alias stands between a compiled import and a missing package. A module's own `formajs` imports are left as written, and `formaAlias` still resolves them. One setup to check when upgrading: a Vite project that aliases `formajs` to a local path rather than to the installed `@getforma/core` must now make `@getforma/core` resolve too, since compiled modules name it directly. Tests in `tests/formajs-contract.test.ts` pin every emitted specifier, among them "adds no import of the bare name \"formajs\", even to a module written against it"; each went red with its specifier reverted.
 
+### Fixed
+- **`formaCompiler` now compiles a module that imports `h` from `@getforma/core`.** The transform recognised `h` only from `formajs`, `formajs/*` or `forma/*`, so a module written against the published package, the name compiled output now imports and the one applications move to under DR-33, fell back to runtime `h()` without a word. It is recognised alongside the bare name, which still works. Tests: `tests/formajs-contract.test.ts` > "compiles h() imported from \"@getforma/core\", and the output never names \"formajs\"" and `tests/vite-plugin.test.ts` > "transforms a module that imports h from \"@getforma/core\", naming no \"formajs\"", both red with the recognition removed.
+
 ## [0.3.5] - 2026-08-07
 
 ### Fixed

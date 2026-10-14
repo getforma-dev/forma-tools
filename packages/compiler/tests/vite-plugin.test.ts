@@ -92,6 +92,16 @@ describe('formaCompiler file gating', () => {
     expect(runTransform(plugin, unrelated, '/proj/src/view.ts')).toBeNull();
   });
 
+  it('transforms a module that imports h from "@getforma/core", naming no "formajs"', () => {
+    const scoped = `
+      import { h } from '@getforma/core';
+      export const view = h('div', { class: 'card' }, 'hello');
+    `;
+    const out = runTransform(plugin, scoped, '/proj/src/view.ts');
+    expect(out).toContain('cloneNode(true)');
+    expect(out).toContain('from "@getforma/core"');
+    expect(out).not.toMatch(/formajs/);
+  });
 });
 
 describe('formaServer file gating', () => {
