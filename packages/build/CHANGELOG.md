@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Deprecated
+- **`serviceWorker` without `app`** (BUILD-802; FORMA-130). The worker it
+  writes is 0.3.0's: cache names every Forma application on the origin
+  shares, and an immediate takeover of open tabs. The build now says so once
+  per `build()` call, in watch mode and in production alike, on the console
+  (`Warning: BUILD-802 ...`) and as an entry in `BuildResult.warnings`; set
+  `app` to the name the server passes to forma-server's
+  `sw::ServiceWorker::for_app`. From 3.0.0 a worker is written only for a
+  named `app`. Nothing changes without `serviceWorker`, or with `app`. Test:
+  `tests/build.test.ts` > "warns when serviceWorker is set without app, naming
+  the 3.0.0 change, and is silent with app". The code joins FORMA-119's
+  diagnostic catalogue (`docs/DIAGNOSTICS.md`, BUILD-8xx) when that lands.
+  The build's `app` and the server's `for_app` meet by convention: FORMA-168
+  records `app` in the manifest so the server can check it.
+
 ### Added
 - **Per-application, per-build service-worker caches with a waiting upgrade:
   `BuildConfig.app`** (FORMA-130, the build half; DR-25, SR28). Set it to the

@@ -296,6 +296,25 @@ function shown(value: unknown): string {
 }
 
 /**
+ * BUILD-802 (deprecated in 0.3.1): `serviceWorker` is set but `app` is not,
+ * so the worker is 0.3.0's, with the cache names every Forma application on
+ * the origin shares and an immediate takeover. Said once per `build()` call,
+ * production and watch alike, on the console and in `BuildResult.warnings`.
+ *
+ * Verified by: packages/build/tests/build.test.ts > "warns when serviceWorker is set without app, naming the 3.0.0 change, and is silent with app"
+ */
+function workerWithoutApp(config: BuildConfig): string | undefined {
+  if (config.serviceWorker === undefined || config.app !== undefined) return undefined;
+  return (
+    `BUILD-802 serviceWorker is set without app: this is 0.3.0's worker, whose caches every ` +
+    `Forma application on the origin shares and which takes over open tabs at once. Set app to ` +
+    `the name the server passes to forma-server's sw::ServiceWorker::for_app for caches per ` +
+    `application and build and a waiting upgrade; from 3.0.0 a worker is written only for a ` +
+    `named app.`
+  );
+}
+
+/**
  * Reject configurations whose output cannot be correct, BEFORE anything is
  * written. The first four checks close a silent failure mode; the fifth
  * turns a crash into a message:
@@ -672,7 +691,11 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
   // Validate before anything is written: a config error must not touch the
   // previous build's output on its way to failing.
   validateConfig(config);
-  if (config.watch) return buildInto(config, config.outputDir);
+  const deprecation = workerWithoutApp(config);
+  if (deprecation) console.warn(`Warning: ${deprecation}`);
+  const withDeprecation = (result: BuildResult): BuildResult =>
+    deprecation ? { ...result, warnings: [...result.warnings, deprecation] } : result;
+  if (config.watch) return withDeprecation(await buildInto(config, config.outputDir));
 
   const staging = createStagingDirectory(config.outputDir);
   let result: BuildResult;
@@ -684,7 +707,7 @@ export async function build(config: BuildConfig): Promise<BuildResult> {
   }
   // Throws with the previous output restored if the swap itself fails.
   replaceDirectory(staging, config.outputDir);
-  return result;
+  return withDeprecation(result);
 }
 
 /**

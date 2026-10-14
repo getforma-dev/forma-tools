@@ -103,7 +103,9 @@ anything else is a config error naming it. forma-server serves this worker only
 to an application that enables it; otherwise `/sw.js` is forma-server's
 retiring worker, which deletes the same caches and unregisters. Without `app`,
 the worker is 0.3.0's (shared `forma-` names, immediate takeover), kept for a
-server not yet on forma-server 0.2.2. The development worker ignores `app`.
+server not yet on forma-server 0.2.2; setting `serviceWorker` without `app` is
+deprecated and warns once per build (`BUILD-802`), because from 3.0.0 a worker
+is written only for a named `app`. The development worker ignores `app`.
 
 ## What It Does
 

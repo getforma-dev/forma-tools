@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { build } from '../src/build';
 import * as publicApi from '../src/index';
 import type { BuildConfig, AssetManifest } from '../src/types';
@@ -579,6 +579,60 @@ describe('@getforma/build — functional', () => {
     }
   }, 60_000);
 
+  it('warns when serviceWorker is set without app, naming the 3.0.0 change, and is silent with app', async () => {
+    const entryFile = join(srcDir, 'app.ts');
+    writeFileSync(entryFile, 'export const x = 1;\n');
+    const config: BuildConfig = {
+      entryPoints: [{ entry: entryFile, outfile: 'app.js' }],
+      routes: { '/': { js: ['app'], css: [] } },
+      outputDir: outDir,
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const said = () => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('BUILD-802'));
+      for (const serviceWorker of ['precache', 'on-demand'] as const) {
+        warn.mockClear();
+        const { warnings } = await build({ ...config, serviceWorker });
+        const entries = warnings.filter((w) => w.includes('BUILD-802'));
+        expect(entries, serviceWorker).toHaveLength(1);
+        expect(entries[0]).toContain('3.0.0');
+        expect(entries[0]).toContain('sw::ServiceWorker::for_app');
+        expect(said(), 'printed once per build').toHaveLength(1);
+
+        warn.mockClear();
+        const named = await build({ ...config, serviceWorker, app: 'ledger' });
+        expect(named.warnings.filter((w) => w.includes('BUILD-802'))).toEqual([]);
+        expect(said()).toEqual([]);
+      }
+      // No serviceWorker at all: nothing asked for, nothing said.
+      warn.mockClear();
+      const plain = await build(config);
+      expect(plain.warnings.filter((w) => w.includes('BUILD-802'))).toEqual([]);
+      expect(said()).toEqual([]);
+
+      // Watch mode warns too (a CSS-only route, so no esbuild watcher stays alive).
+      const cssFile = join(srcDir, 'app.css');
+      writeFileSync(cssFile, 'main { color: red; }');
+      const watchConfig: BuildConfig = {
+        entryPoints: [],
+        routes: { '/': { js: [], css: ['app'] } },
+        cssEntries: [{ input: cssFile, outfile: 'app.css' }],
+        outputDir: join(tmpRoot, 'watch-dist'),
+        watch: true,
+        serviceWorker: 'on-demand',
+      };
+      warn.mockClear();
+      const watched = await build(watchConfig);
+      expect(watched.warnings.filter((w) => w.includes('BUILD-802'))).toHaveLength(1);
+      expect(said()).toHaveLength(1);
+      warn.mockClear();
+      const watchedNamed = await build({ ...watchConfig, outputDir: join(tmpRoot, 'watch-dist-2'), app: 'ledger' });
+      expect(watchedNamed.warnings.filter((w) => w.includes('BUILD-802'))).toEqual([]);
+      expect(said()).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  }, 60_000);
 
   // ---- Test 12: WASM build through a .cmd-shimmed tool -------------------
   it('runs a .cmd-shimmed wasm-pack (the Windows npm install shape)', async () => {
