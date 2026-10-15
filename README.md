@@ -1,5 +1,12 @@
 # forma-tools
 
+> **Development has moved to [getforma-dev/forma](https://github.com/getforma-dev/forma).**
+> This repository's `main` branch is retired. New work and issues belong in the
+> [merged repository](https://github.com/getforma-dev/forma/tree/main/packages).
+> Maintenance for @getforma/compiler and @getforma/build remains on
+> [`maint/0.3.x`](https://github.com/getforma-dev/forma-tools/tree/maint/0.3.x), with its existing release workflow.
+> Historical source, commits and tags remain available here.
+
 [![CI](https://github.com/getforma-dev/forma-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/getforma-dev/forma-tools/actions/workflows/ci.yml)
 
 Build tooling for [FormaJS](https://github.com/getforma-dev/formajs) — the reactive DOM library with fine-grained signals.
