@@ -1,11 +1,10 @@
 name: Compatibility Check
 
 on:
-  schedule:
-    - cron: '0 0 * * 1'  # Every Monday at midnight UTC
   workflow_dispatch:       # Manual trigger
 
-# A scheduled run that overlaps a manual one buys nothing; keep the newest.
+# The merged repository owns the weekly check; legacy comparisons stay manual.
+# If two manual runs overlap on one ref, keep the newest.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
